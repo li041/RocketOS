@@ -6,7 +6,7 @@
 
 # Building
 TARGET := riscv64gc-unknown-none-elf
-MODE := release
+MODE := debug
 KERNEL_ELF := target/$(TARGET)/$(MODE)/os
 KERNEL_BIN := $(KERNEL_ELF).bin
 FEATURES := default
@@ -33,6 +33,7 @@ endif
 
 # File system
 FS_IMG := ../img/sdcard.img
+
 
 # QEMU
 # 添加一块虚拟硬盘, 命名为`x0`, 将`sdcard.img`挂载到这块硬盘上, VirtIO总线通过MMIO进行控制, 且该块设备在总线中的编号为0
@@ -63,6 +64,19 @@ GDB_ARGS := -ex 'file target/riscv64gc-unknown-none-elf/debug/os' \
     		-ex 'set arch riscv:rv64' \
 			-ex 'target remote localhost:1234'
 
+gdbserver: env build
+	qemu-system-riscv64 $(QEMU_ARGS) -s -S 
+
+gdbclient: 
+	@echo "Using GDB: $(GDB_CLIENT)"
+	$(GDB_CLIENT) $(GDB_ARGS)
+
+env:
+	(rustup target list | grep "riscv64gc-unknown-none-elf (installed)") || rustup target add $(TARGET)
+	cargo install cargo-binutils
+	rustup component add rust-src
+	rustup component add llvm-tools-preview
+
 # # 检查是否存在 riscv64-unknown-elf-gdb
 # ifeq ("$(shell command -v $(GDB_CLIENT))", "")
 #     GDB_CLIENT := gdb-multiarch
@@ -71,25 +85,22 @@ GDB_ARGS := -ex 'file target/riscv64gc-unknown-none-elf/debug/os' \
 #     $(error "No suitable GDB client found. Please install riscv64-unknown-elf-gdb or gdb-multiarch.")
 # endif
 
-build: 
+build-offline: 
 	cargo build $(MODE_ARG) --features $(FEATURES) --offline 
+	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
+
+build:
+	cargo build $(MODE_ARG) --features $(FEATURES) -Zbuild-std
 	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
 	
 run: build 
 	qemu-system-riscv64 $(QEMU_ARGS)
 
-run-test: build
+run-test: make-user move-cargo build-offline move-bin
 	qemu-system-riscv64 $(TEST_QEMU_ARGS)
 
 clean:
 	@cargo clean
-
-gdbserver: env build
-	qemu-system-riscv64 $(QEMU_ARGS) -s -S 
-
-gdbclient: 
-	@echo "Using GDB: $(GDB_CLIENT)"
-	$(GDB_CLIENT) $(GDB_ARGS)
 
 move-cargo:
 	@rm -rf .cargo
@@ -104,6 +115,6 @@ make-user:
 	@cd ../user && make
 	@./build
 
-all: move-cargo make-user build move-bin
+all: move-cargo make-user build-offline move-bin
 
-.PHONY: move-cargo make-user build move-bin
+.PHONY: make-user build 
