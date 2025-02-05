@@ -57,14 +57,6 @@ fn clear_bss() {
 }
 
 #[no_mangle]
-pub extern "C" fn jump_to_app() {
-    unsafe {
-        asm!("la t0, app_1_start");
-        asm!("jalr zero, 0(t0)");
-    }
-}
-
-#[no_mangle]
 pub fn fake_main(hart_id: usize) {
     unsafe {
         asm!("add sp, sp, {}", in(reg) KERNEL_BASE);
@@ -104,9 +96,8 @@ pub fn rust_main(_hart_id: usize) -> ! {
     add_initproc();
     trap::enable_timer_interrupt();
     timer::set_next_trigger();
-    let fs = Ext4FileSystem::open(BLOCK_DEVICE.clone());
-    panic!("shutdown machine");
-    fs::list_apps();
+    // fs::FAT32_list_apps();
+    fs::EXT4_list_apps();
     loader::list_apps();
     // pass block_device_test, 注意实际运行时别调用这个函数, 会覆盖Block内容
     DEBUG_FLAG.store(1, core::sync::atomic::Ordering::SeqCst);

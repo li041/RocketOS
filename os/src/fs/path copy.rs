@@ -59,6 +59,7 @@ impl Path {
         }
     }
 
+    // 返回最后一级的名字
     pub fn get_name(&self) -> String {
         self.inner.last().unwrap_or(&String::new()).to_string()
     }

@@ -7,7 +7,13 @@ pub mod scheduler;
 pub mod switch;
 
 use crate::{
-    fs::{open_file, path::Path, FileOld, OpenFlags, Stdin, Stdout, AT_FDCWD},
+    fs::{
+        file::{File, FileInner},
+        namei::path_lookup,
+        open_file_old,
+        path_old::PathOld,
+        FileOld, OpenFlags, Stdin, Stdout, AT_FDCWD,
+    },
     loader::get_app_data_by_name,
     mutex::SpinNoIrqLock,
     sbi::shutdown,
@@ -66,7 +72,8 @@ impl Task {
                 children: Vec::new(),
                 exit_code: 0,
                 fd_table: Vec::new(),
-                cwd: Path::new_absolute(),
+                cwd_old: PathOld::new_absolute(),
+                cwd: String::from(""),
             }),
         }
     }
@@ -102,7 +109,8 @@ impl Task {
                     // Todo: 2 -> stderr, 没有实现, 暂时指向stdout
                     Some(Arc::new(Stdout)),
                 ],
-                cwd: Path::new_absolute(),
+                cwd_old: PathOld::new_absolute(),
+                cwd: String::from(""),
             }),
         });
         let task_ptr = Arc::as_ptr(&task) as usize;
@@ -151,7 +159,8 @@ impl Task {
                 child_fd_table.push(None);
             }
         }
-        let child_cwd = parent_inner.cwd.clone();
+        let child_cwd = parent_inner.cwd_old.clone();
+        let cwd = parent_inner.cwd.clone();
         // 分配新的tid
         let tid = tid_alloc();
         // Debug:
@@ -168,7 +177,8 @@ impl Task {
                 children: Vec::new(),
                 exit_code: 0,
                 fd_table: child_fd_table,
-                cwd: child_cwd,
+                cwd_old: child_cwd,
+                cwd,
             }),
         });
 
@@ -282,7 +292,8 @@ pub struct TaskInner {
     pub children: Vec<Arc<Task>>,
     pub exit_code: i32,
     pub fd_table: Vec<Option<Arc<dyn FileOld + Send + Sync>>>,
-    pub cwd: Path,
+    pub cwd_old: PathOld,
+    pub cwd: String,
 }
 
 impl TaskInner {
@@ -471,16 +482,16 @@ pub fn sys_clone(
     }
 }
 
-pub fn sys_execve(path: *const u8, args: *const usize, envs: *const usize) -> isize {
+pub fn sys_execve_old(path: *const u8, args: *const usize, envs: *const usize) -> isize {
     // 目前支持在根目录下执行应用程序
-    let path = Path::from(c_str_to_string(path));
+    let path = PathOld::from(c_str_to_string(path));
     // argv[0]是应用程序的名字
     // 后续元素是用户在命令行中输入的参数
     let mut args_vec = extract_cstrings(args);
     let envs_vec = extract_cstrings(envs);
     // 把应用程序的路径放在argv[0]中
     args_vec.insert(0, path.get_name());
-    if let Ok(app_inode) = open_file(AT_FDCWD, &path, OpenFlags::RDONLY) {
+    if let Ok(app_inode) = open_file_old(AT_FDCWD, &path, OpenFlags::RDONLY) {
         let all_data = app_inode.read_all();
         let task = current_task();
         task.exec(all_data.as_slice(), args_vec, envs_vec);
@@ -489,6 +500,38 @@ pub fn sys_execve(path: *const u8, args: *const usize, envs: *const usize) -> is
         // 从内核中加载的应用程序
         if let Some(elf_data) = get_app_data_by_name(&path.get_name()) {
             let task = current_task();
+            task.exec(elf_data, args_vec, envs_vec);
+            0
+        } else {
+            -1
+        }
+    } else {
+        -1
+    }
+}
+
+pub fn sys_execve(path: *const u8, args: *const usize, envs: *const usize) -> isize {
+    let path = c_str_to_string(path);
+    log::error!("path: {}", path);
+    // argv[0]是应用程序的名字
+    // 后续元素是用户在命令行中输入的参数
+    let mut args_vec = extract_cstrings(args);
+    let envs_vec = extract_cstrings(envs);
+    // RDONLY = 0
+    if let Ok(inode) = path_lookup(&path, 0) {
+        // 把应用程序的路径放在argv[0]中
+        args_vec.insert(0, path);
+        let file = File::new(inode);
+        let all_data = file.read_all();
+        let task = current_task();
+        task.exec(all_data.as_slice(), args_vec, envs_vec);
+        0
+    } else if !path.starts_with("/") {
+        // 从内核中加载的应用程序
+        if let Some(elf_data) = get_app_data_by_name(&path) {
+            let task = current_task();
+            // 把应用程序的路径放在argv[0]中
+            args_vec.insert(0, path);
             task.exec(elf_data, args_vec, envs_vec);
             0
         } else {
