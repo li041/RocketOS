@@ -6,14 +6,12 @@ use core::arch::asm;
 
 use super::VirtAddr;
 use crate::{
-    config::{MMAP_MIN_ADDR, PAGE_SIZE_BITS, USER_STACK_SIZE},
-    task::aux::*,
-    utils::ceil_to_page_size,
+    config::{MMAP_MIN_ADDR, PAGE_SIZE_BITS, USER_STACK_SIZE}, fs::namei::path_openat, task::aux::*, utils::ceil_to_page_size
 };
-use alloc::{collections::btree_map::BTreeMap, vec::Vec};
+use alloc::{collections::btree_map::BTreeMap, string::{String, ToString}, vec::Vec, vec};
 use bitflags::bitflags;
 use log::info;
-use riscv::register::satp;
+use riscv::{interrupt, register::satp};
 use xmas_elf::program::Type;
 
 use super::{
@@ -23,11 +21,12 @@ use super::{
 };
 use crate::{
     boards::qemu::{MEMORY_END, MMIO},
-    config::{KERNEL_BASE, PAGE_SIZE},
+    config::{KERNEL_BASE, PAGE_SIZE, DL_INTERP_OFFSET},
     index_list::IndexList,
     mm::{page_table::PageTableEntry, StepByOne},
     mutex::SpinNoIrqLock,
     task::aux::AuxHeader,
+    fs::AT_FDCWD,
 };
 use lazy_static::lazy_static;
 
@@ -104,6 +103,7 @@ impl MemorySet {
             areas: IndexList::new(),
         }
     }
+
     pub fn from_existed_user(user_memory_set: &MemorySet) -> Self {
         let mut memory_set = Self::from_global();
         // 复制堆底和brk, 堆内容会在user_memory_set.areas.iter()中复制
@@ -132,6 +132,7 @@ impl MemorySet {
         }
         memory_set
     }
+
     /// return (user_memory_set, satp, ustack_top, entry_point, aux_vec)
     /// Todo: 动态链接
     pub fn from_elf(elf_data: &[u8]) -> (Self, usize, usize, usize, Vec<AuxHeader>) {
@@ -145,9 +146,15 @@ impl MemorySet {
         let magic = elf_header.pt1.magic;
         assert_eq!(magic, [0x7f, 0x45, 0x4c, 0x46], "invalid elf!");
         let ph_count = elf_header.pt2.ph_count();
-        // Todo: 动态链接, entry_point是动态链接器的入口
-        let entry_point = elf_header.pt2.entry_point() as usize;
+        let mut entry_point = elf_header.pt2.entry_point() as usize;
         let mut aux_vec: Vec<AuxHeader> = Vec::with_capacity(64);
+        let ph_va = elf.program_header(0).unwrap().virtual_addr() as usize;
+
+        // 程序头表的虚拟地址
+        aux_vec.push(AuxHeader {
+            aux_type: AT_PHDR,
+            value: ph_va,
+        });
 
         // 页大小为4K
         aux_vec.push(AuxHeader {
@@ -167,11 +174,18 @@ impl MemorySet {
             value: ph_count as usize,
         });
 
+        // 应用程序入口
+        aux_vec.push(AuxHeader {
+            aux_type: AT_ENTRY,
+            value: entry_point,
+        });
+
         /* 映射程序头 */
         // 程序头表在内存中的起始虚拟地址
         // 程序头表一般是从LOAD段(且是代码段)开始
         // let header_va: Option<usize> = None; // used to build auxv
         let mut max_end_vpn = VirtPageNum(0);
+        let mut need_dl: bool = false;
 
         for i in 0..ph_count {
             // 程序头部的类型是Load, 代码段或数据段
@@ -197,15 +211,84 @@ impl MemorySet {
                 max_end_vpn = map_area.vpn_range.get_end();
 
                 let map_offset = start_va.0 - start_va.floor().0 * PAGE_SIZE;
-                log::info!("map area: [{:#x}, {:#x})", start_va.0, end_va.0);
+                log::info!("[from_elf] app map area: [{:#x}, {:#x})", start_va.0, end_va.0);
                 memory_set.push_with_offset(
                     map_area,
                     Some(&elf_data[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize]),
                     map_offset,
                 );
             }
+            // 判断是否需要动态链接
+            if ph.get_type().unwrap() == Type::Interp {
+                need_dl = true;
+            }
         }
-        // map user stack with U flags
+
+        // 需要动态链接
+        if need_dl {
+            log::info!("[from_elf] need dynamic link");
+            // 获取动态链接器的路径
+            let section = elf.find_section_by_name(".interp").unwrap();
+            let mut interpreter = String::from_utf8(section.raw_data(&elf).to_vec()).unwrap();
+            interpreter = interpreter.strip_suffix("\0").unwrap_or(&interpreter).to_string();
+            log::info!("[from_elf] interpreter path: {}", interpreter);
+
+            let interps = vec![interpreter.clone()];
+
+            for interp in interps.iter() {
+                // 加载动态链接器
+                if let Ok(interpreter) = path_openat(&interp, 0, AT_FDCWD, 0) {
+                    log::info!("[from_elf] interpreter open success");
+                    let interp_data = interpreter.read_all();
+                    let interp_elf = xmas_elf::ElfFile::new(interp_data.as_slice()).unwrap();
+                    let interp_head = interp_elf.header;
+                    let interp_ph_count = interp_head.pt2.ph_count();
+                    let interp_base = interp_head.pt2.entry_point() as usize + DL_INTERP_OFFSET;
+                    for i in 0..interp_ph_count {
+                        // 程序头部的类型是Load, 代码段或数据段
+                        let ph = interp_elf.program_header(i).unwrap();
+                        if ph.get_type().unwrap() == Type::Load {
+                            let start_va: VirtAddr = (ph.virtual_addr() as usize + DL_INTERP_OFFSET).into();
+                            let end_va: VirtAddr = (ph.virtual_addr() as usize + DL_INTERP_OFFSET + ph.mem_size() as usize).into();
+
+                            // 注意用户要带U标志
+                            let mut map_perm = MapPermission::U;
+                            let ph_flags = ph.flags();
+                            if ph_flags.is_read() {
+                                map_perm |= MapPermission::R;
+                            }
+                            if ph_flags.is_write() {
+                                map_perm |= MapPermission::W;
+                            }
+                            if ph_flags.is_execute() {
+                                map_perm |= MapPermission::X;
+                            }
+                            let map_area = MapArea::new_from_va(start_va, end_va, MapType::Framed, map_perm);
+            
+                            let map_offset = start_va.0 - start_va.floor().0 * PAGE_SIZE;
+                            log::info!("[from_elf] interp map area: [{:#x}, {:#x})", start_va.0, end_va.0);
+                            memory_set.push_with_offset(
+                                map_area,
+                                Some(&interp_data[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize]),
+                                map_offset,
+                            );
+                        }
+                    }
+                    aux_vec.push(AuxHeader {
+                        aux_type: AT_BASE,
+                        value: interp_base,
+                    });
+                    entry_point = interp_base;
+                    log::info!("[from_elf] interpreter entry: {:#x}", interp_base);
+                } else {
+                    log::error!("[from_elf] interpreter open failed");
+                }
+            } 
+        } else {
+            log::info!("[from_elf] static link");
+        }
+
+        // 映射用户栈
         let ustack_bottom: usize = (max_end_vpn.0 << PAGE_SIZE_BITS) + PAGE_SIZE; // 一个页用于保护
         let ustack_top: usize = ustack_bottom + USER_STACK_SIZE;
         info!(
@@ -217,6 +300,7 @@ impl MemorySet {
             ustack_top.into(),
             MapPermission::R | MapPermission::W | MapPermission::U,
         );
+
         // 分配用户堆底, 初始不分配堆内存
         let heap_bottom = ustack_top + PAGE_SIZE;
         memory_set.heap_bottom = heap_bottom;
@@ -224,6 +308,7 @@ impl MemorySet {
 
         return (memory_set, satp, ustack_top, entry_point, aux_vec);
     }
+
     pub fn new_kernel() -> Self {
         let mut memory_set = Self::new_bare();
         // map kernel sections
@@ -379,6 +464,10 @@ impl MemorySet {
         let end_vpn = VirtPageNum::from((self.mmap_start + aligned_size) >> PAGE_SIZE_BITS);
         self.mmap_start += aligned_size;
         VPNRange::new(start_vpn, end_vpn)
+    }
+    // 获取当前地址空间token
+    pub fn token(&self) -> usize{
+        self.page_table.token()
     }
 }
 
