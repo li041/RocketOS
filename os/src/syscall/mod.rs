@@ -10,7 +10,7 @@
 //! `sys_` then the name of the syscall. You can find functions like this in
 //! submodules, and you should also implement syscalls this way.
 
-use fs::{
+use fs_old::{
     sys_chdir, sys_close, sys_dup, sys_dup3, sys_fstat, sys_getcwd, sys_getdents64, sys_mkdirat,
     sys_mount, sys_openat, sys_pipe2, sys_read, sys_umount2, sys_unlinkat, sys_write,
 };
@@ -23,6 +23,7 @@ use crate::task::{
 };
 
 mod fs;
+mod fs_old;
 mod mm;
 mod util;
 

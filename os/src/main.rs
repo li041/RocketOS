@@ -57,14 +57,6 @@ fn clear_bss() {
 }
 
 #[no_mangle]
-pub extern "C" fn jump_to_app() {
-    unsafe {
-        asm!("la t0, app_1_start");
-        asm!("jalr zero, 0(t0)");
-    }
-}
-
-#[no_mangle]
 pub fn fake_main(hart_id: usize) {
     unsafe {
         asm!("add sp, sp, {}", in(reg) KERNEL_BASE);

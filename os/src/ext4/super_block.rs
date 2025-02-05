@@ -1,15 +1,23 @@
-use crate::drivers::block;
+use core::fmt::Debug;
+
+use alloc::sync::Arc;
+
+use crate::{
+    drivers::block::{
+        self,
+        block_cache::{self, BlockCache},
+    },
+    fs::{super_block::SuperBlockOp, FSMutex},
+    mutex::SpinNoIrqLock,
+};
 
 use super::block_group;
 
-#[derive(Debug)]
-pub struct Ext4Meta {
+pub struct Ext4SuperBlock {
     /* 基本信息 */
     pub inodes_count: u32,             // inode总数
-    pub free_inodes_count: u32,        // 空闲的inode总数
     pub blocks_count_lo: u32,          // block总数(低32位)
     pub reserved_blocks_count_lo: u32, // 保留的block总数(低32位)
-    pub free_blocks_count_lo: u32,     // 空闲的block总数(低32位)
     pub first_data_block: u32,         // 第一个数据block的编号(总为1)
     pub block_size: u32,               // block大小(bytes)
     pub cluster_size: u32,             // cluster大小(多少个block)
@@ -23,18 +31,44 @@ pub struct Ext4Meta {
 
     // 推理出的字段
     pub block_group_count: u32, // 块组总数
+
+    pub inner: FSMutex<SuperBlockInner>,
 }
 
-impl Ext4Meta {
-    pub fn new(super_block: &Ext4SuperBlock) -> Self {
+// 用于存储会发生变化的数据
+pub struct SuperBlockInner {
+    pub free_inodes_count: u32,    // 空闲的inode总数
+    pub free_blocks_count_lo: u32, // 空闲的block总数(低32位)
+    pub block_cache: Arc<SpinNoIrqLock<BlockCache>>,
+}
+
+impl SuperBlockInner {}
+
+impl SuperBlockInner {
+    pub fn new(
+        free_inodes_count: u32,
+        free_blocks_count_lo: u32,
+        block_cache: Arc<SpinNoIrqLock<BlockCache>>,
+    ) -> Self {
+        Self {
+            free_inodes_count,
+            free_blocks_count_lo,
+            block_cache,
+        }
+    }
+}
+
+impl Ext4SuperBlock {
+    pub fn new(
+        super_block: &Ext4SuperBlockDisk,
+        block_cache: Arc<SpinNoIrqLock<BlockCache>>,
+    ) -> Self {
         let block_group_count = (super_block.blocks_count_lo + super_block.blocks_per_group - 1)
             / super_block.blocks_per_group;
         Self {
             inodes_count: super_block.inodes_count,
-            free_inodes_count: super_block.free_inodes_count,
             blocks_count_lo: super_block.blocks_count_lo,
             reserved_blocks_count_lo: super_block.reserved_blocks_count_lo,
-            free_blocks_count_lo: super_block.free_blocks_count_lo,
             first_data_block: super_block.first_data_block,
             block_size: 1024 << super_block.log_block_size,
             cluster_size: 1 << super_block.log_cluster_size,
@@ -43,15 +77,28 @@ impl Ext4Meta {
             inodes_per_group: super_block.inodes_per_group,
             inode_size: super_block.inode_size,
             block_group_count,
+            inner: FSMutex::new(SuperBlockInner::new(
+                super_block.free_inodes_count,
+                super_block.free_blocks_count_lo,
+                block_cache,
+            )),
         }
     }
 }
 
+impl Debug for Ext4SuperBlockDisk {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Ext4SuperBlockDisk")
+            .field("inodes_per_group", &self.inodes_per_group)
+            .field("blocks_per_group", &self.blocks_per_group)
+            .finish()
+    }
+}
+
 #[repr(C)]
-#[derive(Debug)]
 /// Ext4SuperBlock是用来操作底层磁盘上的super_block的, 位置偏移是对应的
 /// Ext4Meta是在os中使用的, 是Ext4的核心元数据
-pub struct Ext4SuperBlock {
+pub struct Ext4SuperBlockDisk {
     /* 基本信息 */
     pub inodes_count: u32,         // inode总数
     pub blocks_count_lo: u32,      // block总数(低32位)
@@ -200,7 +247,7 @@ pub struct Ext4SuperBlock {
 
 const EXT4_VALID_FS: u16 = 1;
 
-impl Ext4SuperBlock {
+impl Ext4SuperBlockDisk {
     pub fn is_valid(&self) -> bool {
         // ext4 magic number: 0xEF53
         // Todo: 根据校验和, 检查superblock是否有效
@@ -211,5 +258,19 @@ impl Ext4SuperBlock {
         log::error!("state: {:x}, magic: {:x}", state, magic);
 
         self.magic == 0xEF53 && self.state == EXT4_VALID_FS
+    }
+    // 单位为字节
+    pub fn block_size(&self) -> usize {
+        1024 << self.log_block_size
+    }
+    // 单位为块
+    pub fn cluster_size(&self) -> usize {
+        1 << self.log_cluster_size
+    }
+    pub fn block_group_count(&self) -> usize {
+        (((self.blocks_count_lo as u64 | ((self.block_count_hi as u64) << 32))
+            + self.blocks_per_group as u64
+            - 1)
+            / self.blocks_per_group as u64) as usize
     }
 }

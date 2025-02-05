@@ -8,7 +8,7 @@ use log::debug;
 
 use crate::{config::SysResult, timer::TimeSpec};
 
-use super::{path::Path, FSMutex};
+use super::{path_old::PathOld, FSMutex};
 
 #[derive(PartialEq, Debug, Clone, Copy)]
 pub enum InodeMode {
@@ -76,7 +76,7 @@ impl dyn InodeTrait {
 
     pub fn open_path(
         self: &Arc<Self>,
-        path: &Path,
+        path: &PathOld,
         create_file: bool,
         create_dir: bool,
     ) -> SysResult<Arc<dyn InodeTrait>> {
@@ -138,14 +138,14 @@ pub struct InodeMeta {
     /// name which doesn't have slash
     pub name: String,
     /// path
-    pub path: Path,
+    pub path: PathOld,
     pub inner: FSMutex<InodeMetaInner>,
 }
 
 impl InodeMeta {
     pub fn new(
         parent: Option<Arc<dyn InodeTrait>>,
-        path: Path,
+        path: PathOld,
         mode: InodeMode,
         data_len: usize,
     ) -> Self {
@@ -192,7 +192,7 @@ impl InodeMeta {
 #[derive(PartialEq, Debug, Clone)]
 #[allow(unused)]
 pub enum InodeState {
-    /// children not loaded yet
+    /// 对于目录来说, 表示还未加载子节点
     Init,
     /// children loaded, no modification
     Unmodified,

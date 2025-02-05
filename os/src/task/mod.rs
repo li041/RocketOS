@@ -7,7 +7,7 @@ pub mod scheduler;
 pub mod switch;
 
 use crate::{
-    fs::{open_file, path::Path, FileOld, OpenFlags, Stdin, Stdout, AT_FDCWD},
+    fs::{open_file, path_old::PathOld, FileOld, OpenFlags, Stdin, Stdout, AT_FDCWD},
     loader::get_app_data_by_name,
     mutex::SpinNoIrqLock,
     sbi::shutdown,
@@ -66,7 +66,8 @@ impl Task {
                 children: Vec::new(),
                 exit_code: 0,
                 fd_table: Vec::new(),
-                cwd: Path::new_absolute(),
+                cwd_old: PathOld::new_absolute(),
+                cwd: String::from(""),
             }),
         }
     }
@@ -102,7 +103,8 @@ impl Task {
                     // Todo: 2 -> stderr, 没有实现, 暂时指向stdout
                     Some(Arc::new(Stdout)),
                 ],
-                cwd: Path::new_absolute(),
+                cwd_old: PathOld::new_absolute(),
+                cwd: String::from(""),
             }),
         });
         let task_ptr = Arc::as_ptr(&task) as usize;
@@ -151,7 +153,8 @@ impl Task {
                 child_fd_table.push(None);
             }
         }
-        let child_cwd = parent_inner.cwd.clone();
+        let child_cwd = parent_inner.cwd_old.clone();
+        let cwd = parent_inner.cwd.clone();
         // 分配新的tid
         let tid = tid_alloc();
         // Debug:
@@ -168,7 +171,8 @@ impl Task {
                 children: Vec::new(),
                 exit_code: 0,
                 fd_table: child_fd_table,
-                cwd: child_cwd,
+                cwd_old: child_cwd,
+                cwd,
             }),
         });
 
@@ -282,7 +286,8 @@ pub struct TaskInner {
     pub children: Vec<Arc<Task>>,
     pub exit_code: i32,
     pub fd_table: Vec<Option<Arc<dyn FileOld + Send + Sync>>>,
-    pub cwd: Path,
+    pub cwd_old: PathOld,
+    pub cwd: String,
 }
 
 impl TaskInner {
@@ -473,7 +478,7 @@ pub fn sys_clone(
 
 pub fn sys_execve(path: *const u8, args: *const usize, envs: *const usize) -> isize {
     // 目前支持在根目录下执行应用程序
-    let path = Path::from(c_str_to_string(path));
+    let path = PathOld::from(c_str_to_string(path));
     // argv[0]是应用程序的名字
     // 后续元素是用户在命令行中输入的参数
     let mut args_vec = extract_cstrings(args);
