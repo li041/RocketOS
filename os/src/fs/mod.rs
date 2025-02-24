@@ -6,7 +6,9 @@ use dentry::{insert_dentry, Dentry, DENTRY_CACHE};
 use inode::InodeOp;
 use inode_trait::InodeTrait;
 // use alloc::sync::Arc;
-pub use os_inode_old::{create_dir, list_apps, open_file, open_inode, OpenFlags};
+pub use os_inode_old::{
+    create_dir, open_file_old, open_inode, EXT4_list_apps, FAT32_list_apps, OpenFlags,
+};
 pub use stdio::{Stdin, Stdout};
 
 use crate::{
@@ -21,7 +23,6 @@ pub mod file;
 pub mod inode;
 pub mod inode_trait;
 pub mod namei;
-mod os_inode;
 mod os_inode_old;
 pub mod page_cache;
 pub mod path_old;
@@ -75,7 +76,7 @@ lazy_static! {
 lazy_static! {
     // root_inode是一个全局变量, 用于表示根目录
     // 需要加锁, 因为在多线程环境下可能会有多个线程同时访问
-    pub static ref ROOT_INODE: Arc<Ext4Inode> = {
+    pub static ref EXT4_ROOT_INODE: Arc<dyn InodeOp> = {
         let root_inode = Arc::new(Ext4Inode::new_root(
             BLOCK_DEVICE.clone(),
             EXT4FS.clone(),
@@ -90,5 +91,5 @@ lazy_static! {
 }
 
 pub fn get_root_inode() -> Arc<dyn InodeOp> {
-    ROOT_INODE.clone()
+    EXT4_ROOT_INODE.clone()
 }

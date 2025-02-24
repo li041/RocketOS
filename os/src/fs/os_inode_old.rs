@@ -11,7 +11,7 @@ use crate::config::SysResult;
 use crate::drivers::BLOCK_DEVICE;
 use crate::ext4::fs::Ext4FileSystem;
 use crate::fat32::fs::FAT32FileSystem;
-use crate::fs::AT_FDCWD;
+use crate::fs::{AT_FDCWD, EXT4_ROOT_INODE};
 use crate::mutex::SpinNoIrqLock;
 use crate::task::current_task;
 use alloc::sync::Arc;
@@ -127,7 +127,19 @@ lazy_static! {
     };
 }
 
-pub fn list_apps() {
+pub fn EXT4_list_apps() {
+    println!("/**** ROOT APPS ****");
+    let app_names = EXT4_ROOT_INODE.getdents();
+    if app_names.is_empty() {
+        println!("No apps found");
+    }
+    for name in app_names {
+        print!("{}\t", name);
+    }
+    println!("\n**************/");
+}
+
+pub fn FAT32_list_apps() {
     println!("/**** ROOT APPS ****");
     let apps = FAT32_ROOT_INODE.list(FAT32_ROOT_INODE.clone()).unwrap();
     if apps.is_empty() {
@@ -249,7 +261,7 @@ pub fn open_inode(
     }
 }
 
-pub fn open_file(dirfd: isize, path: &PathOld, flags: OpenFlags) -> SysResult<Arc<OSInodeOld>> {
+pub fn open_file_old(dirfd: isize, path: &PathOld, flags: OpenFlags) -> SysResult<Arc<OSInodeOld>> {
     let (readable, writable) = flags.read_write();
     // match open_cwd(dirfd, path).open_path(path, flags.contains(OpenFlags::CREATE), false) {
     //     Ok(inode) => {

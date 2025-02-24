@@ -9,7 +9,7 @@ use crate::{
     config::{PAGE_SIZE, PAGE_SIZE_BITS}, drivers::block::{
         block_cache::get_block_cache,
         block_dev::BlockDevice,
-    }, ext4::{block_op::{Ext4DirContentRO, Ext4DirContentWE}, extent_tree::Ext4ExtentIdx}, fs::{
+    }, ext4::{block_op::{Ext4DirContentRO, Ext4DirContentWE}, extent_tree::Ext4ExtentIdx}, fat32::inode, fs::{
         dentry::Dentry, inode::InodeOp, inode_trait::InodeState, page_cache::AddressSpace, FSMutex
     }, mm::page::Page, mutex::SpinNoIrqLock
 };
@@ -190,7 +190,9 @@ impl Ext4InodeDisk {
         extents
     }
 
-    /// 用于文件的读写, 未命中页缓存时
+    /// 用于文件的读写, 
+    /// 由上层调用者保证: 未命中页缓存时才调用
+    /// logical_start_block: 逻辑块号(例. 文件的前4096字节对于ext4就是逻辑块号0的内容) 
     fn find_extent(
         &self,
         logical_start_block: u32,
@@ -217,7 +219,7 @@ impl Ext4InodeDisk {
                         .read(0, |header: &Ext4ExtentHeader| header.clone());
             } else {
                 // 未找到对应的索引节点
-                return Err("not found");
+                return Err("extent not found");
             }
         }
         // 当前节点是叶子节点
@@ -228,10 +230,16 @@ impl Ext4InodeDisk {
             let start_block = extent.logical_block;
             let end_block = start_block + extent.len as u32;
             if logical_start_block >= start_block && logical_start_block < end_block {
+                log::info!(
+                    "[Ext4InodeDisk::find_extent]: hit\nlogical_start_block: {}, start_block: {}, end_block: {}",
+                    logical_start_block,
+                    start_block,
+                    end_block
+                );
                 return Ok(extent);
             }
         }
-        return Err("not found");
+        return Err("extent not found");
     }
     // 用于目录的inode的`load_children_from_disk`
     fn read_all(&self, block_device: Arc<dyn BlockDevice>, ext4_block_size: usize) -> Vec<Ext4Extent> {
@@ -319,8 +327,6 @@ impl Ext4Inode {
             inner: FSMutex::new(Ext4InodeInner::new(root_inode_disk)),
         }
     }
-    // 读取文件内容, offset是字节偏移, hint_physical_blk_range是None
-    // 也可以用于目录读取, used by `load_children_from_disk`
     // 所有的读/写都是基于Ext4Inode::read/write, 通过页缓存和extent tree来读写
     pub fn read(
         &self,
@@ -329,10 +335,23 @@ impl Ext4Inode {
     ) -> Result<usize, &'static str> {
         // 需要读取的总长度
         let rbuf_len = buf.len();
+        let inode_size = self.inner.lock().inode_on_disk.size_lo as usize;
+
+        // offset超出文件大小, 直接返回0(EOF)
+        if offset >= inode_size {
+            return Ok(0);
+        }
+        log::info!(
+            "[Ext4Inode::read]: offset: {}, inode_size: {}, rbuf_len: {}",
+            offset,
+            inode_size,
+            rbuf_len
+        );
+
         // 先读取页缓存
         let mut current_read = 0;
         let mut page_offset = offset >> PAGE_SIZE_BITS;
-        let mut page_offset_in_page = offset & (PAGE_SIZE_BITS - 1);
+        let mut page_offset_in_page = offset & (PAGE_SIZE - 1);
 
         let mut current_extent: Option<Ext4Extent> = None;
         let mut page: Arc<SpinNoIrqLock<Page>>;
@@ -371,16 +390,26 @@ impl Ext4Inode {
                     self.block_device.clone(),
                 );
             }
-            let copy_len = (rbuf_len - current_read).min(PAGE_SIZE - page_offset_in_page);
+            // 计算本次能读取的长度, 不能超过文件大小
+            let remaining_file_size = inode_size - (current_read + offset);
+            let copy_len = (rbuf_len - current_read).min(PAGE_SIZE - page_offset_in_page).min(remaining_file_size);
             // 先读出一整页, 再从页中拷贝需要的部分到buf中
             page.lock().read(0, |data: &[u8; PAGE_SIZE]| {
                 buf[current_read..current_read + copy_len]
                     .copy_from_slice(&data[page_offset_in_page..page_offset_in_page + copy_len]);
             });
+            // 读取到文件末尾
+            if remaining_file_size < PAGE_SIZE {
+                return Ok(current_read);
+            }
             current_read += copy_len;
             page_offset += 1;
             page_offset_in_page = 0;
         }
+        log::info!(
+            "[Ext4Inode::read]: current_read: {}",
+            current_read
+        );
         Ok(current_read)
     }
     /// Todo:
@@ -390,7 +419,7 @@ impl Ext4Inode {
         // 先读取页缓存
         let mut current_write = 0;
         let mut page_offset = offset >> PAGE_SIZE_BITS;
-        let mut page_offset_in_page = offset & (PAGE_SIZE_BITS - 1);
+        let mut page_offset_in_page = offset & (PAGE_SIZE - 1);
 
         let mut current_extent: Option<Ext4Extent> = None;
         let mut page: Arc<SpinNoIrqLock<Page>>;
@@ -444,6 +473,7 @@ impl Ext4Inode {
     /// 只读取磁盘上的目录项, 不会加载Inode进入内存
     /// 上层调用者应优先使用DentryCache, 只有未命中时才调用
     pub fn lookup(&self, name: &str) -> Option<Ext4DirEntry> {
+        log::info!("[Ext4Inode::lookup] name: {}", name);
         assert!(self.inner.lock().inode_on_disk.is_dir(), "not a directory");
         let dir_size = self.inner.lock().inode_on_disk.get_size();
         assert!(dir_size & (PAGE_SIZE as u64 - 1) == 0, "dir_size is not page aligned");
@@ -453,7 +483,16 @@ impl Ext4Inode {
         let dir_content = Ext4DirContentRO::new(&buf);
         dir_content.find(name)
     }
-    // pub fn mknod(&self, 
+    pub fn getdents(&self) -> Vec<Ext4DirEntry> {
+        assert!(self.inner.lock().inode_on_disk.is_dir(), "not a directory");
+        let dir_size = self.inner.lock().inode_on_disk.get_size();
+        assert!(dir_size & (PAGE_SIZE as u64 - 1) == 0, "dir_size is not page aligned");
+        let mut buf = vec![0u8; dir_size as usize];
+        // buf中是目录的所有内容
+        self.read(0, &mut buf).expect("read failed");
+        let dir_content = Ext4DirContentRO::new(&buf);
+        dir_content.list()
+    }
 }
 
 impl Ext4Inode {
@@ -496,6 +535,7 @@ pub fn load_inode(inode_num: usize, block_device: Arc<dyn BlockDevice>, ext4_fs:
             index * ext4_fs.super_block.inode_size as usize,
             |inode: &Ext4InodeDisk| inode.clone(),
         );
+    log::info!("[load_inode] inode_num: {}, size: {}", inode_num, inode_on_disk.get_size());
     Arc::new(
         Ext4Inode {
             ext4_fs: Arc::downgrade(&ext4_fs),

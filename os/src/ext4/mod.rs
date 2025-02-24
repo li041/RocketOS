@@ -1,4 +1,7 @@
-use alloc::{string::ToString, sync::Arc};
+use alloc::{
+    string::{String, ToString},
+    sync::Arc,
+};
 use dentry::EXT4_DT_REG;
 use inode::{load_inode, Ext4Inode, EXT4_EXTENTS_FL};
 
@@ -7,7 +10,7 @@ use crate::fs::{
     inode::InodeOp,
 };
 
-use alloc::vec;
+use alloc::vec::Vec;
 
 mod block_group;
 pub mod block_op;
@@ -30,12 +33,15 @@ impl InodeOp for Ext4Inode {
     // name在parent_entry下的命名空间下, 不是绝对路径, 例如`/a/b/c`中的`c`, parent_entry是`/a/b`
     // 对于之前未加载的inode: 1. 加载inode 2. 关联到Dentry 3. 建立dentry的父子关系
     fn lookup<'a>(&'a self, name: &str, parent_entry: Arc<Dentry>) -> Arc<Dentry> {
+        log::info!("lookup: {}", name);
+        let mut dentry = Dentry::negative(name.to_string(), Some(parent_entry.clone()));
         if let Some(child) = parent_entry.inner.lock().children.get(name) {
             // 先查找parent_entry的child
             return child.clone();
         } else {
             // 从目录中查找
             if let Some(ext4_dentry) = self.lookup(name) {
+                log::info!("lookup: ext4_dentry: {:?}", ext4_dentry);
                 let inode_num = ext4_dentry.inode_num as usize;
                 // 1.从磁盘加载inode
                 let inode = load_inode(
@@ -44,30 +50,25 @@ impl InodeOp for Ext4Inode {
                     self.ext4_fs.upgrade().unwrap().clone(),
                 );
                 // 2. 关联到Dentry
-                let dentry = Dentry::new(
+                dentry = Dentry::new(
                     name.to_string(),
                     inode_num,
                     Some(parent_entry.clone()),
                     inode,
                 );
-                // 3. 建立dentry的父子关系
-                parent_entry
-                    .inner
-                    .lock()
-                    .children
-                    .insert(name.to_string(), dentry.clone());
-                dentry
-            } else {
-                // 不存在, 返回负目录项
-                let dentry = Dentry::negative(name.to_string(), Some(parent_entry.clone()));
-                parent_entry
-                    .inner
-                    .lock()
-                    .children
-                    .insert(name.to_string(), dentry.clone());
-                dentry
             }
+            // } else {
+            // 不存在, 返回负目录项
+            // }
         }
+        // 注意: 这里建立父子关系的dentry可能是负目录项
+        // 3. 建立dentry的父子关系
+        parent_entry
+            .inner
+            .lock()
+            .children
+            .insert(name.to_string(), dentry.clone());
+        dentry
     }
     // Todo: 增加日志
     // 1. 创建新的inode, 关联到dentry
@@ -93,5 +94,8 @@ impl InodeOp for Ext4Inode {
         self.add_entry(dentry.clone(), new_inode_num as u32, EXT4_DT_REG);
         // 关联到dentry
         dentry.inner.lock().inode = Some(new_inode);
+    }
+    fn getdents(&self) -> Vec<String> {
+        self.getdents().iter().map(|s| s.get_name()).collect()
     }
 }

@@ -96,9 +96,8 @@ pub fn rust_main(_hart_id: usize) -> ! {
     add_initproc();
     trap::enable_timer_interrupt();
     timer::set_next_trigger();
-    let fs = Ext4FileSystem::open(BLOCK_DEVICE.clone());
-    panic!("shutdown machine");
-    fs::list_apps();
+    // fs::FAT32_list_apps();
+    fs::EXT4_list_apps();
     loader::list_apps();
     // pass block_device_test, 注意实际运行时别调用这个函数, 会覆盖Block内容
     DEBUG_FLAG.store(1, core::sync::atomic::Ordering::SeqCst);

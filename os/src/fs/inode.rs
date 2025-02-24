@@ -33,4 +33,7 @@ pub trait InodeOp: Send + Sync {
     //      1. 创建的文件名在目录中不存在
     //      2. Dentry的inode字段为None(负目录项)
     fn create<'a>(&'a self, negative_dentry: Arc<Dentry>, mode: u16);
+
+    // 上层readdir调用
+    fn getdents(&self) -> Vec<String>;
 }

@@ -7,7 +7,13 @@ pub mod scheduler;
 pub mod switch;
 
 use crate::{
-    fs::{open_file, path_old::PathOld, FileOld, OpenFlags, Stdin, Stdout, AT_FDCWD},
+    fs::{
+        file::{File, FileInner},
+        namei::path_lookup,
+        open_file_old,
+        path_old::PathOld,
+        FileOld, OpenFlags, Stdin, Stdout, AT_FDCWD,
+    },
     loader::get_app_data_by_name,
     mutex::SpinNoIrqLock,
     sbi::shutdown,
@@ -476,7 +482,7 @@ pub fn sys_clone(
     }
 }
 
-pub fn sys_execve(path: *const u8, args: *const usize, envs: *const usize) -> isize {
+pub fn sys_execve_old(path: *const u8, args: *const usize, envs: *const usize) -> isize {
     // 目前支持在根目录下执行应用程序
     let path = PathOld::from(c_str_to_string(path));
     // argv[0]是应用程序的名字
@@ -485,7 +491,7 @@ pub fn sys_execve(path: *const u8, args: *const usize, envs: *const usize) -> is
     let envs_vec = extract_cstrings(envs);
     // 把应用程序的路径放在argv[0]中
     args_vec.insert(0, path.get_name());
-    if let Ok(app_inode) = open_file(AT_FDCWD, &path, OpenFlags::RDONLY) {
+    if let Ok(app_inode) = open_file_old(AT_FDCWD, &path, OpenFlags::RDONLY) {
         let all_data = app_inode.read_all();
         let task = current_task();
         task.exec(all_data.as_slice(), args_vec, envs_vec);
@@ -494,6 +500,38 @@ pub fn sys_execve(path: *const u8, args: *const usize, envs: *const usize) -> is
         // 从内核中加载的应用程序
         if let Some(elf_data) = get_app_data_by_name(&path.get_name()) {
             let task = current_task();
+            task.exec(elf_data, args_vec, envs_vec);
+            0
+        } else {
+            -1
+        }
+    } else {
+        -1
+    }
+}
+
+pub fn sys_execve(path: *const u8, args: *const usize, envs: *const usize) -> isize {
+    let path = c_str_to_string(path);
+    log::error!("path: {}", path);
+    // argv[0]是应用程序的名字
+    // 后续元素是用户在命令行中输入的参数
+    let mut args_vec = extract_cstrings(args);
+    let envs_vec = extract_cstrings(envs);
+    // RDONLY = 0
+    if let Ok(inode) = path_lookup(&path, 0) {
+        // 把应用程序的路径放在argv[0]中
+        args_vec.insert(0, path);
+        let file = File::new(inode);
+        let all_data = file.read_all();
+        let task = current_task();
+        task.exec(all_data.as_slice(), args_vec, envs_vec);
+        0
+    } else if !path.starts_with("/") {
+        // 从内核中加载的应用程序
+        if let Some(elf_data) = get_app_data_by_name(&path) {
+            let task = current_task();
+            // 把应用程序的路径放在argv[0]中
+            args_vec.insert(0, path);
             task.exec(elf_data, args_vec, envs_vec);
             0
         } else {

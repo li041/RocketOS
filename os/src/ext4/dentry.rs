@@ -42,6 +42,10 @@ impl Ext4DirEntry {
         buf[7] = self.file_type;
         buf[8..(8 + self.name_len as usize)].copy_from_slice(&self.name[..]);
     }
+    // Convert the name field to a String
+    pub fn get_name(&self) -> String {
+        String::from_utf8(self.name.clone()).unwrap()
+    }
 }
 
 impl TryFrom<&[u8]> for Ext4DirEntry {

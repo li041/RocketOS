@@ -9,7 +9,7 @@ use lazy_static::lazy_static;
 
 use crate::{ext4::dentry::Ext4DirEntry, mutex::SpinNoIrqLock};
 
-use super::{inode::InodeOp, os_inode::OSInode};
+use super::inode::InodeOp;
 
 // VFS层的统一目录项结构
 #[repr(C)]
@@ -66,6 +66,11 @@ impl Dentry {
             inner: SpinNoIrqLock::new(DentryInner::negative(parent)),
         })
     }
+    // 上层调用者保证由负目录项调用
+    pub fn associate(&mut self, inode_num: usize, inode: Arc<dyn InodeOp>) {
+        self.inner.lock().inode = Some(inode);
+        self.inode_num = inode_num;
+    }
     pub fn is_negative(&self) -> bool {
         self.inner.lock().inode.is_none()
     }
@@ -74,6 +79,18 @@ impl Dentry {
             .split('/')
             .last()
             .unwrap_or(&self.absolute_path)
+    }
+    // 上层调用者保证: 负目录项不能调用该函数
+    pub fn get_inode(&self) -> Arc<dyn InodeOp> {
+        self.inner.lock().inode.clone().unwrap()
+    }
+    pub fn get_parent(&self) -> Arc<Dentry> {
+        self.inner
+            .lock()
+            .parent
+            .clone()
+            .map(|p| p.upgrade().unwrap())
+            .unwrap()
     }
 }
 

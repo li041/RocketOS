@@ -1,7 +1,7 @@
 //! 用于处理EXT4文件系统的块操作, 如读取目录项, 操作位图等
 use core::ptr;
 
-use alloc::string::String;
+use alloc::{string::String, vec::Vec};
 
 use crate::{
     drivers::BLOCK_DEVICE,
@@ -37,7 +37,8 @@ impl<'a> Ext4DirContentRO<'a> {
     // 遍历目录项
     // 在文件系统的一个块中, 目录项是连续存储的, 每个目录项的长度不一定相同, 根据目录项的rec_len字段来判断, 到达ext4块尾部即为结束
     // 这个由调用者保证, 传入的buf是目录所有内容
-    pub fn list(&self) {
+    pub fn list(&self) -> Vec<Ext4DirEntry> {
+        let mut entries = Vec::new();
         let mut rec_len_total = 0;
         let content_len = self.content.len();
         log::info!("[Ext4DirContent::list] content_len: {}", content_len);
@@ -52,8 +53,10 @@ impl<'a> Ext4DirContentRO<'a> {
             )
             .expect("DirEntry::try_from failed");
             log::info!("dentry: {:?}", dentry);
+            entries.push(dentry);
             rec_len_total += rec_len as usize;
         }
+        entries
     }
     pub fn find(&self, name: &str) -> Option<Ext4DirEntry> {
         let mut rec_len_total = 0;

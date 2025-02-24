@@ -2,8 +2,8 @@ use alloc::string::ToString;
 
 use crate::{
     fs::{
-        create_dir, inode_trait::InodeMode, open_file, open_inode, path_old::PathOld, pipe::Pipe,
-        OpenFlags, AT_FDCWD, AT_REMOVEDIR,
+        create_dir, inode_trait::InodeMode, open_file_old, open_inode, path_old::PathOld,
+        pipe::Pipe, OpenFlags, AT_FDCWD, AT_REMOVEDIR,
     },
     mm::copy_to_user,
     task::current_task,
@@ -83,7 +83,7 @@ pub fn sys_mkdirat(dirfd: isize, pathname: *const u8, _mode: usize) -> isize {
 pub fn sys_chdir(pathname: *const u8) -> isize {
     let path = PathOld::from(c_str_to_string(pathname));
     // simply examine validity of the path
-    match open_file(AT_FDCWD, &path, OpenFlags::empty()) {
+    match open_file_old(AT_FDCWD, &path, OpenFlags::empty()) {
         Ok(inode) => {
             current_task().inner.lock().cwd_old = inode.get_path();
             0
@@ -115,7 +115,7 @@ pub fn sys_openat(dirfd: isize, pathname: *const u8, flags: u32, _mode: usize) -
     );
     let task = current_task();
     let path = PathOld::from(c_str_to_string(pathname));
-    if let Ok(inode) = open_file(dirfd, &path, OpenFlags::from_bits(flags).unwrap()) {
+    if let Ok(inode) = open_file_old(dirfd, &path, OpenFlags::from_bits(flags).unwrap()) {
         let mut inner = task.inner.lock();
         let fd = inner.alloc_fd();
         inner.fd_table[fd] = Some(inode);
