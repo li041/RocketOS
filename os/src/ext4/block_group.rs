@@ -5,7 +5,7 @@ use crate::{
     mutex::SpinNoIrqLock,
 };
 
-use super::block_op::Ext4Bitmap;
+use super::{block_op::Ext4Bitmap, inode};
 
 #[derive(Debug, Clone)]
 #[repr(C)]
@@ -99,29 +99,65 @@ impl GroupDesc {
     /// 在块组的inode_bitmap中分配一个inode
     /// 注意这个inode_num是相对于块组的inode_table的inode_num
     /// 调用者需要将inode_num转换为全局的inode_num(加上inodes_per_group * group_num)
+    /// 认为inode_bitmap的大小不会超过一个块大小, 通过assert检测
     pub fn alloc_inode(
         &self,
         block_device: Arc<dyn BlockDevice>,
         ext4_block_size: usize,
+        inode_bitmap_size: usize,
         is_dir: bool,
     ) -> Option<usize> {
+        assert!(inode_bitmap_size < ext4_block_size);
         let mut inner = self.inner.lock();
         // 检查当前块组是否还有空闲的inode
         if inner.free_inodes_count > 0 {
-            // 设置inode位图中的inode为已分配
-            // 修改bg的used_dirs_count, free_inodes_count, checksum, unused_inodes_count
-            let inode_num = Ext4Bitmap::new(
-                get_block_cache(self.inode_bitmap as usize, block_device, ext4_block_size)
-                    .lock()
-                    .get_mut(0),
-            )
-            .alloc()?;
-            inner.free_inodes_count -= 1;
-            // Todo: 设置块组的checksum
-            if is_dir {
-                inner.used_dirs_count += 1;
+            // 注意inode_bitmap的size = inodes_per_group / 8 byte
+            let num_blocks = (inode_bitmap_size + ext4_block_size - 1) / ext4_block_size;
+            for i in 0..num_blocks {
+                // 设置inode位图中的inode为已分配
+                // 修改bg的used_dirs_count, free_inodes_count, checksum, unused_inodes_count
+                let block_id = self.inode_bitmap as usize + i;
+                if let Some(inode_num) = Ext4Bitmap::new(
+                    get_block_cache(block_id, block_device.clone(), ext4_block_size)
+                        .lock()
+                        .get_mut(0),
+                )
+                .alloc(inode_bitmap_size)
+                {
+                    inner.free_inodes_count -= 1;
+                    // TODO: 更新块组的 checksum
+                    if is_dir {
+                        inner.used_dirs_count += 1;
+                    }
+                    return Some(inode_num + (i * ext4_block_size * 8));
+                }
             }
-            return Some(inode_num);
+        }
+        return None;
+    }
+    /// 上层调用者需要转换为文件系统的全局块号(block_num + block_group_num * blocks_per_group)
+    pub fn alloc_block(
+        &self,
+        block_device: Arc<dyn BlockDevice>,
+        ext4_block_size: usize,
+        block_bitmap_size: usize,
+    ) -> Option<usize> {
+        let mut inner = self.inner.lock();
+        if inner.free_blocks_count > 0 {
+            let num_blocks = block_bitmap_size / ext4_block_size;
+            for i in 0..num_blocks {
+                let block_id = self.block_bitmap as usize + i;
+                if let Some(block_num) = Ext4Bitmap::new(
+                    get_block_cache(block_id, block_device.clone(), ext4_block_size)
+                        .lock()
+                        .get_mut(0),
+                )
+                .alloc(block_bitmap_size)
+                {
+                    inner.free_blocks_count -= 1;
+                    return Some(block_num + (i * ext4_block_size * 8));
+                }
+            }
         }
         return None;
     }

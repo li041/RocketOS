@@ -9,9 +9,6 @@ use crate::{
     mm::page::Page,
     mutex::SpinNoIrqLock,
 };
-
-use super::inode_trait::InodeTrait;
-
 // Todo:
 // 管理页缓存, 注意页缓存只存储文件的数据, 不存储元数据
 pub struct AddressSpace {

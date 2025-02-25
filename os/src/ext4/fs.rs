@@ -6,12 +6,9 @@ use crate::{
     ext4::{
         block_group::{self, Ext4GroupDescDisk, GroupDesc},
         block_op::Ext4DirContentRO,
-        dentry,
         inode::Ext4Inode,
         super_block::Ext4SuperBlock,
     },
-    fs::dentry::DentryCache,
-    mutex::SpinNoIrqLock,
 };
 
 // 减小锁粒度
@@ -96,18 +93,44 @@ impl Ext4FileSystem {
     // 先使用最简单的first fit算法
     // Todo: 目录分离, 文件与父目录就近分配
     pub fn alloc_inode(&self, block_device: Arc<dyn BlockDevice>, is_dir: bool) -> usize {
+        // Todo: 没有考虑灵活块组的支持
+        let inode_bitmap_size = self.super_block.inodes_per_group as usize / 8;
+        log::info!(
+            "inode_bitmap_size: {}, inodes_per_group: {}",
+            inode_bitmap_size,
+            self.super_block.inodes_per_group
+        );
         // 循环遍历块组
         for (i, group) in self.block_groups.iter().enumerate() {
-            if let Some(inode_num) =
-                group.alloc_inode(block_device.clone(), self.block_size(), is_dir)
-            {
+            if let Some(local_inode_num) = group.alloc_inode(
+                block_device.clone(),
+                self.block_size(),
+                inode_bitmap_size,
+                is_dir,
+            ) {
                 // 修改super_block的free_inodes_count
                 self.super_block.inner.lock().free_inodes_count -= 1;
-                let global_inode_num = inode_num + self.super_block.inodes_per_group as usize * i;
+                let global_inode_num =
+                    local_inode_num + self.super_block.inodes_per_group as usize * i;
                 return global_inode_num;
             }
         }
         panic!("No available inode!");
+    }
+    pub fn alloc_block(&self, block_device: Arc<dyn BlockDevice>) -> usize {
+        let block_bitmap_size = self.super_block.blocks_per_group as usize / 8;
+        for (i, group) in self.block_groups.iter().enumerate() {
+            if let Some(local_block_num) =
+                group.alloc_block(block_device.clone(), self.block_size(), block_bitmap_size)
+            {
+                // 修改super_block的free_blocks_count
+                self.super_block.inner.lock().free_blocks_count -= 1;
+                let global_block_num =
+                    local_block_num + self.super_block.blocks_per_group as usize * i;
+                return global_block_num;
+            }
+        }
+        panic!("No available block!");
     }
 }
 

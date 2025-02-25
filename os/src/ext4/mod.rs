@@ -1,14 +1,17 @@
+use crate::{
+    drivers::block::block_cache::get_block_cache,
+    fs::{dentry::Dentry, inode::InodeOp},
+};
+use alloc::vec;
 use alloc::{
+    format,
     string::{String, ToString},
     sync::Arc,
 };
-use dentry::EXT4_DT_REG;
-use inode::{load_inode, Ext4Inode, EXT4_EXTENTS_FL};
-
-use crate::fs::{
-    dentry::{lookup_dcache, Dentry},
-    inode::InodeOp,
-};
+use block_op::Ext4DirContentWE;
+use dentry::EXT4_DT_DIR;
+use fs::EXT4_BLOCK_SIZE;
+use inode::{load_inode, write_inode, Ext4Inode, EXT4_EXTENTS_FL, S_IALLUGO, S_IFDIR, S_IFREG};
 
 use alloc::vec::Vec;
 
@@ -34,14 +37,21 @@ impl InodeOp for Ext4Inode {
     // 对于之前未加载的inode: 1. 加载inode 2. 关联到Dentry 3. 建立dentry的父子关系
     fn lookup<'a>(&'a self, name: &str, parent_entry: Arc<Dentry>) -> Arc<Dentry> {
         log::info!("lookup: {}", name);
-        let mut dentry = Dentry::negative(name.to_string(), Some(parent_entry.clone()));
+        // 注意: 这里应该使用绝对路径
+        // let mut dentry = Dentry::negative(absolute_path, Some(parent_entry.clone()));
+        let mut dentry: Arc<Dentry> = Dentry::negative(
+            format!("{}/{}", parent_entry.absolute_path, name),
+            Some(parent_entry.clone()),
+        );
         if let Some(child) = parent_entry.inner.lock().children.get(name) {
             // 先查找parent_entry的child
+            assert!(child.absolute_path == format!("{}/{}", parent_entry.absolute_path, name));
             return child.clone();
         } else {
             // 从目录中查找
             if let Some(ext4_dentry) = self.lookup(name) {
-                log::info!("lookup: ext4_dentry: {:?}", ext4_dentry);
+                log::info!("[InodeOp::lookup] ext4_dentry: {:?}", ext4_dentry);
+                let absolute_path = format!("{}/{}", parent_entry.absolute_path, name);
                 let inode_num = ext4_dentry.inode_num as usize;
                 // 1.从磁盘加载inode
                 let inode = load_inode(
@@ -50,12 +60,7 @@ impl InodeOp for Ext4Inode {
                     self.ext4_fs.upgrade().unwrap().clone(),
                 );
                 // 2. 关联到Dentry
-                dentry = Dentry::new(
-                    name.to_string(),
-                    inode_num,
-                    Some(parent_entry.clone()),
-                    inode,
-                );
+                dentry = Dentry::new(absolute_path, inode_num, Some(parent_entry.clone()), inode);
             }
             // } else {
             // 不存在, 返回负目录项
@@ -74,6 +79,7 @@ impl InodeOp for Ext4Inode {
     // 1. 创建新的inode, 关联到dentry
     // 2. 更新父目录的数据块
     // 上层调用者保证: dentry是负目录项, 且父子关系已经建立
+    /// 用于创建常规文件(S_IFREG)
     fn create<'a>(&'a self, dentry: Arc<Dentry>, mode: u16) {
         // dentry应该是负目录项
         assert!(dentry.is_negative());
@@ -85,17 +91,97 @@ impl InodeOp for Ext4Inode {
             .alloc_inode(self.block_device.clone(), false);
         // 初始化新的inode结构
         let new_inode = Ext4Inode::new(
-            mode | 0o777,
+            (mode & S_IALLUGO) as u16 | S_IFREG,
             EXT4_EXTENTS_FL,
             self.ext4_fs.clone(),
             self.block_device.clone(),
         );
+        // 将inode写入block_cache
+        write_inode(&new_inode, new_inode_num, self.block_device.clone());
         // 在父目录中添加对应项
-        self.add_entry(dentry.clone(), new_inode_num as u32, EXT4_DT_REG);
+        self.add_entry(dentry.clone(), new_inode_num as u32, EXT4_DT_DIR);
+        // 关联到dentry
+        dentry.inner.lock().inode = Some(new_inode);
+    }
+    fn tmpfile<'a>(&'a self, mode: u16) -> Arc<Ext4Inode> {
+        // 创建临时文件, 用于临时文件系统, inode没有对应的路径, 不会分配目录项
+        // 临时文件没有对应的目录项, 只能通过fd进行访问
+        // 与create的唯一区别是: 1. 没有对应的目录项
+        // 1. 分配inode_num
+        let new_inode_num = self
+            .ext4_fs
+            .upgrade()
+            .unwrap()
+            .alloc_inode(self.block_device.clone(), false);
+        // 2. 初始化新的inode结构
+        let new_inode = Ext4Inode::new(
+            (mode & S_IALLUGO) as u16 | S_IFREG,
+            EXT4_EXTENTS_FL,
+            self.ext4_fs.clone(),
+            self.block_device.clone(),
+        );
+        // 3. 将inode写入block_cache
+        write_inode(&new_inode, new_inode_num, self.block_device.clone());
+        new_inode
+    }
+    fn mkdir<'a>(&'a self, parent_inode_num: u32, dentry: Arc<Dentry>, mode: u16) {
+        // dentry应该是负目录项
+        assert!(dentry.is_negative());
+        assert!(mode & S_IFDIR != 0);
+        let ext4_block_size = self.get_block_size();
+        // 分配inode_num
+        let new_inode_num = self
+            .ext4_fs
+            .upgrade()
+            .unwrap()
+            .alloc_inode(self.block_device.clone(), true);
+        // 初始化新的inode结构
+        let new_inode = Ext4Inode::new(
+            (mode & S_IALLUGO) as u16,
+            EXT4_EXTENTS_FL,
+            self.ext4_fs.clone(),
+            self.block_device.clone(),
+        );
+        // 分配数据块
+        let new_block_num = self
+            .ext4_fs
+            .upgrade()
+            .unwrap()
+            .alloc_block(self.block_device.clone());
+        // 初始化目录的第一个块, 添加`.`, `..`
+        let mut buffer = vec![0u8; ext4_block_size];
+        Ext4DirContentWE::new(&mut buffer).init_dot_dotdot(
+            parent_inode_num,
+            new_inode_num as u32,
+            ext4_block_size,
+        );
+        // 将数据块写回block cache
+        get_block_cache(new_block_num, self.block_device.clone(), ext4_block_size)
+            .lock()
+            .modify(0, |data: &mut [u8; EXT4_BLOCK_SIZE]| {
+                data.copy_from_slice(&buffer);
+            });
+        // 更新inode的extent tree
+        new_inode
+            .update_extent(
+                0,
+                new_block_num as u64,
+                1,
+                self.block_device.clone(),
+                ext4_block_size,
+            )
+            .expect("[Ext4Inode::mkdir]");
+        // 将inode写入block_cache
+        write_inode(&new_inode, new_inode_num, self.block_device.clone());
+        // 在父目录中添加对应项
+        self.add_entry(dentry.clone(), new_inode_num as u32, EXT4_DT_DIR);
         // 关联到dentry
         dentry.inner.lock().inode = Some(new_inode);
     }
     fn getdents(&self) -> Vec<String> {
         self.getdents().iter().map(|s| s.get_name()).collect()
+    }
+    fn can_lookup(&self) -> bool {
+        self.can_lookup()
     }
 }

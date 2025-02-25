@@ -47,30 +47,37 @@ impl DentryInner {
 }
 
 impl Dentry {
+    pub fn zero_init() -> Self {
+        Self {
+            absolute_path: String::new(),
+            inode_num: 0,
+            inner: SpinNoIrqLock::new(DentryInner::negative(None)),
+        }
+    }
     pub fn new(
-        name: String,
+        absolute_path: String,
         inode_num: usize,
         parent: Option<Arc<Dentry>>,
         inode: Arc<dyn InodeOp>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            absolute_path: name,
+            absolute_path,
             inode_num,
             inner: SpinNoIrqLock::new(DentryInner::new(parent, inode)),
         })
     }
-    pub fn negative(name: String, parent: Option<Arc<Dentry>>) -> Arc<Self> {
+    pub fn negative(absolute_path: String, parent: Option<Arc<Dentry>>) -> Arc<Self> {
         Arc::new(Self {
-            absolute_path: name,
+            absolute_path,
             inode_num: 0,
             inner: SpinNoIrqLock::new(DentryInner::negative(parent)),
         })
     }
-    // 上层调用者保证由负目录项调用
-    pub fn associate(&mut self, inode_num: usize, inode: Arc<dyn InodeOp>) {
-        self.inner.lock().inode = Some(inode);
-        self.inode_num = inode_num;
-    }
+    // // 上层调用者保证由负目录项调用
+    // pub fn associate(&mut self, inode_num: usize, inode: Arc<dyn InodeOp>) {
+    //     self.inner.lock().inode = Some(inode);
+    //     self.inode_num = inode_num;
+    // }
     pub fn is_negative(&self) -> bool {
         self.inner.lock().inode.is_none()
     }

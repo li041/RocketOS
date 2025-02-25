@@ -10,20 +10,16 @@
 //! `sys_` then the name of the syscall. You can find functions like this in
 //! submodules, and you should also implement syscalls this way.
 
-use fs_old::{
-    sys_chdir, sys_close, sys_dup, sys_dup3, sys_fstat, sys_getcwd, sys_getdents64, sys_mkdirat,
-    sys_mount, sys_openat, sys_pipe2, sys_read, sys_umount2, sys_unlinkat, sys_write,
-};
+use fs::{sys_close, sys_getcwd, sys_mkdirat, sys_openat, sys_pipe2, sys_read, sys_write};
 use mm::{sys_brk, sys_mmap, sys_munmap};
 use util::{sys_times, sys_uname};
 
 use crate::task::{
-    sys_clone, sys_execve, sys_execve_old, sys_exit, sys_get_time, sys_getpid, sys_getppid,
-    sys_nanosleep, sys_waitpid, sys_yield,
+    sys_clone, sys_execve, sys_exit, sys_get_time, sys_getpid, sys_getppid, sys_nanosleep,
+    sys_waitpid, sys_yield,
 };
 
 mod fs;
-mod fs_old;
 mod mm;
 mod util;
 
@@ -78,20 +74,20 @@ pub fn syscall(
     // }
     match syscall_id {
         SYSCALL_GETCWD => sys_getcwd(a0 as *mut u8, a1),
-        SYSCALL_DUP => sys_dup(a0),
-        SYSCALL_DUP3 => sys_dup3(a0, a1),
+        // SYSCALL_DUP => sys_dup(a0),
+        // SYSCALL_DUP3 => sys_dup3(a0, a1),
         SYSCALL_MKDIRAT => sys_mkdirat(a0 as isize, a1 as *const u8, a2),
-        SYSCALL_UNLINKAT => sys_unlinkat(a0 as isize, a1 as *const u8, a2 as u32),
-        SYSCALL_UMOUNT2 => sys_umount2(),
-        SYSCALL_MOUNT => sys_mount(),
-        SYSCALL_CHDIR => sys_chdir(a0 as *const u8),
-        SYSCALL_OPENAT => sys_openat(a0 as isize, a1 as *const u8, a2 as u32, a3),
+        // SYSCALL_UNLINKAT => sys_unlinkat(a0 as isize, a1 as *const u8, a2 as u32),
+        // SYSCALL_UMOUNT2 => sys_umount2(),
+        // SYSCALL_MOUNT => sys_mount(),
+        // SYSCALL_CHDIR => sys_chdir(a0 as *const u8),
+        SYSCALL_OPENAT => sys_openat(a0 as i32, a1 as *const u8, a2, a3),
         SYSCALL_CLOSE => sys_close(a0),
         SYSCALL_PIPE2 => sys_pipe2(a0 as *mut u8),
-        SYSCALL_GETDENTS64 => sys_getdents64(a0, a1 as *mut u8, a2),
+        // SYSCALL_GETDENTS64 => sys_getdents64(a0, a1 as *mut u8, a2),
         SYSCALL_READ => sys_read(a0, a1 as *mut u8, a2),
         SYSCALL_WRITE => sys_write(a0, a1 as *const u8, a2),
-        SYS_FSTAT => sys_fstat(a0, a1 as *mut u8),
+        // SYS_FSTAT => sys_fstat(a0, a1 as *mut u8),
         SYSCALL_EXIT => sys_exit(a0 as i32),
         SYSCALL_NANOSLEEP => sys_nanosleep(a0),
         SYSCALL_YIELD => sys_yield(),
@@ -106,7 +102,6 @@ pub fn syscall(
         // SYSCALL_EXEC => sys_execve_old(a0 as *mut u8, a1 as *const usize, a2 as *const usize),
         SYSCALL_EXEC => sys_execve(a0 as *mut u8, a1 as *const usize, a2 as *const usize),
         SYSCALL_MMAP => sys_mmap(a0, a1, a2, a3, a4 as i32, a5),
-        // SYSCALL_WAIT4 => sys_waitpid(a0 as isize, a1 as *mut i32),
         SYSCALL_WAIT4 => sys_waitpid(a0 as isize, a1, a2 as i32),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }

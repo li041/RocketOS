@@ -7,7 +7,7 @@ use crate::{
         self,
         block_cache::{self, BlockCache},
     },
-    fs::{super_block::SuperBlockOp, FSMutex},
+    fs::{super_block::FileSystemOp, FSMutex},
     mutex::SpinNoIrqLock,
 };
 
@@ -37,8 +37,8 @@ pub struct Ext4SuperBlock {
 
 // 用于存储会发生变化的数据
 pub struct SuperBlockInner {
-    pub free_inodes_count: u32,    // 空闲的inode总数
-    pub free_blocks_count_lo: u32, // 空闲的block总数(低32位)
+    pub free_inodes_count: u32, // 空闲的inode总数
+    pub free_blocks_count: u64, // 空闲的block总数(低32位 + 高32位)
     pub block_cache: Arc<SpinNoIrqLock<BlockCache>>,
 }
 
@@ -47,12 +47,12 @@ impl SuperBlockInner {}
 impl SuperBlockInner {
     pub fn new(
         free_inodes_count: u32,
-        free_blocks_count_lo: u32,
+        free_blocks_count: u64,
         block_cache: Arc<SpinNoIrqLock<BlockCache>>,
     ) -> Self {
         Self {
             free_inodes_count,
-            free_blocks_count_lo,
+            free_blocks_count,
             block_cache,
         }
     }
@@ -79,7 +79,7 @@ impl Ext4SuperBlock {
             block_group_count,
             inner: FSMutex::new(SuperBlockInner::new(
                 super_block.free_inodes_count,
-                super_block.free_blocks_count_lo,
+                super_block.free_blocks_count(),
                 block_cache,
             )),
         }
@@ -91,6 +91,7 @@ impl Debug for Ext4SuperBlockDisk {
         f.debug_struct("Ext4SuperBlockDisk")
             .field("inodes_per_group", &self.inodes_per_group)
             .field("blocks_per_group", &self.blocks_per_group)
+            .field("free_blocks_count", &self.free_blocks_count())
             .finish()
     }
 }
@@ -272,5 +273,8 @@ impl Ext4SuperBlockDisk {
             + self.blocks_per_group as u64
             - 1)
             / self.blocks_per_group as u64) as usize
+    }
+    pub fn free_blocks_count(&self) -> u64 {
+        self.free_blocks_count_lo as u64 | ((self.free_blocks_count_hi as u64) << 32)
     }
 }

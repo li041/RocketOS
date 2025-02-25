@@ -146,8 +146,11 @@ pub fn sys_mmap(
             return -22;
         }
         // 读取文件
+        // let file = task
+        //     .inner_handler(|inner| inner.fd_table[fd as usize].clone())
+        //     .unwrap();
         let file = task
-            .inner_handler(|inner| inner.fd_table[fd as usize].clone())
+            .inner_handler(|inner| inner.fd_table.get_file(fd as usize))
             .unwrap();
         let mut inner = task.inner.lock();
         let start = inner.memory_set.mmap_start;
@@ -157,7 +160,7 @@ pub fn sys_mmap(
             .memory_set
             .insert_framed_area_vpn_range(vpn_range, permission);
         let buf = unsafe { core::slice::from_raw_parts_mut(start as *mut u8, len) };
-        let origin_offset = file.get_meta().offset;
+        let origin_offset = file.get_offset();
         file.seek(offset);
         file.read(buf);
         file.seek(origin_offset);

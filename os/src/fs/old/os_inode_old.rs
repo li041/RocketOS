@@ -11,7 +11,6 @@ use crate::config::SysResult;
 use crate::drivers::BLOCK_DEVICE;
 use crate::ext4::fs::Ext4FileSystem;
 use crate::fat32::fs::FAT32FileSystem;
-use crate::fs::{AT_FDCWD, EXT4_ROOT_INODE};
 use crate::mutex::SpinNoIrqLock;
 use crate::task::current_task;
 use alloc::sync::Arc;
@@ -119,85 +118,6 @@ impl InodeTrait for FAKE_ROOT_INODE {
     }
 }
 
-lazy_static! {
-    pub static ref FAT32_ROOT_INODE: Arc<dyn InodeTrait> = {
-        FAT32FileSystem::open(BLOCK_DEVICE.clone())
-            .lock()
-            .root_inode()
-    };
-}
-
-pub fn EXT4_list_apps() {
-    println!("/**** ROOT APPS ****");
-    let app_names = EXT4_ROOT_INODE.getdents();
-    if app_names.is_empty() {
-        println!("No apps found");
-    }
-    for name in app_names {
-        print!("{}\t", name);
-    }
-    println!("\n**************/");
-}
-
-pub fn FAT32_list_apps() {
-    println!("/**** ROOT APPS ****");
-    let apps = FAT32_ROOT_INODE.list(FAT32_ROOT_INODE.clone()).unwrap();
-    if apps.is_empty() {
-        println!("No apps found");
-    }
-    for app in apps {
-        print!("{}\t", app.get_name());
-    }
-    println!("**************/");
-}
-
-bitflags! {
-    ///Open file flags
-    pub struct OpenFlags: u32 {
-        const APPEND = 1 << 10;
-        const ASYNC = 1 << 13;
-        const DIRECT = 1 << 14;
-        const DSYNC = 1 << 12;
-        const EXCL = 1 << 7;
-        const NOATIME = 1 << 18;
-        const NOCTTY = 1 << 8;
-        const NOFOLLOW = 1 << 17;
-        const PATH = 1 << 21;
-        /// TODO: need to find 1 << 15
-        const TEMP = 1 << 15;
-        /// Read only
-        const RDONLY = 0;
-        /// Write only
-        const WRONLY = 1 << 0;
-        /// Read & Write
-        const RDWR = 1 << 1;
-        /// Allow create
-        const CREATE = 1 << 6;
-        /// Clear file and return an empty one
-        const TRUNC = 1 << 9;
-        /// Directory
-        const DIRECTORY = 1 << 16;
-        /// Enable the close-on-exec flag for the new file descriptor
-        const CLOEXEC = 1 << 19;
-        /// When possible, the file is opened in nonblocking mode
-        const NONBLOCK = 1 << 11;
-    }
-}
-
-impl OpenFlags {
-    /// Do not check validity for simplicity
-    /// Return (readable, writable)
-    pub fn read_write(&self) -> (bool, bool) {
-        if self.is_empty() {
-            (true, false)
-        } else if self.contains(Self::WRONLY) {
-            (false, true)
-        } else {
-            (true, true)
-        }
-    }
-}
-
 ///Open file with flags
 // pub fn open_file(name: &str, flags: OpenFlags) -> SysResult<Arc<OSInode>> {
 //     let (readable, writable) = flags.read_write();
@@ -223,67 +143,67 @@ impl OpenFlags {
 // }
 
 // Todo:
-fn open_cwd(dirfd: isize, path: &PathOld) -> Arc<dyn InodeTrait> {
-    if !path.is_relative() {
-        // absolute path
-        FAT32_ROOT_INODE.clone()
-    } else if dirfd == AT_FDCWD {
-        // relative to cwd
-        let task = current_task();
-        let cwd = &task.inner.lock().cwd_old;
-        FAT32_ROOT_INODE.open_path(cwd, false, false).unwrap()
-    } else {
-        // relative to dirfd
-        let task = current_task();
-        let ret = task.inner.lock().fd_table[dirfd as usize]
-            .clone()
-            .unwrap()
-            .get_meta()
-            .inode
-            .unwrap();
-        ret
-    }
-}
+// fn open_cwd(dirfd: isize, path: &PathOld) -> Arc<dyn InodeTrait> {
+//     if !path.is_relative() {
+//         // absolute path
+//         FAT32_ROOT_INODE.clone()
+//     } else if dirfd == AT_FDCWD {
+//         // relative to cwd
+//         let task = current_task();
+//         let cwd = &task.inner.lock().cwd_old;
+//         FAT32_ROOT_INODE.open_path(cwd, false, false).unwrap()
+//     } else {
+//         // relative to dirfd
+//         let task = current_task();
+//         let ret = task.inner.lock().fd_table[dirfd as usize]
+//             .clone()
+//             .unwrap()
+//             .get_meta()
+//             .inode
+//             .unwrap();
+//         ret
+//     }
+// }
 
-pub fn open_inode(
-    dirfd: isize,
-    path: &PathOld,
-    flags: OpenFlags,
-) -> SysResult<Arc<dyn InodeTrait>> {
-    match open_cwd(dirfd, path).open_path(path, flags.contains(OpenFlags::CREATE), false) {
-        Ok(inode) => {
-            if flags.contains(OpenFlags::TRUNC) {
-                inode.clear();
-            }
-            Ok(inode)
-        }
-        Err(e) => Err(e),
-    }
-}
+// pub fn open_inode(
+//     dirfd: isize,
+//     path: &PathOld,
+//     flags: OpenFlags,
+// ) -> SysResult<Arc<dyn InodeTrait>> {
+//     match open_cwd(dirfd, path).open_path(path, flags.contains(OpenFlags::CREATE), false) {
+//         Ok(inode) => {
+//             if flags.contains(OpenFlags::TRUNC) {
+//                 inode.clear();
+//             }
+//             Ok(inode)
+//         }
+//         Err(e) => Err(e),
+//     }
+// }
 
-pub fn open_file_old(dirfd: isize, path: &PathOld, flags: OpenFlags) -> SysResult<Arc<OSInodeOld>> {
-    let (readable, writable) = flags.read_write();
-    // match open_cwd(dirfd, path).open_path(path, flags.contains(OpenFlags::CREATE), false) {
-    //     Ok(inode) => {
-    //         if flags.contains(OpenFlags::TRUNC) {
-    //             inode.clear();
-    //         }
-    //         Ok(Arc::new(OSInode::new(readable, writable, inode)))
-    //     }
-    //     Err(e) => Err(e),
-    // }
-    match open_inode(dirfd, path, flags) {
-        Ok(inode) => Ok(Arc::new(OSInodeOld::new(readable, writable, inode))),
-        Err(e) => Err(e),
-    }
-}
+// pub fn open_file_old(dirfd: isize, path: &PathOld, flags: OpenFlags) -> SysResult<Arc<OSInodeOld>> {
+//     let (readable, writable) = flags.read_write();
+//     // match open_cwd(dirfd, path).open_path(path, flags.contains(OpenFlags::CREATE), false) {
+//     //     Ok(inode) => {
+//     //         if flags.contains(OpenFlags::TRUNC) {
+//     //             inode.clear();
+//     //         }
+//     //         Ok(Arc::new(OSInode::new(readable, writable, inode)))
+//     //     }
+//     //     Err(e) => Err(e),
+//     // }
+//     match open_inode(dirfd, path, flags) {
+//         Ok(inode) => Ok(Arc::new(OSInodeOld::new(readable, writable, inode))),
+//         Err(e) => Err(e),
+//     }
+// }
 
-pub fn create_dir(dirfd: isize, path: &PathOld) -> usize {
-    match open_cwd(dirfd, path).open_path(path, false, true) {
-        Ok(_) => 0,
-        Err(e) => e,
-    }
-}
+// pub fn create_dir(dirfd: isize, path: &PathOld) -> usize {
+//     match open_cwd(dirfd, path).open_path(path, false, true) {
+//         Ok(_) => 0,
+//         Err(e) => e,
+//     }
+// }
 
 impl FileOld for OSInodeOld {
     fn readable(&self) -> bool {

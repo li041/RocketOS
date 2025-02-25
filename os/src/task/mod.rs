@@ -7,12 +7,10 @@ pub mod scheduler;
 pub mod switch;
 
 use crate::{
+    drivers::BLOCK_DEVICE,
     fs::{
-        file::{File, FileInner},
-        namei::path_lookup,
-        open_file_old,
-        path_old::PathOld,
-        FileOld, OpenFlags, Stdin, Stdout, AT_FDCWD,
+        fdtable::FdTable, file::FileOp, mount::do_ext4_mount, namei::path_openat, path::Path,
+        AT_FDCWD,
     },
     loader::get_app_data_by_name,
     mutex::SpinNoIrqLock,
@@ -71,14 +69,14 @@ impl Task {
                 parent: None,
                 children: Vec::new(),
                 exit_code: 0,
-                fd_table: Vec::new(),
-                cwd_old: PathOld::new_absolute(),
-                cwd: String::from(""),
+                fd_table: FdTable::new(),
+                root: Path::zero_init(),
+                pwd: Path::zero_init(),
             }),
         }
     }
     /// init task memory space, push `TrapContext` and `TaskContext` to kernel stack
-    pub fn new_initproc(elf_data: &[u8]) -> Arc<Self> {
+    pub fn new_initproc(elf_data: &[u8], root_path: Arc<Path>) -> Arc<Self> {
         let (memory_set, satp, user_sp, entry_point, _aux_vec) = MemorySet::from_elf(elf_data);
         log::info!("Task satp: {:#x}", satp);
         let tid = tid_alloc();
@@ -101,16 +99,9 @@ impl Task {
                 parent: None,
                 children: Vec::new(),
                 exit_code: 0,
-                fd_table: vec![
-                    // 0 -> stdin
-                    Some(Arc::new(Stdin)),
-                    // 1 -> stdout
-                    Some(Arc::new(Stdout)),
-                    // Todo: 2 -> stderr, 没有实现, 暂时指向stdout
-                    Some(Arc::new(Stdout)),
-                ],
-                cwd_old: PathOld::new_absolute(),
-                cwd: String::from(""),
+                fd_table: FdTable::new(),
+                pwd: root_path.clone(),
+                root: root_path,
             }),
         });
         let task_ptr = Arc::as_ptr(&task) as usize;
@@ -150,17 +141,8 @@ impl Task {
         let task_cx_ptr =
             (dst_trap_cx_ptr as usize - core::mem::size_of::<TaskContext>()) as *mut TaskContext;
 
-        // 复制fd_table和cwd
-        let mut child_fd_table: Vec<Option<Arc<dyn FileOld + Send + Sync>>> = Vec::new();
-        for fd in parent_inner.fd_table.iter() {
-            if let Some(file) = fd {
-                child_fd_table.push(Some(file.clone()));
-            } else {
-                child_fd_table.push(None);
-            }
-        }
-        let child_cwd = parent_inner.cwd_old.clone();
-        let cwd = parent_inner.cwd.clone();
+        // 复制fd_table和path
+        let child_fd_table = FdTable::from_existed_user(&parent_inner.fd_table);
         // 分配新的tid
         let tid = tid_alloc();
         // Debug:
@@ -177,8 +159,8 @@ impl Task {
                 children: Vec::new(),
                 exit_code: 0,
                 fd_table: child_fd_table,
-                cwd_old: child_cwd,
-                cwd,
+                pwd: parent_inner.pwd.clone(),
+                root: parent_inner.root.clone(),
             }),
         });
 
@@ -273,11 +255,17 @@ impl Task {
     {
         handler(&mut self.inner.lock())
     }
+    pub fn get_root(&self) -> Arc<Path> {
+        self.inner.lock().root.clone()
+    }
+    pub fn get_pwd(&self) -> Arc<Path> {
+        self.inner.lock().pwd.clone()
+    }
 }
 
 lazy_static! {
     /// Global process that init user shell
-    pub static ref INITPROC: Arc<Task> = Task::new_initproc(get_app_data_by_name("initproc").unwrap());
+    pub static ref INITPROC: Arc<Task> = Task::new_initproc(get_app_data_by_name("initproc").unwrap(), do_ext4_mount(BLOCK_DEVICE.clone()));
 }
 
 pub struct TaskInner {
@@ -291,25 +279,30 @@ pub struct TaskInner {
     pub parent: Option<Weak<Task>>,
     pub children: Vec<Arc<Task>>,
     pub exit_code: i32,
-    pub fd_table: Vec<Option<Arc<dyn FileOld + Send + Sync>>>,
-    pub cwd_old: PathOld,
-    pub cwd: String,
+    // pub fd_table: Vec<Option<Arc<dyn FileOld + Send + Sync>>>,
+    pub fd_table: FdTable,
+    pub pwd: Arc<Path>,
+    pub root: Arc<Path>,
+    // pub cwd: String,
 }
 
 impl TaskInner {
-    pub fn alloc_fd(&mut self) -> usize {
-        if let Some(fd) = (0..self.fd_table.len()).find(|fd| self.fd_table[*fd].is_none()) {
-            fd
-        } else {
-            self.fd_table.push(None);
-            self.fd_table.len() - 1
-        }
+    pub fn alloc_fd(&mut self, file: Arc<dyn FileOp + Send + Sync>) -> usize {
+        self.fd_table.alloc_fd(file)
     }
-    pub fn reserve_fd(&mut self, fd: usize) {
-        if fd >= self.fd_table.len() {
-            self.fd_table.resize(fd + 1, None);
-        }
-    }
+    // pub fn alloc_fd(&mut self) -> usize {
+    //     if let Some(fd) = (0..self.fd_table.len()).find(|fd| self.fd_table[*fd].is_none()) {
+    //         fd
+    //     } else {
+    //         self.fd_table.push(None);
+    //         self.fd_table.len() - 1
+    //     }
+    // }
+    // pub fn reserve_fd(&mut self, fd: usize) {
+    //     if fd >= self.fd_table.len() {
+    //         self.fd_table.resize(fd + 1, None);
+    //     }
+    // }
 }
 
 pub fn add_initproc() {
@@ -482,34 +475,6 @@ pub fn sys_clone(
     }
 }
 
-pub fn sys_execve_old(path: *const u8, args: *const usize, envs: *const usize) -> isize {
-    // 目前支持在根目录下执行应用程序
-    let path = PathOld::from(c_str_to_string(path));
-    // argv[0]是应用程序的名字
-    // 后续元素是用户在命令行中输入的参数
-    let mut args_vec = extract_cstrings(args);
-    let envs_vec = extract_cstrings(envs);
-    // 把应用程序的路径放在argv[0]中
-    args_vec.insert(0, path.get_name());
-    if let Ok(app_inode) = open_file_old(AT_FDCWD, &path, OpenFlags::RDONLY) {
-        let all_data = app_inode.read_all();
-        let task = current_task();
-        task.exec(all_data.as_slice(), args_vec, envs_vec);
-        0
-    } else if path.is_relative() && path.len() == 1 {
-        // 从内核中加载的应用程序
-        if let Some(elf_data) = get_app_data_by_name(&path.get_name()) {
-            let task = current_task();
-            task.exec(elf_data, args_vec, envs_vec);
-            0
-        } else {
-            -1
-        }
-    } else {
-        -1
-    }
-}
-
 pub fn sys_execve(path: *const u8, args: *const usize, envs: *const usize) -> isize {
     let path = c_str_to_string(path);
     log::error!("path: {}", path);
@@ -518,10 +483,10 @@ pub fn sys_execve(path: *const u8, args: *const usize, envs: *const usize) -> is
     let mut args_vec = extract_cstrings(args);
     let envs_vec = extract_cstrings(envs);
     // RDONLY = 0
-    if let Ok(inode) = path_lookup(&path, 0) {
-        // 把应用程序的路径放在argv[0]中
+    // 2.25
+    if let Ok(file) = path_openat(&path, 0, AT_FDCWD, 0) {
         args_vec.insert(0, path);
-        let file = File::new(inode);
+        // 把应用程序的路径放在argv[0]中
         let all_data = file.read_all();
         let task = current_task();
         task.exec(all_data.as_slice(), args_vec, envs_vec);
