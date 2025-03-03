@@ -47,4 +47,8 @@ impl AddressSpace {
         self.i_pages.lock().insert(page_offset, page.clone());
         page
     }
+    // Page有Drop trait, 会写回到磁盘
+    pub fn clear(self: &Self) {
+        self.i_pages.lock().clear();
+    }
 }

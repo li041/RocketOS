@@ -2,7 +2,7 @@ use super::{inode::Ext4InodeDisk, super_block::Ext4SuperBlockDisk};
 use alloc::{sync::Arc, vec::Vec};
 
 use crate::{
-    drivers::block::{block_cache::get_block_cache, block_dev::BlockDevice},
+    drivers::block::{self, block_cache::get_block_cache, block_dev::BlockDevice},
     ext4::{
         block_group::{self, Ext4GroupDescDisk, GroupDesc},
         block_op::Ext4DirContentRO,
@@ -84,7 +84,7 @@ impl Ext4FileSystem {
 
             // generic_inode.load_children_from_disk();
             let dir_content = Ext4DirContentRO::new(&read_buf[..]);
-            dir_content.list();
+            dir_content.getdents();
         }
         // Debug end
 
@@ -116,6 +116,26 @@ impl Ext4FileSystem {
             }
         }
         panic!("No available inode!");
+    }
+    pub fn dealloc_inode(
+        &self,
+        block_device: Arc<dyn BlockDevice>,
+        global_inode_num: usize,
+        is_dir: bool,
+    ) {
+        let group_id = global_inode_num / self.super_block.inodes_per_group as usize;
+        let local_inode_num = global_inode_num % self.super_block.inodes_per_group as usize;
+        self.block_groups[group_id].dealloc_inode(
+            block_device.clone(),
+            local_inode_num,
+            is_dir,
+            self.super_block.inode_size as usize,
+            self.block_size(),
+        );
+    }
+
+    pub fn add_orphan_inode(&self, inode_num: usize) {
+        self.super_block.orphan_inodes.lock().push(inode_num);
     }
     pub fn alloc_block(&self, block_device: Arc<dyn BlockDevice>) -> usize {
         let block_bitmap_size = self.super_block.blocks_per_group as usize / 8;

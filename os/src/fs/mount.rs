@@ -3,6 +3,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
+use bitflags::Flag;
 
 use crate::{
     drivers::{block::block_dev::BlockDevice, BLOCK_DEVICE},
@@ -125,7 +126,7 @@ pub fn do_ext4_mount(block_device: Arc<dyn BlockDevice>) -> Arc<Path> {
         &ext4_fs.block_groups[0],
     ));
     ext4_list_apps(root_inode.clone());
-    let root_dentry = Dentry::new("".to_string(), 2, None, root_inode.clone());
+    let root_dentry = Dentry::new("".to_string(), None, root_inode.clone());
     root_dentry.inner.lock().parent = Some(Arc::downgrade(&root_dentry));
     insert_dentry(root_dentry.clone());
     // 创建根目录的Mount, 并加入全局Mount表
@@ -138,14 +139,29 @@ pub fn do_ext4_mount(block_device: Arc<dyn BlockDevice>) -> Arc<Path> {
     root_path
 }
 
+// Todo
+pub fn do_mount(
+    dev_name: String,
+    dir_name: String,
+    fs_type: String,
+    flags: usize,
+    _data: *const u8,
+) -> isize {
+    // user_path_at
+    // 需要把dev_name先转换成BlockDevice?
+    // path_mount
+    // 最后更新全局的Mount Tree
+    0
+}
+
 pub fn ext4_list_apps(root_inode: Arc<dyn InodeOp>) {
     println!("/**** ROOT APPS ****");
-    let app_names = root_inode.getdents();
-    if app_names.is_empty() {
+    let dirents = root_inode.getdents();
+    if dirents.is_empty() {
         println!("No apps found!");
     } else {
-        for name in app_names.iter() {
-            println!("{}", name);
+        for dirent in dirents.iter() {
+            print!("{}\t", String::from_utf8_lossy(&dirent.d_name));
         }
     }
     println!("\n**************/");

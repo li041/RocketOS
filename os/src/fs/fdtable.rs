@@ -64,17 +64,8 @@ impl FdTable {
     pub fn get_file(&self, fd: usize) -> Option<Arc<dyn FileOp>> {
         self.table.lock().get(&fd).cloned()
     }
-    // ToOptimize: 在跑性能时, 不用去拿File
     pub fn close(&mut self, fd: usize) -> bool {
-        // if self.table.lock().remove(&fd).is_some() {
-        //     self.free_fds.lock().insert(fd);
-        //     true
-        // } else {
-        //     log::error!("[FdTable::close] fd not found: {}", fd);
-        //     false
-        // }
-        if let Some(file) = self.table.lock().remove(&fd) {
-            assert!(Arc::strong_count(&file) == 1);
+        if self.table.lock().remove(&fd).is_some() {
             self.free_fds.lock().insert(fd);
             true
         } else {
@@ -88,7 +79,8 @@ impl FdTable {
         self.free_fds.lock().clear();
         self.next_fd.store(3, core::sync::atomic::Ordering::SeqCst);
     }
-    pub fn max_fd(&self) -> usize {
-        self.next_fd.load(core::sync::atomic::Ordering::SeqCst) - 1
+    // 给dup2使用, 将new_fd(并不是进程所能分配的最小描述符)指向old_fd的文件
+    pub fn insert(&mut self, new_fd: usize, file: Arc<dyn FileOp>) -> Option<Arc<dyn FileOp>> {
+        self.table.lock().insert(new_fd, file)
     }
 }

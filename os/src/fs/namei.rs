@@ -4,11 +4,9 @@ use super::{
     inode::InodeOp,
     mount::VfsMount,
     path::Path,
+    FS_BLOCK_SIZE,
 };
-use crate::{
-    fs::{path, AT_FDCWD},
-    task::current_task,
-};
+use crate::{fs::AT_FDCWD, task::current_task};
 use alloc::{sync::Arc, vec::Vec};
 
 pub struct Nameidata<'a> {
@@ -29,9 +27,7 @@ impl<'a> Nameidata<'a> {
     // 相当于linux中的`path_init`
     pub fn new(filename: &'a str, dfd: i32) -> Self {
         let path_segments: Vec<&'a str> = filename.split('/').filter(|s| !s.is_empty()).collect();
-        let mut inode: Arc<dyn InodeOp>;
-        let mut dentry: Arc<Dentry>;
-        let mut path: Arc<Path>;
+        let path: Arc<Path>;
         let cur_task = current_task();
         if filename.starts_with("/") {
             // 绝对路径
@@ -129,7 +125,6 @@ pub fn open_last_lookups(
 /// Todo: 符号链接
 pub fn path_openat(path: &str, flags: usize, dfd: i32, mode: usize) -> Result<Arc<File>, isize> {
     let mut nd = Nameidata::new(path, dfd);
-    let mut error: i32;
     // 解析路径的目录部分，遇到最后一个组件时停止
     // Todo: 正常有符号链接的情况下, 这里应该是一个循环
     // loop {
@@ -200,6 +195,32 @@ pub fn filename_create(nd: &mut Nameidata, _lookup_flags: usize) -> Result<Arc<D
             return Err(e);
         }
     };
+}
+
+pub fn filename_lookup(nd: &mut Nameidata, _lookup_flags: usize) -> Result<Arc<Dentry>, isize> {
+    let mut error: i32;
+    match link_path_walk(nd) {
+        Ok(_) => {
+            // 到达最后一个组件
+            // 处理`.`和`..`
+            if nd.path_segments[nd.depth] == "." {
+                return Ok(nd.dentry.clone());
+            } else if nd.path_segments[nd.depth] == ".." {
+                let parent_dentry = nd.dentry.get_parent();
+                return Ok(parent_dentry);
+            } else {
+                // name是String
+                let dentry = lookup_dentry(nd);
+                if dentry.is_negative() {
+                    return Err(-ENOENT);
+                }
+                return Ok(dentry);
+            }
+        }
+        Err(e) => {
+            return Err(e);
+        }
+    }
 }
 
 // 不是目录

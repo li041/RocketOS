@@ -1,6 +1,7 @@
 use core::fmt::Debug;
 
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 use crate::{
     drivers::block::{
@@ -11,7 +12,7 @@ use crate::{
     mutex::SpinNoIrqLock,
 };
 
-use super::block_group;
+use super::{block_group, inode::Ext4Inode};
 
 pub struct Ext4SuperBlock {
     /* 基本信息 */
@@ -32,6 +33,9 @@ pub struct Ext4SuperBlock {
     // 推理出的字段
     pub block_group_count: u32, // 块组总数
 
+    // 孤立的inode列表
+    pub orphan_inodes: SpinNoIrqLock<Vec<usize>>,
+
     pub inner: FSMutex<SuperBlockInner>,
 }
 
@@ -39,21 +43,15 @@ pub struct Ext4SuperBlock {
 pub struct SuperBlockInner {
     pub free_inodes_count: u32, // 空闲的inode总数
     pub free_blocks_count: u64, // 空闲的block总数(低32位 + 高32位)
-    pub block_cache: Arc<SpinNoIrqLock<BlockCache>>,
 }
 
 impl SuperBlockInner {}
 
 impl SuperBlockInner {
-    pub fn new(
-        free_inodes_count: u32,
-        free_blocks_count: u64,
-        block_cache: Arc<SpinNoIrqLock<BlockCache>>,
-    ) -> Self {
+    pub fn new(free_inodes_count: u32, free_blocks_count: u64) -> Self {
         Self {
             free_inodes_count,
             free_blocks_count,
-            block_cache,
         }
     }
 }
@@ -77,10 +75,10 @@ impl Ext4SuperBlock {
             inodes_per_group: super_block.inodes_per_group,
             inode_size: super_block.inode_size,
             block_group_count,
+            orphan_inodes: SpinNoIrqLock::new(Vec::new()),
             inner: FSMutex::new(SuperBlockInner::new(
                 super_block.free_inodes_count,
                 super_block.free_blocks_count(),
-                block_cache,
             )),
         }
     }

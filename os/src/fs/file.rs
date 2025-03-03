@@ -6,7 +6,11 @@ use virtio_drivers::PAGE_SIZE;
 
 use crate::mutex::SpinNoIrqLock;
 
-use super::{dentry::Dentry, inode::InodeOp, path::Path};
+use super::{
+    dentry::{Dentry, LinuxDirent64},
+    inode::InodeOp,
+    path::Path,
+};
 
 // 普通文件
 pub struct File {
@@ -84,6 +88,16 @@ impl File {
         log::info!("read_all: totol_read: {}", totol_read);
         v
     }
+    pub fn is_dir(&self) -> bool {
+        self.inner_handler(|inner| inner.inode.can_lookup())
+    }
+
+    pub fn readdir(&self) -> Result<Vec<LinuxDirent64>, &'static str> {
+        if self.is_dir() {
+            return Ok(self.inner_handler(|inner| inner.inode.getdents()));
+        }
+        return Err("not a directory");
+    }
 }
 
 impl FileOp for File {
@@ -124,49 +138,3 @@ pub const O_WRONLY: usize = 1;
 pub const O_RDWR: usize = 2;
 pub const O_CREAT: usize = 0x40;
 pub const O_DIRECTORY: usize = 0x10000;
-// bitflags! {
-//     ///Open file flags
-//     pub struct OpenFlags: u32 {
-//         const APPEND = 1 << 10;
-//         const ASYNC = 1 << 13;
-//         const DIRECT = 1 << 14;
-//         const DSYNC = 1 << 12;
-//         const EXCL = 1 << 7;
-//         const NOATIME = 1 << 18;
-//         const NOCTTY = 1 << 8;
-//         const NOFOLLOW = 1 << 17;
-//         const PATH = 1 << 21;
-//         /// TODO: need to find 1 << 15
-//         const TEMP = 1 << 15;
-//         /// Read only
-//         const RDONLY = 0;
-//         /// Write only
-//         const WRONLY = 1 << 0;
-//         /// Read & Write
-//         const RDWR = 1 << 1;
-//         /// Allow create
-//         const CREATE = 1 << 6;
-//         /// Clear file and return an empty one
-//         const TRUNC = 1 << 9;
-//         /// Directory
-//         const DIRECTORY = 1 << 16;
-//         /// Enable the close-on-exec flag for the new file descriptor
-//         const CLOEXEC = 1 << 19;
-//         /// When possible, the file is opened in nonblocking mode
-//         const NONBLOCK = 1 << 11;
-//     }
-// }
-
-// impl OpenFlags {
-//     /// Do not check validity for simplicity
-//     /// Return (readable, writable)
-//     pub fn read_write(&self) -> (bool, bool) {
-//         if self.is_empty() {
-//             (true, false)
-//         } else if self.contains(Self::WRONLY) {
-//             (false, true)
-//         } else {
-//             (true, true)
-//         }
-//     }
-// }

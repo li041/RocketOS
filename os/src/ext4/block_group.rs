@@ -5,7 +5,10 @@ use crate::{
     mutex::SpinNoIrqLock,
 };
 
-use super::{block_op::Ext4Bitmap, inode};
+use super::{
+    block_op::Ext4Bitmap,
+    inode::{self, Ext4InodeDisk},
+};
 
 #[derive(Debug, Clone)]
 #[repr(C)]
@@ -134,6 +137,43 @@ impl GroupDesc {
             }
         }
         return None;
+    }
+    // 由上层调用者转换为本地(globol_inode_num = local_inode_num + inodes_per_group * group_num)
+    // 既要释放inode_bitmap, 也要释放inode_table
+    pub fn dealloc_inode(
+        &self,
+        block_device: Arc<dyn BlockDevice>,
+        local_inode_num: usize,
+        is_dir: bool,
+        inode_size: usize,
+        ext4_block_size: usize,
+    ) {
+        let mut inner = self.inner.lock();
+        // 释放inode_table
+        let block_id = self.inode_table as usize + local_inode_num * inode_size / ext4_block_size;
+        let block_offset = local_inode_num * inode_size % ext4_block_size;
+        get_block_cache(block_id, block_device.clone(), ext4_block_size)
+            .lock()
+            .modify(block_offset, |inode_on_disk: &mut Ext4InodeDisk| {
+                assert!(inode_on_disk.get_nlinks() == 0);
+                inode_on_disk.set_size(0);
+                inode_on_disk.set_dtime(66666666);
+                inode_on_disk.set_mode(0);
+                inode_on_disk.clear_block();
+            });
+        // 释放inode_bitmap
+        let block_id = self.inode_bitmap as usize + local_inode_num / (ext4_block_size * 8);
+        let block_offset = local_inode_num % (ext4_block_size * 8);
+        Ext4Bitmap::new(
+            get_block_cache(block_id, block_device, ext4_block_size)
+                .lock()
+                .get_mut(0),
+        )
+        .dealloc(block_offset);
+        inner.free_inodes_count += 1;
+        if is_dir {
+            inner.used_dirs_count -= 1;
+        }
     }
     /// 上层调用者需要转换为文件系统的全局块号(block_num + block_group_num * blocks_per_group)
     pub fn alloc_block(

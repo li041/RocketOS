@@ -22,6 +22,7 @@ pub mod dentry;
 pub mod fdtable;
 pub mod file;
 pub mod inode;
+pub mod kstat;
 pub mod mount;
 pub mod namei;
 pub mod old;
