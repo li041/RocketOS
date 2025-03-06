@@ -1,17 +1,18 @@
 use core::fmt::Debug;
 
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 use crate::{
     drivers::block::{
         self,
         block_cache::{self, BlockCache},
     },
-    fs::{super_block::SuperBlockOp, FSMutex},
+    fs::{super_block::FileSystemOp, FSMutex},
     mutex::SpinNoIrqLock,
 };
 
-use super::block_group;
+use super::{block_group, inode::Ext4Inode};
 
 pub struct Ext4SuperBlock {
     /* 基本信息 */
@@ -32,28 +33,25 @@ pub struct Ext4SuperBlock {
     // 推理出的字段
     pub block_group_count: u32, // 块组总数
 
+    // 孤立的inode列表
+    pub orphan_inodes: SpinNoIrqLock<Vec<usize>>,
+
     pub inner: FSMutex<SuperBlockInner>,
 }
 
 // 用于存储会发生变化的数据
 pub struct SuperBlockInner {
-    pub free_inodes_count: u32,    // 空闲的inode总数
-    pub free_blocks_count_lo: u32, // 空闲的block总数(低32位)
-    pub block_cache: Arc<SpinNoIrqLock<BlockCache>>,
+    pub free_inodes_count: u32, // 空闲的inode总数
+    pub free_blocks_count: u64, // 空闲的block总数(低32位 + 高32位)
 }
 
 impl SuperBlockInner {}
 
 impl SuperBlockInner {
-    pub fn new(
-        free_inodes_count: u32,
-        free_blocks_count_lo: u32,
-        block_cache: Arc<SpinNoIrqLock<BlockCache>>,
-    ) -> Self {
+    pub fn new(free_inodes_count: u32, free_blocks_count: u64) -> Self {
         Self {
             free_inodes_count,
-            free_blocks_count_lo,
-            block_cache,
+            free_blocks_count,
         }
     }
 }
@@ -77,10 +75,10 @@ impl Ext4SuperBlock {
             inodes_per_group: super_block.inodes_per_group,
             inode_size: super_block.inode_size,
             block_group_count,
+            orphan_inodes: SpinNoIrqLock::new(Vec::new()),
             inner: FSMutex::new(SuperBlockInner::new(
                 super_block.free_inodes_count,
-                super_block.free_blocks_count_lo,
-                block_cache,
+                super_block.free_blocks_count(),
             )),
         }
     }
@@ -91,6 +89,7 @@ impl Debug for Ext4SuperBlockDisk {
         f.debug_struct("Ext4SuperBlockDisk")
             .field("inodes_per_group", &self.inodes_per_group)
             .field("blocks_per_group", &self.blocks_per_group)
+            .field("free_blocks_count", &self.free_blocks_count())
             .finish()
     }
 }
@@ -272,5 +271,8 @@ impl Ext4SuperBlockDisk {
             + self.blocks_per_group as u64
             - 1)
             / self.blocks_per_group as u64) as usize
+    }
+    pub fn free_blocks_count(&self) -> u64 {
+        self.free_blocks_count_lo as u64 | ((self.free_blocks_count_hi as u64) << 32)
     }
 }

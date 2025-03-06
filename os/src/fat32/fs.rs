@@ -3,7 +3,10 @@ use alloc::sync::Arc;
 use crate::{
     drivers::block::block_cache::get_block_cache,
     fat32::FAT32_SECTOR_SIZE,
-    fs::{inode_trait::InodeTrait, path_old::PathOld, FSMutex},
+    fs::{
+        old::{inode_trait::InodeTrait, path_old::PathOld},
+        FSMutex,
+    },
 };
 
 use super::{

@@ -40,7 +40,7 @@ impl Ext4ExtentIdx {
 
 // 叶子节点
 #[repr(C)]
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 // 逻辑快好
 pub struct Ext4Extent {
     // First file block number that this extent covers.
@@ -56,5 +56,13 @@ impl Ext4Extent {
     // 这个对应的EXT4的物理块号(fs_block_id), 不是qemu上VirtIOBlock的块号, 在BlockCache中转换
     pub fn physical_start_block(&self) -> usize {
         (self.start_hi as usize) << 32 | self.start_lo as usize
+    }
+    pub fn new(logical_block: u32, len: u16, physical_block: usize) -> Self {
+        Self {
+            logical_block,
+            len,
+            start_hi: (physical_block >> 32) as u16,
+            start_lo: physical_block as u32,
+        }
     }
 }

@@ -3,9 +3,11 @@ use alloc::{
     format,
     string::{String, ToString},
     sync::{Arc, Weak},
+    vec::Vec,
 };
 use hashbrown::HashMap;
 use lazy_static::lazy_static;
+use log::set_logger;
 
 use crate::{ext4::dentry::Ext4DirEntry, mutex::SpinNoIrqLock};
 
@@ -15,7 +17,6 @@ use super::inode::InodeOp;
 #[repr(C)]
 pub struct Dentry {
     pub absolute_path: String,
-    pub inode_num: usize,
     pub inner: SpinNoIrqLock<DentryInner>,
 }
 
@@ -47,30 +48,33 @@ impl DentryInner {
 }
 
 impl Dentry {
+    pub fn zero_init() -> Self {
+        Self {
+            absolute_path: String::new(),
+            inner: SpinNoIrqLock::new(DentryInner::negative(None)),
+        }
+    }
     pub fn new(
-        name: String,
-        inode_num: usize,
+        absolute_path: String,
         parent: Option<Arc<Dentry>>,
         inode: Arc<dyn InodeOp>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            absolute_path: name,
-            inode_num,
+            absolute_path,
             inner: SpinNoIrqLock::new(DentryInner::new(parent, inode)),
         })
     }
-    pub fn negative(name: String, parent: Option<Arc<Dentry>>) -> Arc<Self> {
+    pub fn negative(absolute_path: String, parent: Option<Arc<Dentry>>) -> Arc<Self> {
         Arc::new(Self {
-            absolute_path: name,
-            inode_num: 0,
+            absolute_path,
             inner: SpinNoIrqLock::new(DentryInner::negative(parent)),
         })
     }
-    // 上层调用者保证由负目录项调用
-    pub fn associate(&mut self, inode_num: usize, inode: Arc<dyn InodeOp>) {
-        self.inner.lock().inode = Some(inode);
-        self.inode_num = inode_num;
-    }
+    // // 上层调用者保证由负目录项调用
+    // pub fn associate(&mut self, inode_num: usize, inode: Arc<dyn InodeOp>) {
+    //     self.inner.lock().inode = Some(inode);
+    //     self.inode_num = inode_num;
+    // }
     pub fn is_negative(&self) -> bool {
         self.inner.lock().inode.is_none()
     }
@@ -112,6 +116,14 @@ pub fn insert_dentry(dentry: Arc<Dentry>) {
     DENTRY_CACHE
         .lock()
         .insert(dentry.absolute_path.clone(), dentry);
+}
+
+// 上层调用者保证: dentry 不是负目录项
+/// 从dentry cache中删除对应的dentry, 并且设置被删除的dentry为负目录项
+pub fn delete_dentry(dentry: Arc<Dentry>) {
+    assert!(!dentry.is_negative());
+    DENTRY_CACHE.lock().remove(dentry.absolute_path.as_str());
+    dentry.inner.lock().inode = None;
 }
 
 // 哈希键是由父目录的地址和当前文件名生成的, 确保全局唯一性
@@ -162,5 +174,40 @@ impl DentryCache {
 
         cache.insert(absolute_path.clone(), Arc::clone(&dentry));
         lru_list.push_back(absolute_path);
+    }
+
+    fn remove(&self, absolute_path: &str) {
+        let mut cache = self.cache.lock();
+        let mut lru_list = self.lru_list.lock();
+        if let Some(pos) = lru_list.iter().position(|x| x == absolute_path) {
+            lru_list.remove(pos);
+        }
+        cache.remove(absolute_path);
+    }
+}
+
+#[repr(C)]
+pub struct LinuxDirent64 {
+    pub d_ino: u64,
+    pub d_off: u64, // 文件系统底层磁盘中的偏移 filesystem-specific value with no specific meaning to user space
+    pub d_reclen: u16, // linux_dirent的长度, 对齐到8字节
+    pub d_type: u8,
+    pub d_name: Vec<u8>, // d_name是变长的, 在复制会用户空间时需要以'\0'结尾
+}
+
+impl LinuxDirent64 {
+    pub fn write_to_mem(&self, buf: &mut [u8]) {
+        // buf[0..4].copy_from_slice(&self..to_le_bytes());
+        // buf[4..6].copy_from_slice(&self.rec_len.to_le_bytes());
+        // buf[6] = self.name_len;
+        // buf[7] = self.file_type;
+        // buf[8..(8 + self.name_len as usize)].copy_from_slice(&self.name[..]);
+        const NAME_OFFSET: usize = 19;
+        buf[0..8].copy_from_slice(&self.d_ino.to_le_bytes());
+        buf[8..16].copy_from_slice(&self.d_off.to_le_bytes());
+        buf[16..18].copy_from_slice(&self.d_reclen.to_le_bytes());
+        buf[18] = self.d_type;
+        let name_len = self.d_name.len();
+        buf[19..19 + name_len].copy_from_slice(&self.d_name[..]);
     }
 }

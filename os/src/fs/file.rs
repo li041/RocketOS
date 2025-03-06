@@ -1,11 +1,18 @@
+use core::any::Any;
+
 use alloc::{sync::Arc, vec::Vec};
 use log::info;
 use virtio_drivers::PAGE_SIZE;
 
 use crate::mutex::SpinNoIrqLock;
 
-use super::inode::InodeOp;
+use super::{
+    dentry::{Dentry, LinuxDirent64},
+    inode::InodeOp,
+    path::Path,
+};
 
+// 普通文件
 pub struct File {
     inner: SpinNoIrqLock<FileInner>,
 }
@@ -14,15 +21,27 @@ pub struct FileInner {
     // pub inode: ,
     /// 单位是字节
     offset: usize,
+    // pub dentry: Arc<Dentry>,
+    pub path: Arc<Path>,
     pub inode: Arc<dyn InodeOp>,
+    pub flags: usize,
 }
 
 /// File trait
-pub trait FileOp: Send + Sync {
-    /// Read file to `UserBuffer`
+pub trait FileOp: Any + Send + Sync {
+    fn as_any(&self) -> &dyn Any;
+    // 从文件中读取数据到buf中, 返回读取的字节数, 同时更新文件偏移量
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> usize;
     /// Write `UserBuffer` to file
     fn write<'a>(&'a self, buf: &'a [u8]) -> usize;
+    // move the file offset
+    fn seek(&self, offset: usize);
+    // Get the file offset
+    fn get_offset(&self) -> usize;
+    // readable
+    fn readable(&self) -> bool;
+    // writable
+    fn writable(&self) -> bool;
 }
 
 impl File {
@@ -38,9 +57,14 @@ impl File {
 }
 
 impl File {
-    pub fn new(inode: Arc<dyn InodeOp>) -> Self {
+    pub fn new(path: Arc<Path>, inode: Arc<dyn InodeOp>, flags: usize) -> Self {
         Self {
-            inner: SpinNoIrqLock::new(FileInner { offset: 0, inode }),
+            inner: SpinNoIrqLock::new(FileInner {
+                offset: 0,
+                path,
+                inode,
+                flags,
+            }),
         }
     }
     /// Read all data inside a inode into vector
@@ -64,9 +88,22 @@ impl File {
         log::info!("read_all: totol_read: {}", totol_read);
         v
     }
+    pub fn is_dir(&self) -> bool {
+        self.inner_handler(|inner| inner.inode.can_lookup())
+    }
+
+    pub fn readdir(&self) -> Result<Vec<LinuxDirent64>, &'static str> {
+        if self.is_dir() {
+            return Ok(self.inner_handler(|inner| inner.inode.getdents()));
+        }
+        return Err("not a directory");
+    }
 }
 
 impl FileOp for File {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> usize {
         let read_size = self.inner_handler(|inner| inner.inode.read(inner.offset, buf));
         self.add_offset(read_size);
@@ -78,4 +115,26 @@ impl FileOp for File {
         self.add_offset(write_size);
         write_size
     }
+    fn seek(&self, offset: usize) {
+        self.inner_handler(|inner| inner.offset = offset);
+    }
+    fn get_offset(&self) -> usize {
+        self.inner_handler(|inner| inner.offset)
+    }
+    // O_RDONLY = 0, 以只读方式打开文件, 具体的权限检查由VFS层完成
+    // Todo:
+    fn readable(&self) -> bool {
+        // self.inner_handler(|inner| inner.flags & O_RDONLY != 0)
+        true
+    }
+    // Todo:
+    fn writable(&self) -> bool {
+        true
+    }
 }
+
+pub const O_RDONLY: usize = 0;
+pub const O_WRONLY: usize = 1;
+pub const O_RDWR: usize = 2;
+pub const O_CREAT: usize = 0x40;
+pub const O_DIRECTORY: usize = 0x10000;

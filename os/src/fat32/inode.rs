@@ -3,8 +3,8 @@ use alloc::{sync::Arc, vec::Vec};
 use crate::{
     config::SysResult,
     fs::{
-        inode_trait::{InodeMeta, InodeMode, InodeTrait},
-        path_old::PathOld,
+        old::inode_trait::{InodeMeta, InodeMode, InodeTrait},
+        old::path_old::PathOld,
         FSMutex,
     },
 };

@@ -13,6 +13,7 @@ pub const EXT4_DT_SOCK: u8 = 0x6;
 pub const EXT4_DT_LNK: u8 = 0x7;
 
 /// 注意不能直接用这个结构体从block_cache中读取, 一是因为对齐问题, 二是因为name是变长的
+/// 注意目录项的长度需要是4的整数倍
 #[derive(Default)]
 #[repr(C)]
 pub struct Ext4DirEntry {

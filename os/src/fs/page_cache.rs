@@ -9,9 +9,6 @@ use crate::{
     mm::page::Page,
     mutex::SpinNoIrqLock,
 };
-
-use super::inode_trait::InodeTrait;
-
 // Todo:
 // 管理页缓存, 注意页缓存只存储文件的数据, 不存储元数据
 pub struct AddressSpace {
@@ -49,5 +46,9 @@ impl AddressSpace {
         )));
         self.i_pages.lock().insert(page_offset, page.clone());
         page
+    }
+    // Page有Drop trait, 会写回到磁盘
+    pub fn clear(self: &Self) {
+        self.i_pages.lock().clear();
     }
 }
