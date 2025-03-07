@@ -14,6 +14,12 @@ impl Path {
             dentry: Arc::new(Dentry::zero_init()),
         })
     }
+    pub fn from_existed_user(old_path: &Arc<Path>) -> Arc<Self> {
+        Arc::new(Path {
+            mnt: old_path.mnt.clone(),
+            dentry: old_path.dentry.clone(),
+        })
+    }
     pub fn new(mnt: Arc<VfsMount>, dentry: Arc<Dentry>) -> Arc<Self> {
         Arc::new(Path { mnt, dentry })
     }

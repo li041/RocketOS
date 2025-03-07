@@ -1,10 +1,7 @@
 use crate::{
-    fs::{
-        file::File, namei::path_lookup,
-    },
+    fs::{file::File, namei::path_openat, AT_FDCWD},
     loader::get_app_data_by_name,
-    task::{add_task, current_task, TaskContext,
-            yield_current_task, WaitOption},
+    task::{add_task, current_task, yield_current_task, TaskContext, WaitOption},
     timer::get_time_ms,
     trap::TrapContext,
     utils::{c_str_to_string, extract_cstrings},
@@ -55,18 +52,15 @@ pub fn sys_execve(path: *const u8, args: *const usize, envs: *const usize) -> is
     let mut args_vec = extract_cstrings(args);
     let envs_vec = extract_cstrings(envs);
     let task = current_task();
-    // RDONLY = 0
-    if let Ok(inode) = path_lookup(&path, 0) {
-        // 把应用程序的路径放在argv[0]中
+    // flags = RDONLY = 0, 以只读方式打开文件
+    if let Ok(file) = path_openat(&path, 0, AT_FDCWD, 0) {
         args_vec.insert(0, path);
-        let file = File::new(inode);
         let all_data = file.read_all();
-        task.kernel_execve(all_data.as_slice(), args_vec, envs_vec);
+        current_task().kernel_execve(all_data.as_slice(), args_vec, envs_vec);
         0
     } else if !path.starts_with("/") {
         // 从内核中加载的应用程序
         if let Some(elf_data) = get_app_data_by_name(&path) {
-            // 把应用程序的路径放在argv[0]中
             args_vec.insert(0, path);
             task.kernel_execve(elf_data, args_vec, envs_vec);
             0
@@ -86,9 +80,7 @@ pub fn sys_getpid() -> isize {
 // 获取父进程的pid
 pub fn sys_getppid() -> isize {
     let task = current_task();
-    task.op_parent(|parent|{
-        parent.as_ref().unwrap().upgrade().unwrap().tid()
-    }) as isize
+    task.op_parent(|parent| parent.as_ref().unwrap().upgrade().unwrap().tid()) as isize
 }
 
 pub fn sys_yield() -> isize {
@@ -124,19 +116,22 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: usize, option: i32) -> isize {
         option
     );
     let task = current_task();
-    task.op_children_mut(|children|{
+    task.op_children_mut(|children| {
         // 没有子进程
-        if !children.values().any(|p| pid == -1 || pid as usize == p.tid()) {
+        if !children
+            .values()
+            .any(|p| pid == -1 || pid as usize == p.tid())
+        {
             return -1;
-        } 
+        }
         // 有子进程, 进一步看是否有子进程退出
         else {
             loop {
-                let wait_task = children.values().find(|(task)| {
+                let wait_task = children.values().find(|task| {
                     let task = task.as_ref();
                     task.is_zombie() && (pid == -1 || pid as usize == task.tid())
                 });
-        
+
                 // 如果pid > 0, 则等待指定的子进程
                 if let Some(wait_task) = wait_task {
                     let child = children.remove(&wait_task.tid()).unwrap();

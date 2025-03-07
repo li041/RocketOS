@@ -15,20 +15,18 @@ use fs::{
     sys_mkdirat, sys_mount, sys_openat, sys_pipe2, sys_read, sys_umount2, sys_unlinkat, sys_write,
 };
 use mm::{sys_brk, sys_mmap, sys_munmap};
+use task::{
+    sys_clone, sys_execve, sys_exit, sys_get_time, sys_getpid, sys_getppid, sys_nanosleep,
+    sys_waitpid, sys_yield,
+};
 use util::{sys_times, sys_uname};
 
-use crate::{
-    fs::kstat::Stat,
-    task::{
-        sys_clone, sys_execve, sys_exit, sys_get_time, sys_getpid, sys_getppid, sys_nanosleep,
-        sys_waitpid, sys_yield,
-    },
-};
+use crate::fs::kstat::Stat;
 pub use task::CloneFlags;
 mod fs;
 mod mm;
-mod util;
 mod task;
+mod util;
 
 const SYSCALL_GETCWD: usize = 17;
 const SYSCALL_DUP: usize = 23;

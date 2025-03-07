@@ -48,13 +48,12 @@ pub struct Task {
     // ToDo: 对接ext4
     fd_table: Arc<FdTable>,
     // #merge Todo: root和pwd
-    root: Arc<SpinNoIrqLock<Path>>,
-    pwd: Arc<SpinNoIrqLock<Path>>,
-
-                                     // ToDo: 信号处理
-                                     // Todo: 进程组
-                                     // ToDo：运行时间(调度相关)
-                                     // ToDo: 多核启动
+    root: Arc<SpinNoIrqLock<Arc<Path>>>,
+    pwd: Arc<SpinNoIrqLock<Arc<Path>>>,
+    // ToDo: 信号处理
+    // Todo: 进程组
+    // ToDo：运行时间(调度相关)
+    // ToDo: 多核启动
 }
 
 impl core::fmt::Debug for Task {
@@ -86,13 +85,13 @@ impl Task {
             exit_code: AtomicI32::new(0),
             memory_set: Arc::new(SpinNoIrqLock::new(MemorySet::new_bare())),
             fd_table: FdTable::new(),
-            root: Path::zero_init(),
-            pwd: Path::zero_init(),
+            root: Arc::new(SpinNoIrqLock::new(Path::zero_init())),
+            pwd: Arc::new(SpinNoIrqLock::new(Path::zero_init())),
         }
     }
 
     /// 初始化地址空间, 将 `TrapContext` 与 `TaskContext` 压入内核栈中
-    pub fn initproc(elf_data: &[u8]) -> Arc<Self> {
+    pub fn initproc(elf_data: &[u8], root_path: Arc<Path>) -> Arc<Self> {
         let (memory_set, satp, user_sp, entry_point, _aux_vec) = MemorySet::from_elf(elf_data);
         let tid = tid_alloc();
         let tgid = SpinNoIrqLock::new(TidHandle(tid.0));
@@ -119,8 +118,8 @@ impl Task {
             memory_set: Arc::new(SpinNoIrqLock::new(memory_set)),
             fd_table: FdTable::new(),
             // Todo
-            root: Arc::new(Path::new("/")),
-            cwd: Arc::new(SpinNoIrqLock::new(String::from(""))),
+            root: Arc::new(SpinNoIrqLock::new(root_path.clone())),
+            pwd: Arc::new(SpinNoIrqLock::new(root_path)),
         });
         // 向线程组中添加该进程
         task.thread_group.lock().add(task.clone());
@@ -151,7 +150,8 @@ impl Task {
         let thread_group;
         let memory_set;
         let fd_table;
-        let cwd;
+        let root;
+        let pwd;
         log::info!(
             "[kernel_clone] current_task pid: {}, new_task pid: {}",
             self.tid(),
@@ -166,7 +166,8 @@ impl Task {
             parent = self.parent.clone();
             children = self.children.clone();
             thread_group = self.thread_group.clone();
-            cwd = self.cwd.clone()
+            root = self.root.clone();
+            pwd = self.pwd.clone()
         }
         // 创建进程
         else {
@@ -174,7 +175,9 @@ impl Task {
             parent = Arc::new(SpinNoIrqLock::new(Some(Arc::downgrade(self))));
             children = Arc::new(SpinNoIrqLock::new(BTreeMap::new()));
             thread_group = Arc::new(SpinNoIrqLock::new(ThreadGroup::new()));
-            cwd = Arc::new(SpinNoIrqLock::new(self.cwd()))
+            // 深拷贝Path, 但共享底层的Dentry和VfsMount
+            root = clone_path(&self.root);
+            pwd = clone_path(&self.pwd);
         }
         if flags.contains(CloneFlags::CLONE_VM) {
             // Todo: execve可能有问题
@@ -189,7 +192,7 @@ impl Task {
         if flags.contains(CloneFlags::CLONE_FILES) {
             fd_table = self.fd_table.clone()
         } else {
-            fd_table = Arc::new(SpinNoIrqLock::new(self.fd_table.lock().clone()))
+            fd_table = FdTable::from_existed_user(&self.fd_table);
         }
         let task = Arc::new(Self {
             kstack,
@@ -202,7 +205,8 @@ impl Task {
             thread_group,
             memory_set,
             fd_table,
-            cwd,
+            root,
+            pwd,
         });
         if !flags.contains(CloneFlags::CLONE_THREAD) {
             self.add_child(task.clone());
@@ -281,7 +285,11 @@ impl Task {
             "[kernel_execve] current_task ThreadGroup len {}",
             self.op_thread_group_mut(|tg| tg.len())
         );
-        log::info!("[kernel_execve] current_task tid:{}, tgid:{}", self.tid(), self.tgid());
+        log::info!(
+            "[kernel_execve] current_task tid:{}, tgid:{}",
+            self.tid(),
+            self.tgid()
+        );
         log::info!("[kernel_execve] execve complete!");
     }
 
@@ -316,9 +324,7 @@ impl Task {
         self.op_memory_set_mut(|mem| {
             mem.recycle_data_pages();
         });
-        self.op_fd_table_mut(|fd_table| {
-            fd_table.clear();
-        });
+        self.fd_table().clear();
         // 切换任务
         switch_to_next_task();
     }
@@ -329,14 +335,6 @@ impl Task {
 
     pub fn alloc_fd(&mut self, file: Arc<dyn FileOp + Send + Sync>) -> usize {
         self.fd_table.alloc_fd(file)
-    }
-
-    pub fn reserve_fd(&self, fd: usize) {
-        self.op_fd_table_mut(|fd_table| {
-            if fd >= fd_table.len() {
-                fd_table.resize(fd + 1, None);
-            }
-        });
     }
 
     // 向当前任务中添加新的子任务
@@ -366,16 +364,7 @@ impl Task {
 
     // 重置文件打开表
     fn reset_fd_table(&self) {
-        self.op_fd_table_mut(|fd_table| {
-            *fd_table = vec![
-                // 0 -> stdin
-                Some(Arc::new(Stdin)),
-                // 1 -> stdout
-                Some(Arc::new(Stdout)),
-                // Todo: 2 -> stderr, 没有实现, 暂时指向stdout
-                Some(Arc::new(Stdout)),
-            ];
-        })
+        self.fd_table.reset();
     }
 
     /*********************************** getter *************************************/
@@ -392,8 +381,11 @@ impl Task {
     pub fn status(&self) -> TaskStatus {
         *self.status.lock()
     }
-    pub fn pwd(&self) -> Path {
-        self.pwd.
+    pub fn root(&self) -> Arc<Path> {
+        self.root.lock().clone()
+    }
+    pub fn pwd(&self) -> Arc<Path> {
+        self.pwd.lock().clone()
     }
     pub fn exit_code(&self) -> i32 {
         self.exit_code.load(core::sync::atomic::Ordering::SeqCst)
@@ -406,8 +398,11 @@ impl Task {
     pub fn set_tgid(&self, tgid: Tid) {
         self.tgid.lock().0 = tgid;
     }
-    pub fn set_cwd(&self, cwd: String) {
-        *self.cwd.lock() = cwd;
+    pub fn set_root(&self, root: Arc<Path>) {
+        *self.root.lock() = root;
+    }
+    pub fn set_pwd(&self, pwd: Arc<Path>) {
+        *self.pwd.lock() = pwd;
     }
     pub fn set_exit_code(&self, exit_code: i32) {
         self.exit_code
@@ -436,7 +431,6 @@ impl Task {
     pub fn op_thread_group_mut<T>(&self, f: impl FnOnce(&mut ThreadGroup) -> T) -> T {
         f(&mut self.thread_group.lock())
     }
-
     /******************************** 任务状态判断 **************************************/
     pub fn is_ready(&self) -> bool {
         self.status() == TaskStatus::Ready
@@ -517,6 +511,14 @@ fn write_task_cx(task: Arc<Task>) {
     unsafe {
         task_cx_ptr.write(task_cx);
     }
+}
+
+// 在clone时没有设置`CLONE_THREAD`标志, 为新任务创建新的`Path`结构
+// 需要深拷贝`Path`, 但共享底层的`Dentry`和`VfsMount`
+fn clone_path(old_path: &Arc<SpinNoIrqLock<Arc<Path>>>) -> Arc<SpinNoIrqLock<Arc<Path>>> {
+    let old_path = old_path.lock();
+    let new_path = Path::from_existed_user(&old_path);
+    Arc::new(SpinNoIrqLock::new(new_path))
 }
 
 // 把参数, 环境变量, 辅助信息压入用户栈

@@ -36,7 +36,7 @@ pub mod super_block;
 pub type FSMutex<T> = SpinNoIrqLock<T>;
 // Todo: 这里动态初始化一个FS_block_size
 lazy_static! {
-    pub static ref FS_BLOCK_SIZE: usize = 512;
+    pub static ref FS_BLOCK_SIZE: usize = 4096;
 }
 #[allow(unused)]
 use crate::drivers::block::VIRTIO_BLOCK_SIZE;

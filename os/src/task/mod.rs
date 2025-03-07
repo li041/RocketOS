@@ -20,14 +20,12 @@ use crate::{
     trap::TrapContext,
     utils::{c_str_to_string, extract_cstrings},
 };
+use alloc::sync::Arc;
 use alloc::{string::String, vec};
-use alloc::{
-    sync::Arc,
-};
 
 use core::arch::asm;
 use lazy_static::lazy_static;
-use task::{TaskStatus,Task};
+use task::{Task, TaskStatus};
 
 pub use context::TaskContext;
 pub use processor::{current_task, run_tasks};
@@ -37,8 +35,14 @@ pub type Tid = usize;
 
 lazy_static! {
     /// 初始进程
-    pub static ref INITPROC: Arc<Task> = Task::initproc(get_app_data_by_name("initproc").unwrap());
+    pub static ref INITPROC: Arc<Task> = Task::initproc(get_app_data_by_name("initproc").unwrap(), do_ext4_mount(BLOCK_DEVICE.clone()));
 }
 
-
-
+pub fn add_initproc() {
+    add_task(INITPROC.clone());
+    // 设置tp寄存器指向INITPROC
+    let initproc_tp = Arc::as_ptr(&INITPROC) as usize;
+    unsafe {
+        asm!("mv tp, {}", in(reg) initproc_tp);
+    }
+}

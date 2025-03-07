@@ -1,12 +1,15 @@
 use crate::{
-    config::{MMAP_MIN_ADDR, PAGE_SIZE, PAGE_SIZE_BITS}, mm::{MapPermission, VPNRange, VirtAddr, VirtPageNum}, task::current_task, utils::{ceil_to_page_size, floor_to_page_size}
+    config::{MMAP_MIN_ADDR, PAGE_SIZE, PAGE_SIZE_BITS},
+    mm::{MapPermission, VPNRange, VirtAddr, VirtPageNum},
+    task::current_task,
+    utils::{ceil_to_page_size, floor_to_page_size},
 };
 use bitflags::bitflags;
 
 pub fn sys_brk(brk: usize) -> isize {
     log::info!("sys_brk: brk: {:#x}", brk);
     let task = current_task();
-    task.op_memory_set_mut(|memory_set|{
+    task.op_memory_set_mut(|memory_set| {
         // sbrk(0)是获取当前program brk(堆顶)
         if brk == 0 {
             return memory_set.brk as isize;
@@ -128,7 +131,7 @@ pub fn sys_mmap(
         if fd != -1 || offset != 0 {
             return -22;
         }
-        task.op_memory_set_mut(|memory_set|{
+        task.op_memory_set_mut(|memory_set| {
             // start可以保证是页对齐的
             let start = memory_set.mmap_start;
             let vpn_range = memory_set.get_unmapped_area(start, len);
@@ -143,13 +146,8 @@ pub fn sys_mmap(
             return -22;
         }
         // 读取文件
-        // let file = task
-        //     .inner_handler(|inner| inner.fd_table[fd as usize].clone())
-        //     .unwrap();
-        let file = task.op_fd_table_mut(|fd_table|{
-            fd_table.get_file(fd as usize).unwrap()
-        });
-        task.op_memory_set_mut(|memory_set|{
+        let file = task.fd_table().get_file(fd as usize).unwrap();
+        task.op_memory_set_mut(|memory_set| {
             let start = memory_set.mmap_start;
             let vpn_range = memory_set.get_unmapped_area(start, len);
             memory_set.insert_framed_area_vpn_range(vpn_range, permission);
@@ -182,8 +180,6 @@ pub fn sys_munmap(start: usize, len: usize) -> isize {
     );
     let unmap_vpn_range = VPNRange::new(start_vpn, end_vpn);
     let task = current_task();
-    task.op_memory_set_mut(|memory_set|{
-        memory_set.remove_area_with_overlap(unmap_vpn_range)
-    });
+    task.op_memory_set_mut(|memory_set| memory_set.remove_area_with_overlap(unmap_vpn_range));
     0
 }
