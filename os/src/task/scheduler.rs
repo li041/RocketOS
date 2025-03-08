@@ -1,7 +1,7 @@
 use core::fmt::Debug;
 use alloc::{collections::vec_deque::VecDeque, sync::Arc};
-use crate::{mutex::SpinNoIrqLock, task::switch};
-use super::{Task, TaskStatus, current_task};
+use crate::mutex::SpinNoIrqLock;
+use super::{Task, current_task, kernel_exit, switch, Tid};
 use bitflags::bitflags;
 use lazy_static::lazy_static;
 
@@ -12,6 +12,9 @@ lazy_static! {
 
 /// 添加新任务到就绪队列
 pub fn add_task(task: Arc<Task>) {
+    // log::debug!("[add_task] ready_queue len:{:?}, added task: {:?}", 
+    // SCHEDULER.lock().ready_queue.len(), task.tid());
+    //assert_eq!(2 , Arc::strong_count(&task));
     assert!(task.is_ready());
     SCHEDULER.lock().add(task);
 }
@@ -24,6 +27,16 @@ pub fn fetch_task() -> Option<Arc<Task>> {
 pub fn block_task(task: Arc<Task>) {
     assert!(task.is_blocked());
     SCHEDULER.lock().block(task);
+}
+
+/// 从就绪队列中移除任务
+pub fn remove_task(tid: Tid) {
+    SCHEDULER.lock().remove(tid);
+}
+
+/// 从就绪队列中移除线程组
+pub fn remove_thread_group(tgid: Tid) {
+    SCHEDULER.lock().remove_thread_group(tgid);
 }
 
 /// 解除任务阻塞
@@ -43,24 +56,17 @@ pub fn switch_to_next_task() {
 
     // 获得下一个任务的内核栈
     // 可以保证`Ready`的任务`Task`中的内核栈与实际运行的sp保持一致
-    let next_task = fetch_task().unwrap();
-    match next_task.status() {
-        TaskStatus::Terminated => {
-            next_task.kernel_exit(0)
+    if let Some(next_task) = fetch_task() {
+        let next_task_kernel_stack = next_task.kstack();
+        log::info!("next_task_kernel_stack: {:#x}", next_task_kernel_stack);
+        // check_task_context_in_kernel_stack(next_task_kernel_stack);
+        // 切换Processor的current
+        crate::task::processor::PROCESSOR
+            .lock()
+            .switch_to(next_task);
+        unsafe {
+            switch::__switch(next_task_kernel_stack);
         }
-        TaskStatus::Ready => {
-            let next_task_kernel_stack = next_task.kstack();
-            log::info!("next_task_kernel_stack: {:#x}", next_task_kernel_stack);
-            // check_task_context_in_kernel_stack(next_task_kernel_stack);
-            // 切换Processor的current
-            crate::task::processor::PROCESSOR
-                .lock()
-                .switch_to(next_task);
-            unsafe {
-                switch::__switch(next_task_kernel_stack);
-            }
-        }
-        _ => {log::info!("return from switch");}
     }
 }
 
@@ -69,6 +75,7 @@ pub fn switch_to_next_task() {
 #[no_mangle]
 pub fn yield_current_task() {
     let task = current_task();
+    log::debug!("[yield_current_task] current task {}", task.tid());
     if let Some(next_task) = fetch_task() {
         task.set_ready();
         // 将当前任务加入就绪队列
@@ -76,17 +83,21 @@ pub fn yield_current_task() {
         // 获得下一个任务的内核栈
         // 可以保证`Ready`的任务`Task`中的内核栈与实际运行的sp保持一致
         let next_task_kernel_stack = next_task.kstack();
+        log::debug!(
+            "[yield_current_task] next task {}, next task kstack {:#x}", 
+            next_task.tid(), next_task_kernel_stack
+        );
         // check_task_context_in_kernel_stack(next_task_kernel_stack);
         // 切换Processor的current
         crate::task::processor::PROCESSOR
             .lock()
             .switch_to(next_task);
-
         unsafe {
             switch::__switch(next_task_kernel_stack);
         }
     }
     // 如果没有下一个任务, 则继续执行当前任务
+    log::debug!("[yield_current_task] no next task");
 }
 
 // 目前支持由waitpid阻塞的进程
@@ -139,6 +150,14 @@ impl Scheduler {
     /// 取出调度器就绪队列队首任务
     pub fn fetch(&mut self) -> Option<Arc<Task>> {
         self.ready_queue.pop_front()
+    }
+    /// 从调度器就绪队列中移除任务
+    pub fn remove(&mut self, tid: Tid) {
+        self.ready_queue.retain(|task| task.tid() != tid);
+    }
+    /// 从调度器就绪队列中移除线程组
+    pub fn remove_thread_group(&mut self, tgid: Tid) {
+        self.ready_queue.retain(|task| task.tgid() != tgid);
     }
     /// 阻塞任务(暂且没用)
     pub fn block(&mut self, task: Arc<Task>) {

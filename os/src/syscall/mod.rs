@@ -16,13 +16,13 @@ use fs::{
 };
 use mm::{sys_brk, sys_mmap, sys_munmap};
 use task::{
-    sys_clone, sys_execve, sys_exit, sys_get_time, sys_getpid, sys_getppid, sys_nanosleep,
+    sys_clone, sys_execve, sys_get_time, sys_getpid, sys_getppid, sys_nanosleep,
     sys_waitpid, sys_yield,
 };
 use util::{sys_times, sys_uname};
 
 use crate::fs::kstat::Stat;
-pub use task::CloneFlags;
+pub use task::{CloneFlags, sys_exit};
 mod fs;
 mod mm;
 mod task;

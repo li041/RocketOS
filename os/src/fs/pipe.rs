@@ -101,7 +101,7 @@ impl FileOp for Pipe {
     fn get_offset(&self) -> usize {
         panic!("Pipe does not support get_offset")
     }
-    fn seek(&self, offset: usize) {
+    fn seek(&self, _offset: usize) {
         panic!("Pipe does not support seek")
     }
 }

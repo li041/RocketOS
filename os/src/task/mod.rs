@@ -28,8 +28,9 @@ use lazy_static::lazy_static;
 use task::{Task, TaskStatus};
 
 pub use context::TaskContext;
+pub use task::kernel_exit;
 pub use processor::{current_task, run_tasks};
-pub use scheduler::{add_task, yield_current_task, WaitOption};
+pub use scheduler::{add_task, yield_current_task, switch_to_next_task, WaitOption, remove_task};
 
 pub type Tid = usize;
 
@@ -39,7 +40,6 @@ lazy_static! {
 }
 
 pub fn add_initproc() {
-    add_task(INITPROC.clone());
     // 设置tp寄存器指向INITPROC
     let initproc_tp = Arc::as_ptr(&INITPROC) as usize;
     unsafe {

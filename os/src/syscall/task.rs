@@ -1,15 +1,13 @@
 use crate::{
-    fs::{file::File, namei::path_openat, AT_FDCWD},
+    fs::{namei::path_openat, AT_FDCWD},
     loader::get_app_data_by_name,
-    task::{add_task, current_task, yield_current_task, TaskContext, WaitOption},
+    task::{add_task, current_task, kernel_exit, remove_task, switch_to_next_task, yield_current_task, TaskContext, WaitOption},
     timer::get_time_ms,
     trap::TrapContext,
     utils::{c_str_to_string, extract_cstrings},
 };
 use alloc::sync::Arc;
 use bitflags::bitflags;
-
-pub const INITPROC_TID: usize = 1;
 
 pub fn sys_clone(
     flags: u32,
@@ -31,14 +29,18 @@ pub fn sys_clone(
     let new_tid = new_task.tid();
     // 设定进程返回值
     let new_kstack = new_task.kstack();
-    let new_trap_cx_ptr = (new_kstack - core::mem::size_of::<TaskContext>()) as *mut TrapContext;
+    let new_trap_cx_ptr = (new_kstack + core::mem::size_of::<TaskContext>()) as *mut TrapContext;
     unsafe {
         // 设定子任务返回值为0，令tp指向该任务结构
         // ToDo: 检验用户栈指针
-        (*new_trap_cx_ptr).x[2] = stack_ptr;
+        if stack_ptr != 0 {(*new_trap_cx_ptr).x[2] = stack_ptr;}
         (*new_trap_cx_ptr).x[4] = Arc::as_ptr(&new_task) as usize;
         (*new_trap_cx_ptr).x[10] = 0;
     }
+    log::info!(
+        "[sys_clone]: strong_count: {}",
+        Arc::strong_count(&new_task),
+    );
     // ToDo: 更新信号检验
     add_task(new_task);
     new_tid as isize
@@ -56,7 +58,7 @@ pub fn sys_execve(path: *const u8, args: *const usize, envs: *const usize) -> is
     if let Ok(file) = path_openat(&path, 0, AT_FDCWD, 0) {
         args_vec.insert(0, path);
         let all_data = file.read_all();
-        current_task().kernel_execve(all_data.as_slice(), args_vec, envs_vec);
+        task.kernel_execve(all_data.as_slice(), args_vec, envs_vec);
         0
     } else if !path.starts_with("/") {
         // 从内核中加载的应用程序
@@ -95,13 +97,10 @@ pub fn sys_yield() -> isize {
 }
 
 pub fn sys_exit(exit_code: i32) -> ! {
-    // 退出当前进程, 清理资源
-    // 1. 修改task_status为Zombie
-    // 2. 将exit_code写入TaskInner
-    // 3. 将当前进程的子进程的parent设置为initproc
-    // 4. 将当前进程的fd_table清空, memory_set回收, children清空
-    let task = current_task();
-    task.kernel_exit(exit_code);
+    kernel_exit(current_task(), exit_code);
+    remove_task(current_task().tid());
+    // 切换任务
+    switch_to_next_task();
     panic!("Unreachable in sys_exit");
 }
 

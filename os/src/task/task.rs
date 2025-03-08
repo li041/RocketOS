@@ -11,7 +11,7 @@ use crate::{
     mm::MemorySet,
     mutex::SpinNoIrqLock,
     syscall::CloneFlags,
-    task::{scheduler::add_task, INITPROC},
+    task::{kstack, scheduler::{add_task, remove_thread_group, SCHEDULER}, INITPROC},
     trap::TrapContext,
 };
 use alloc::{
@@ -25,6 +25,7 @@ use core::{assert_ne, sync::atomic::AtomicI32};
 const INIT_PROC_PID: usize = 0;
 
 /// tp寄存器指向Task结构体
+#[repr(C)]
 pub struct Task {
     // 不变量
     // kstack在Thread中要保持在第一个field
@@ -132,7 +133,9 @@ impl Task {
         unsafe {
             trap_cx_ptr.write(trap_context);
             task_cx_ptr.write(task_context);
-        }
+        }  
+        log::info!("Task: {:p}", &task);
+        log::info!("Task kstack: {:p}", &task.kstack);
         log::info!("[Initproc] kstack: {:#x}", kstack);
         log::info!("Initproc complete!");
 
@@ -140,11 +143,11 @@ impl Task {
     }
 
     pub fn kernel_clone(self: &Arc<Self>, flags: CloneFlags) -> Arc<Self> {
-        let pid = tid_alloc();
+        let tid = tid_alloc();
         let exit_code = AtomicI32::new(0);
         let status = SpinNoIrqLock::new(TaskStatus::Ready);
         let tgid;
-        let kstack;
+        let mut kstack;
         let parent;
         let children;
         let thread_group;
@@ -155,7 +158,7 @@ impl Task {
         log::info!(
             "[kernel_clone] current_task pid: {}, new_task pid: {}",
             self.tid(),
-            pid
+            tid
         );
         if flags.contains(CloneFlags::SIGCHLD) {
             // ToDo:
@@ -171,7 +174,7 @@ impl Task {
         }
         // 创建进程
         else {
-            tgid = SpinNoIrqLock::new(TidHandle(pid.0));
+            tgid = SpinNoIrqLock::new(TidHandle(tid.0));
             parent = Arc::new(SpinNoIrqLock::new(Some(Arc::downgrade(self))));
             children = Arc::new(SpinNoIrqLock::new(BTreeMap::new()));
             thread_group = Arc::new(SpinNoIrqLock::new(ThreadGroup::new()));
@@ -189,6 +192,9 @@ impl Task {
         }
         // 申请新的内核栈并写入trap_cx内容
         kstack = self.trap_context_clone();
+        // 更新task_cx
+        kstack -= core::mem::size_of::<TaskContext>();
+        let kstack = KernelStack(kstack);
         if flags.contains(CloneFlags::CLONE_FILES) {
             fd_table = self.fd_table.clone()
         } else {
@@ -196,7 +202,7 @@ impl Task {
         }
         let task = Arc::new(Self {
             kstack,
-            tid: pid,
+            tid,
             tgid,
             status,
             parent,
@@ -214,6 +220,8 @@ impl Task {
         task.op_thread_group_mut(|tg| tg.add(task.clone()));
         // 在内核栈中加入task_cx
         write_task_cx(task.clone());
+        log::info!("[kernel_clone] task{}, kstack: {:#x}", task.tid(), task.kstack());
+        log::info!("[kernel_clone] task{}, strong_count {}", task.tid(), Arc::strong_count(&task)); // 未加入调度器理论为 2
         log::info!("[kernel_clone] task{} create sucessfully!", task.tid());
 
         task
@@ -236,7 +244,7 @@ impl Task {
         let (argv_base, envp_base, auxv_base, ustack_top) =
             init_user_stack(&args_vec, &envs_vec, aux_vec, ustack_top);
         log::info!(
-            "[Task::exec] entry_point: {:x}, user_sp: {:x}, page_table: {:x}",
+            "[kernel_execve] entry_point: {:x}, user_sp: {:x}, page_table: {:x}",
             entry_point,
             ustack_top,
             memory_set.token()
@@ -248,14 +256,16 @@ impl Task {
                 if thread.tid() == self.tid() {
                     continue;
                 }
-                thread.set_terminated();
+                kernel_exit(thread, 0);
             }
-            // 从原先线程组中移除当前线程
-            tg.remove(self.clone());
         });
-        // 更新主线程地址空间
+        // 如果当前任务为从线程, 则将线程组中所有任务从调度器中移除
+        if !self.is_main_thread() {
+            remove_thread_group(self.tgid());
+        }
+        // 更新地址空间
         self.op_memory_set_mut(|m| *m = memory_set);
-        // 更新主线程trap_cx
+        // 更新trap_cx
         let kstack_top = get_stack_top_by_sp(self.kstack());
         let trap_cx_ptr = (kstack_top - core::mem::size_of::<TrapContext>()) as *mut TrapContext;
         let trap_cx = TrapContext::app_init_trap_context(
@@ -269,8 +279,6 @@ impl Task {
         unsafe {
             *trap_cx_ptr = trap_cx;
         }
-        // 更新主线程task_cx
-        write_task_cx(self.clone());
         // 将当前线程升级为主线程
         self.set_tgid(self.tid());
         // 重建线程组
@@ -286,47 +294,10 @@ impl Task {
             self.op_thread_group_mut(|tg| tg.len())
         );
         log::info!(
-            "[kernel_execve] current_task tid:{}, tgid:{}",
-            self.tid(),
-            self.tgid()
-        );
+            "[kernel_execve] current_task tid:{}, tgid:{}, kstack:{:#x}, strong_count:{}",
+            self.tid(), self.tgid(), self.kstack(), Arc::strong_count(&self)
+        ); // 理论为3(sys_exec一个，children一个， processor一个)
         log::info!("[kernel_execve] execve complete!");
-    }
-
-    pub fn kernel_exit(self: &Arc<Self>, exit_code: i32) {
-        assert_ne!(
-            self.tid(),
-            INIT_PROC_PID,
-            "[kernel] Initproc process exit with exit_code {:?} ...",
-            self.exit_code()
-        );
-        // 判断线程组状态
-        if (!self.is_terminated()) && self.is_main_thread() {
-            self.op_thread_group_mut(|tg| {
-                for thread in tg.iter() {
-                    thread.set_terminated();
-                }
-            });
-        }
-        // 设置当前任务为僵尸态
-        self.set_zombie();
-        // 设置推出码
-        self.set_exit_code(exit_code);
-        // 托孤
-        self.op_children_mut(|children| {
-            for task in children.values() {
-                task.set_parent(INITPROC.clone());
-                INITPROC.add_child(task.clone())
-            }
-            children.clear();
-        });
-        // 回收资源
-        self.op_memory_set_mut(|mem| {
-            mem.recycle_data_pages();
-        });
-        self.fd_table().clear();
-        // 切换任务
-        switch_to_next_task();
     }
 
     pub fn is_main_thread(&self) -> bool {
@@ -338,13 +309,13 @@ impl Task {
     }
 
     // 向当前任务中添加新的子任务
-    fn add_child(&self, task: Arc<Task>) {
+    pub fn add_child(&self, task: Arc<Task>) {
         self.children.lock().try_insert(task.tid(), task);
     }
 
     // 复制当前内核栈trap_context内容到新内核栈中（用于kernel_clone)
     // 返回新内核栈当前指针位置（KernelStack）
-    fn trap_context_clone(&self) -> KernelStack {
+    fn trap_context_clone(&self) -> usize {
         let src_kstack_top = get_stack_top_by_sp(self.kstack());
         let dst_kstack_top = kstack_alloc();
         log::info!(
@@ -359,7 +330,7 @@ impl Task {
         unsafe {
             dst_trap_cx_ptr.write(src_trap_cx_ptr.read());
         }
-        KernelStack(dst_trap_cx_ptr as usize)
+        dst_trap_cx_ptr as usize
     }
 
     // 重置文件打开表
@@ -438,9 +409,6 @@ impl Task {
     pub fn is_blocked(&self) -> bool {
         self.status() == TaskStatus::Blocked
     }
-    pub fn is_terminated(&self) -> bool {
-        self.status() == TaskStatus::Terminated
-    }
     pub fn is_zombie(&self) -> bool {
         self.status() == TaskStatus::Zombie
     }
@@ -453,61 +421,56 @@ impl Task {
     pub fn set_blocked(&self) {
         *self.status.lock() = TaskStatus::Blocked;
     }
-    pub fn set_terminated(&self) {
-        *self.status.lock() = TaskStatus::Terminated;
-    }
     pub fn set_zombie(&self) {
         *self.status.lock() = TaskStatus::Zombie;
     }
 }
 
-/// 线程组结构
-pub struct ThreadGroup {
-    member: BTreeMap<Tid, Weak<Task>>,
-}
-
-impl ThreadGroup {
-    pub fn new() -> Self {
-        Self {
-            member: BTreeMap::new(),
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        self.member.len()
-    }
-
-    pub fn add(&mut self, task: Arc<Task>) {
-        self.member.insert(task.tid(), Arc::downgrade(&task));
-    }
-
-    pub fn remove(&mut self, task: Arc<Task>) {
-        self.member.remove(&task.tid());
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = Arc<Task>> + '_ {
-        self.member.values().map(|task| task.upgrade().unwrap())
-    }
-}
-
-#[derive(Copy, Clone, PartialEq, Eq)]
-pub enum TaskStatus {
-    Ready,
-    Running,
-    // 目前用来支持waitpid的阻塞, usize是等待进程的pid
-    Blocked,
-    Terminated,
-    Zombie,
-}
-
 /****************************** 辅助函数 ****************************************/
+
+/// 任务退出
+/// 参数：task 指定任务，exit_code 退出码
+/// 此函数仅负责如下工作，**调度器移除逻辑请自行解决**
+/// 1. 从线程组中移除指定任务
+/// 2. 修改task_status为Zombie
+/// 3. 修改exit_code
+/// 4. 托孤给initproc
+/// 5. 将当前进程的fd_table清空, memory_set回收, children清空
+pub fn kernel_exit(task: Arc<Task>, exit_code: i32){
+    assert_ne!(
+        task.tid(), INIT_PROC_PID,
+        "[kernel_exit] Initproc process exit with exit_code {:?} ...",
+        task.exit_code()
+    );
+    // 从线程组中移除
+    task.op_thread_group_mut(|tg| tg.remove(task.clone()));
+    // 设置当前任务为僵尸态
+    task.set_zombie();
+    // 设置推出码
+    task.set_exit_code(exit_code);
+    // 托孤
+    task.op_children_mut(|children| {
+        for task in children.values() {
+            task.set_parent(INITPROC.clone());
+            INITPROC.add_child(task.clone())
+        }
+        children.clear();
+    });
+    // 回收地址空间
+    task.op_memory_set_mut(|mem| {
+        mem.recycle_data_pages();
+    });
+    // 清空文件描述符表
+    task.fd_table().clear();
+    drop(task);
+}
 
 // 向指定任务内核栈中保存当前task_cx
 fn write_task_cx(task: Arc<Task>) {
     let task_tp = Arc::as_ptr(&task) as usize;
     let task_satp = task.op_memory_set(|m| m.token());
     let task_cx = TaskContext::app_init_task_context(task_tp, task_satp);
-    let task_cx_ptr = (task.kstack() - core::mem::size_of::<TaskContext>()) as *mut TaskContext;
+    let task_cx_ptr = task.kstack() as *mut TaskContext;
     unsafe {
         task_cx_ptr.write(task_cx);
     }
@@ -623,4 +586,44 @@ fn init_user_stack(
     }
 
     (argv_base, envp_base, auxv_base, user_sp)
+}
+
+/****************************** 辅助结构 ****************************************/
+
+/// 线程组结构
+pub struct ThreadGroup {
+    member: BTreeMap<Tid, Weak<Task>>,
+}
+
+impl ThreadGroup {
+    pub fn new() -> Self {
+        Self {
+            member: BTreeMap::new(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.member.len()
+    }
+
+    pub fn add(&mut self, task: Arc<Task>) {
+        self.member.insert(task.tid(), Arc::downgrade(&task));
+    }
+
+    pub fn remove(&mut self, task: Arc<Task>) {
+        self.member.remove(&task.tid());
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = Arc<Task>> + '_ {
+        self.member.values().map(|task| task.upgrade().unwrap())
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub enum TaskStatus {
+    Ready,
+    Running,
+    // 目前用来支持waitpid的阻塞, usize是等待进程的pid
+    Blocked,
+    Zombie,
 }
