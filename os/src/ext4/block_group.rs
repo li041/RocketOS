@@ -110,7 +110,12 @@ impl GroupDesc {
         inode_bitmap_size: usize,
         is_dir: bool,
     ) -> Option<usize> {
-        assert!(inode_bitmap_size < ext4_block_size);
+        assert!(
+            inode_bitmap_size <= ext4_block_size,
+            "inode_bitmap_size: {}, ext4_block_size: {}",
+            inode_bitmap_size,
+            ext4_block_size
+        );
         let mut inner = self.inner.lock();
         // 检查当前块组是否还有空闲的inode
         if inner.free_inodes_count > 0 {

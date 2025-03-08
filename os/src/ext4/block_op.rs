@@ -265,18 +265,22 @@ impl<'a> Ext4Bitmap<'a> {
     // 分配一个位
     // 返回分配的位的编号(是一个块内的偏移, 需要转换为inode_bitmap中的编号), 由上层调用者负责转换
     /// 注意: inode_num从1开始, 而bitmap的索引从0开始, bit_index = inode_num - 1
+    /// 注意: inode_bitmap_size的单位是byte
     pub fn alloc(&mut self, inode_bitmap_size: usize) -> Option<usize> {
+        log::warn!("self.buffer: {:?}", self.bitmap[4095]);
+        log::warn!("inode_bitmap_size: {}", inode_bitmap_size);
         // 逐字节处理, 加速alloc过程
         for (i, byte) in self.bitmap.iter_mut().enumerate() {
             if *byte != 0xff {
                 for j in 0..8 {
                     if (*byte & (1 << j)) == 0 {
                         *byte |= 1 << j;
-                        if i * 8 + j < inode_bitmap_size {
+                        if i <= inode_bitmap_size {
                             // 这里加1是因为inode_num从1开始
                             return Some(i * 8 + j + 1);
                         } else {
                             // 找到第一个未使用的位时, 已经超出了inode_bitmap的大小, 说明inode_bitmap不够用
+                            log::error!("i byte, j bit: {}, {}", i, j);
                             return None;
                         }
                     }
