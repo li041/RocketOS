@@ -12,17 +12,17 @@
 
 use fs::{
     sys_chdir, sys_close, sys_dup, sys_dup2, sys_fstat, sys_getcwd, sys_getdents64, sys_linkat,
-    sys_mkdirat, sys_mount, sys_openat, sys_pipe2, sys_read, sys_umount2, sys_unlinkat, sys_write,
+    sys_mkdirat, sys_mount, sys_openat, sys_pipe2, sys_read, sys_umount2, sys_unlinkat, sys_write, sys_writev,
 };
 use mm::{sys_brk, sys_mmap, sys_munmap};
 use task::{
-    sys_clone, sys_execve, sys_get_time, sys_getpid, sys_getppid, sys_nanosleep,
-    sys_waitpid, sys_yield,
+    sys_clone, sys_execve, sys_get_time, sys_getpid, sys_getppid, sys_nanosleep, sys_waitpid,
+    sys_yield,
 };
 use util::{sys_times, sys_uname};
 
-use crate::fs::kstat::Stat;
-pub use task::{CloneFlags, sys_exit};
+use crate::fs::{kstat::Stat, uio::IoVec};
+pub use task::{sys_exit, CloneFlags};
 mod fs;
 mod mm;
 mod task;
@@ -31,7 +31,7 @@ mod util;
 const SYSCALL_GETCWD: usize = 17;
 const SYSCALL_DUP: usize = 23;
 const SYSCALL_DUP2: usize = 24;
-const SYSCALL_IOCTL:usize = 29;
+const SYSCALL_IOCTL: usize = 29;
 const SYSCALL_MKDIRAT: usize = 34;
 const SYSCALL_UNLINKAT: usize = 35;
 const SYSCALL_LINKAT: usize = 37;
@@ -44,8 +44,9 @@ const SYSCALL_PIPE2: usize = 59;
 const SYSCALL_GETDENTS64: usize = 61;
 const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
-const SYS_FSTAT: usize = 80;
-const SYS_EXIT_GROUP:usize = 94;
+const SYSCALL_WRITEV: usize = 66;
+const SYSCALL_FSTAT: usize = 80;
+const SYS_EXIT_GROUP: usize = 94;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
 const SYSCALL_NANOSLEEP: usize = 101;
@@ -110,7 +111,8 @@ pub fn syscall(
         SYSCALL_GETDENTS64 => sys_getdents64(a0, a1 as *mut u8, a2),
         SYSCALL_READ => sys_read(a0, a1 as *mut u8, a2),
         SYSCALL_WRITE => sys_write(a0, a1 as *const u8, a2),
-        SYS_FSTAT => sys_fstat(a0 as i32, a1 as *mut Stat),
+        SYSCALL_WRITEV => sys_writev(a0, a1 as *const IoVec, a2),
+        SYSCALL_FSTAT => sys_fstat(a0 as i32, a1 as *mut Stat),
         SYSCALL_EXIT => sys_exit(a0 as i32),
         SYSCALL_NANOSLEEP => sys_nanosleep(a0),
         SYSCALL_YIELD => sys_yield(),
@@ -128,7 +130,6 @@ pub fn syscall(
         _ => {
             log::error!("Unsupported syscall_id: {}", syscall_id);
             0
-        }
-        // panic!("Unsupported syscall_id: {}", syscall_id),
+        } // panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }

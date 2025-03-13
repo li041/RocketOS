@@ -319,12 +319,12 @@ impl Ext4InodeDisk {
             let start_block = extent.logical_block;
             let end_block = start_block + extent.len as u32;
             if logical_start_block >= start_block && logical_start_block < end_block {
-                log::info!(
-                    "[Ext4InodeDisk::find_extent]: hit\nlogical_start_block: {}, start_block: {}, end_block: {}",
-                    logical_start_block,
-                    start_block,
-                    end_block
-                );
+                // log::info!(
+                //     "[Ext4InodeDisk::find_extent]: hit\nlogical_start_block: {}, start_block: {}, end_block: {}",
+                //     logical_start_block,
+                //     start_block,
+                //     end_block
+                // );
                 return Ok(*extent);
             }
         }
@@ -529,12 +529,12 @@ impl Ext4Inode {
         if offset >= inode_size {
             return Ok(0);
         }
-        log::info!(
-            "[Ext4Inode::read]: offset: {}, inode_size: {}, rbuf_len: {}",
-            offset,
-            inode_size,
-            rbuf_len
-        );
+        // log::info!(
+        //     "[Ext4Inode::read]: offset: {}, inode_size: {}, rbuf_len: {}",
+        //     offset,
+        //     inode_size,
+        //     rbuf_len
+        // );
 
         // 先查看是否有inline data
         if self.inner.lock().inode_on_disk.has_inline_data() {
@@ -612,7 +612,6 @@ impl Ext4Inode {
             page_offset += 1;
             page_offset_in_page = 0;
         }
-        log::info!("[Ext4Inode::read]: current_read: {}", current_read);
         Ok(current_read)
     }
     /// 获得页缓存, 如果不存在则创建

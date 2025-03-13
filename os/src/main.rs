@@ -31,7 +31,6 @@ pub mod config;
 pub mod utils;
 
 use config::KERNEL_BASE;
-use fs::mount::do_ext4_mount;
 use riscv::register::sstatus;
 use task::{add_initproc, run_tasks, TaskContext};
 use trap::TrapContext;

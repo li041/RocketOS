@@ -18,3 +18,4 @@ pub const DL_INTERP_OFFSET: usize = 0x30_0000_0000;
 
 /* 系统调用 */
 pub type SysResult<T> = Result<T, usize>;
+pub const USER_MAX_VA: usize = 0x0000_003f_ffff_ffff; // 256GB
