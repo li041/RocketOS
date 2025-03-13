@@ -2,13 +2,21 @@
 //! MapArea
 //! MapType
 //! MapPermision
-use core::arch::asm;
+use core::{arch::asm, panic};
 
 use super::VirtAddr;
 use crate::{
-    config::{MMAP_MIN_ADDR, PAGE_SIZE_BITS, USER_STACK_SIZE}, fs::namei::path_openat, task::aux::*, utils::ceil_to_page_size
+    config::{MMAP_MIN_ADDR, PAGE_SIZE_BITS, USER_STACK_SIZE},
+    fs::namei::path_openat,
+    task::{aux::*, current_task},
+    utils::ceil_to_page_size,
 };
-use alloc::{collections::btree_map::BTreeMap, string::{String, ToString}, vec::Vec, vec};
+use alloc::{
+    collections::btree_map::BTreeMap,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 use bitflags::bitflags;
 use log::info;
 use riscv::{interrupt, register::satp};
@@ -21,12 +29,12 @@ use super::{
 };
 use crate::{
     boards::qemu::{MEMORY_END, MMIO},
-    config::{KERNEL_BASE, PAGE_SIZE, DL_INTERP_OFFSET},
+    config::{DL_INTERP_OFFSET, KERNEL_BASE, PAGE_SIZE},
+    fs::AT_FDCWD,
     index_list::IndexList,
     mm::{page_table::PageTableEntry, StepByOne},
     mutex::SpinNoIrqLock,
     task::aux::AuxHeader,
-    fs::AT_FDCWD,
 };
 use lazy_static::lazy_static;
 
@@ -74,7 +82,7 @@ pub struct MemorySet {
     /// 仅在`get_unmapped_area`中使用, 可以保证页对齐, 且不会冲突
     pub mmap_start: usize,
     pub page_table: PageTable,
-    areas: IndexList<MapArea>,
+    pub areas: IndexList<MapArea>,
 }
 
 // 返回MemroySet的方法
@@ -130,9 +138,20 @@ impl MemorySet {
                     .copy_from_slice(src_ppn.get_bytes_array());
             }
         }
+        user_memory_set.page_table.dump_all_user_mapping();
         memory_set
     }
-
+    pub fn from_existed_user_lazily(user_memory_set: &MemorySet) -> Self {
+        let page_table = PageTable::from_existed_user(&user_memory_set.page_table);
+        MemorySet {
+            brk: user_memory_set.brk,
+            heap_bottom: user_memory_set.heap_bottom,
+            mmap_start: MMAP_MIN_ADDR,
+            page_table,
+            // areas需要clone, 拿到Arc<FrameTracker>
+            areas: user_memory_set.areas.clone(),
+        }
+    }
     /// return (user_memory_set, satp, ustack_top, entry_point, aux_vec)
     /// Todo: 动态链接
     pub fn from_elf(elf_data: &[u8]) -> (Self, usize, usize, usize, Vec<AuxHeader>) {
@@ -211,7 +230,11 @@ impl MemorySet {
                 max_end_vpn = map_area.vpn_range.get_end();
 
                 let map_offset = start_va.0 - start_va.floor().0 * PAGE_SIZE;
-                log::info!("[from_elf] app map area: [{:#x}, {:#x})", start_va.0, end_va.0);
+                log::info!(
+                    "[from_elf] app map area: [{:#x}, {:#x})",
+                    start_va.0,
+                    end_va.0
+                );
                 memory_set.push_with_offset(
                     map_area,
                     Some(&elf_data[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize]),
@@ -230,7 +253,10 @@ impl MemorySet {
             // 获取动态链接器的路径
             let section = elf.find_section_by_name(".interp").unwrap();
             let mut interpreter = String::from_utf8(section.raw_data(&elf).to_vec()).unwrap();
-            interpreter = interpreter.strip_suffix("\0").unwrap_or(&interpreter).to_string();
+            interpreter = interpreter
+                .strip_suffix("\0")
+                .unwrap_or(&interpreter)
+                .to_string();
             log::info!("[from_elf] interpreter path: {}", interpreter);
 
             let interps = vec![interpreter.clone()];
@@ -248,8 +274,12 @@ impl MemorySet {
                         // 程序头部的类型是Load, 代码段或数据段
                         let ph = interp_elf.program_header(i).unwrap();
                         if ph.get_type().unwrap() == Type::Load {
-                            let start_va: VirtAddr = (ph.virtual_addr() as usize + DL_INTERP_OFFSET).into();
-                            let end_va: VirtAddr = (ph.virtual_addr() as usize + DL_INTERP_OFFSET + ph.mem_size() as usize).into();
+                            let start_va: VirtAddr =
+                                (ph.virtual_addr() as usize + DL_INTERP_OFFSET).into();
+                            let end_va: VirtAddr = (ph.virtual_addr() as usize
+                                + DL_INTERP_OFFSET
+                                + ph.mem_size() as usize)
+                                .into();
 
                             // 注意用户要带U标志
                             let mut map_perm = MapPermission::U;
@@ -263,13 +293,21 @@ impl MemorySet {
                             if ph_flags.is_execute() {
                                 map_perm |= MapPermission::X;
                             }
-                            let map_area = MapArea::new_from_va(start_va, end_va, MapType::Framed, map_perm);
-            
+                            let map_area =
+                                MapArea::new_from_va(start_va, end_va, MapType::Framed, map_perm);
+
                             let map_offset = start_va.0 - start_va.floor().0 * PAGE_SIZE;
-                            log::info!("[from_elf] interp map area: [{:#x}, {:#x})", start_va.0, end_va.0);
+                            log::info!(
+                                "[from_elf] interp map area: [{:#x}, {:#x})",
+                                start_va.0,
+                                end_va.0
+                            );
                             memory_set.push_with_offset(
                                 map_area,
-                                Some(&interp_data[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize]),
+                                Some(
+                                    &interp_data[ph.offset() as usize
+                                        ..(ph.offset() + ph.file_size()) as usize],
+                                ),
                                 map_offset,
                             );
                         }
@@ -283,7 +321,7 @@ impl MemorySet {
                 } else {
                     log::error!("[from_elf] interpreter open failed");
                 }
-            } 
+            }
         } else {
             log::info!("[from_elf] static link");
         }
@@ -466,7 +504,7 @@ impl MemorySet {
         VPNRange::new(start_vpn, end_vpn)
     }
     // 获取当前地址空间token
-    pub fn token(&self) -> usize{
+    pub fn token(&self) -> usize {
         self.page_table.token()
     }
 }
@@ -580,12 +618,90 @@ impl MemorySet {
         }
         return Err("invalid virtual address");
     }
+    // 检查是否是COW或者lazy_allocation的区域
+    // 逐页处理
+    // used by `copy_to_user`, 不仅会检查, 还会提前处理, 避免实际写的时候发生page fault
+    // 由调用者保证pte存在
+    pub fn pre_handle_page_fault(&mut self, vpn_range: VPNRange) -> Result<(), &'static str> {
+        let mut vpn = vpn_range.get_start();
+        while vpn < vpn_range.get_end() {
+            if let Some(pte) = self.page_table.find_pte(vpn) {
+                if vpn == VirtPageNum::from(0) {
+                    return Err("[copy_to_user] write to va 0");
+                }
+                if pte.is_cow() {
+                    log::warn!(
+                        "[copy_to_user] pre handle cow page fault, vpn {:#x}, pte: {:#x?}",
+                        vpn.0,
+                        pte
+                    );
+                    let areas = &mut self.areas;
+                    let mut index = areas.last_index();
+                    while index.is_some() {
+                        let area = areas.get_mut(index).unwrap();
+                        if area.vpn_range.contains_vpn(vpn) {
+                            let data_frame = area.data_frames.get(&vpn).unwrap();
+                            if Arc::strong_count(data_frame) == 1 {
+                                let mut flags = pte.flags();
+                                flags.remove(PTEFlags::COW);
+                                flags.insert(PTEFlags::W);
+                                *pte = PageTableEntry::new(pte.ppn(), flags);
+                            } else {
+                                let frame = frame_alloc().unwrap();
+                                let src_frame = pte.ppn().get_bytes_array();
+                                let dst_frame = frame.ppn.get_bytes_array();
+                                dst_frame.copy_from_slice(src_frame);
+                                let mut flags = pte.flags();
+                                flags.remove(PTEFlags::COW);
+                                flags.insert(PTEFlags::W);
+                                *pte = PageTableEntry::new(frame.ppn, flags);
+                                area.data_frames.insert(vpn, Arc::new(frame));
+                            }
+                            unsafe {
+                                core::arch::asm!(
+                                    "sfence.vma x0, x0",
+                                    options(nomem, nostack, preserves_flags)
+                                );
+                            }
+                            break;
+                        }
+                        index = areas.prev_index(index);
+                    }
+                } else if pte.ppn() == PhysPageNum::from(0) {
+                    let areas = &mut self.areas;
+                    let mut index = areas.last_index();
+                    while index.is_some() {
+                        let area = areas.get_mut(index).unwrap();
+                        if area.vpn_range.contains_vpn(vpn) {
+                            let frame = frame_alloc().unwrap();
+                            let ppn = frame.ppn;
+                            *pte = PageTableEntry::new(ppn, pte.flags());
+                            area.data_frames.insert(vpn, Arc::new(frame));
+                            unsafe {
+                                core::arch::asm!(
+                                    "sfence.vma x0, x0",
+                                    options(nomem, nostack, preserves_flags)
+                                );
+                            }
+                            break;
+                        }
+                        index = areas.prev_index(index);
+                    }
+                }
+            } else {
+                return Err("[copy_to_user] can't find valid pte for vpn");
+            }
+            // 继续处理下一页
+            vpn.step();
+        }
+        return Ok(());
+    }
 }
 
 #[derive(Clone)]
 pub struct MapArea {
-    vpn_range: VPNRange,
-    data_frames: BTreeMap<VirtPageNum, Arc<FrameTracker>>,
+    pub vpn_range: VPNRange,
+    pub data_frames: BTreeMap<VirtPageNum, Arc<FrameTracker>>,
     map_type: MapType,
     map_perm: MapPermission,
 }
@@ -633,6 +749,7 @@ impl MapArea {
 }
 
 impl MapArea {
+    // map the area: [start_va, end_va), 左闭右开
     pub fn map(&mut self, page_table: &mut PageTable) {
         for vpn in self.vpn_range {
             self.map_one(page_table, vpn);
@@ -723,7 +840,7 @@ pub enum MapType {
 }
 
 bitflags! {
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug)]
     pub struct MapPermission: u16 {
         const R = 1 << 1;
         const W = 1 << 2;

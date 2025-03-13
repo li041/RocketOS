@@ -56,11 +56,11 @@ bitflags! {
     /// MMAP memeory protection
     pub struct MMAPPROT: u32 {
         /// Readable
-        const PROT_READ = 1 << 0;
+        const PROT_READ = 0x1;
         /// Writeable
-        const PROT_WRITE = 1 << 1;
+        const PROT_WRITE = 0x2;
         /// Executable
-        const PROT_EXEC = 1 << 2;
+        const PROT_EXEC = 0x4;
     }
 }
 
@@ -85,14 +85,18 @@ bitflags! {
     /// updates are carried through to the underlying file.
     pub struct MMAPFLAGS: u32 {
         /// MAP_SHARED
-        const MAP_SHARED = 1 << 0;
+        const MAP_SHARED = 0x01;
         /// MAP_PRIVATE
-        const MAP_PRIVATE = 1 << 1;
+        const MAP_PRIVATE = 0x02;
         /// 以上两种只能选一
         /// MAP_FIXED, 一定要映射到addr, 不是作为hint, 要取消原来位置的映射
-        const MAP_FIXED = 1 << 4;
+        const MAP_FIXED = 0x10;
         /// MAP_ANONYMOUS, 需要fd为-1, offset为0
-        const MAP_ANONYMOUS = 1 << 5;
+        const MAP_ANONYMOUS = 0x20;
+        /// 拒绝对映射区的写入操作
+        /// Todo: 未实现
+        const MAP_DENYWRITE = 0x800;
+        const MAP_POPULATE = 0x8000;
     }
 }
 
@@ -132,6 +136,10 @@ pub fn sys_mmap(
             return -22;
         }
         task.op_memory_set_mut(|memory_set| {
+            assert!(
+                permission.contains(MapPermission::R | MapPermission::W),
+                "permission error: anonymous mmap must have R and W permission"
+            );
             // start可以保证是页对齐的
             let start = memory_set.mmap_start;
             let vpn_range = memory_set.get_unmapped_area(start, len);
@@ -150,14 +158,17 @@ pub fn sys_mmap(
         task.op_memory_set_mut(|memory_set| {
             let start = memory_set.mmap_start;
             let vpn_range = memory_set.get_unmapped_area(start, len);
+            // tmp add permission W
+            permission |= MapPermission::W;
             memory_set.insert_framed_area_vpn_range(vpn_range, permission);
+            log::error!("mmap permission: {:?}", permission);
             let buf = unsafe { core::slice::from_raw_parts_mut(start as *mut u8, len) };
             let origin_offset = file.get_offset();
             file.seek(offset);
             file.read(buf);
             file.seek(origin_offset);
-            log::error!("mmap start: {:#x}", start as isize);
-            log::error!("mmap content: {:?}", buf);
+            // log::error!("mmap start: {:#x}", start as isize);
+            // log::error!("mmap content: {:?}", buf);
             return start as isize;
         })
     }

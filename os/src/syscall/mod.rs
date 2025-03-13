@@ -11,8 +11,9 @@
 //! submodules, and you should also implement syscalls this way.
 
 use fs::{
-    sys_chdir, sys_close, sys_dup, sys_dup2, sys_fstat, sys_getcwd, sys_getdents64, sys_linkat,
-    sys_mkdirat, sys_mount, sys_openat, sys_pipe2, sys_read, sys_umount2, sys_unlinkat, sys_write, sys_writev,
+    sys_chdir, sys_close, sys_dup, sys_dup2, sys_fstat, sys_fstatat, sys_getcwd, sys_getdents64,
+    sys_ioctl, sys_linkat, sys_mkdirat, sys_mount, sys_openat, sys_pipe2, sys_read, sys_umount2,
+    sys_unlinkat, sys_write, sys_writev,
 };
 use mm::{sys_brk, sys_mmap, sys_munmap};
 use task::{
@@ -37,6 +38,7 @@ const SYSCALL_UNLINKAT: usize = 35;
 const SYSCALL_LINKAT: usize = 37;
 const SYSCALL_UMOUNT2: usize = 39;
 const SYSCALL_MOUNT: usize = 40;
+const SYSCALL_FACCESSAT: usize = 48;
 const SYSCALL_CHDIR: usize = 49;
 const SYSCALL_OPENAT: usize = 56;
 const SYSCALL_CLOSE: usize = 57;
@@ -45,6 +47,7 @@ const SYSCALL_GETDENTS64: usize = 61;
 const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
 const SYSCALL_WRITEV: usize = 66;
+const SYSCALL_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
 const SYS_EXIT_GROUP: usize = 94;
 const SYSCALL_EXIT: usize = 93;
@@ -87,6 +90,7 @@ pub fn syscall(
         SYSCALL_GETCWD => sys_getcwd(a0 as *mut u8, a1),
         SYSCALL_DUP => sys_dup(a0),
         SYSCALL_DUP2 => sys_dup2(a0, a1),
+        SYSCALL_IOCTL => sys_ioctl(a0, a1, a2),
         SYSCALL_MKDIRAT => sys_mkdirat(a0 as isize, a1 as *const u8, a2),
         SYSCALL_UNLINKAT => sys_unlinkat(a0 as i32, a1 as *const u8, a2 as i32),
         SYSCALL_LINKAT => sys_linkat(
@@ -112,6 +116,7 @@ pub fn syscall(
         SYSCALL_READ => sys_read(a0, a1 as *mut u8, a2),
         SYSCALL_WRITE => sys_write(a0, a1 as *const u8, a2),
         SYSCALL_WRITEV => sys_writev(a0, a1 as *const IoVec, a2),
+        SYSCALL_FSTATAT => sys_fstatat(a0 as i32, a1 as *const u8, a2 as *mut Stat, a3 as i32),
         SYSCALL_FSTAT => sys_fstat(a0 as i32, a1 as *mut Stat),
         SYSCALL_EXIT => sys_exit(a0 as i32),
         SYSCALL_NANOSLEEP => sys_nanosleep(a0),

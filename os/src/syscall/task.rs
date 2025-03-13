@@ -1,6 +1,7 @@
 use crate::{
     fs::{namei::path_openat, AT_FDCWD},
     loader::get_app_data_by_name,
+    mm::copy_to_user,
     task::{
         add_task, current_task, kernel_exit, remove_task, switch_to_next_task, yield_current_task,
         TaskContext, WaitOption,
@@ -52,14 +53,7 @@ pub fn sys_clone(
 }
 
 pub fn sys_execve(path: *const u8, args: *const usize, envs: *const usize) -> isize {
-    log::error!(
-        "path:{}, args:{:x}, envs:{:x}",
-        path as usize,
-        args as usize,
-        envs as usize
-    );
     let path = c_str_to_string(path);
-    log::error!("path: {}", path);
     // argv[0]是应用程序的名字
     // 后续元素是用户在命令行中输入的参数
     let mut args_vec = extract_cstrings(args);
@@ -148,17 +142,20 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: usize, option: i32) -> isize {
                     let found_tid = child.tid() as i32;
                     // 写入exit_code
                     // Todo: 需要对地址检查
-                    unsafe {
-                        log::warn!(
-                            "[sys_waitpid] child {} exit with code {}, exit_code_ptr: {:x}",
-                            found_tid,
-                            child.exit_code(),
-                            exit_code_ptr
-                        );
-                        let exit_code_ptr = exit_code_ptr as *mut i32;
-                        if exit_code_ptr != core::ptr::null_mut() {
-                            exit_code_ptr.write_volatile((child.exit_code() & 0xff) << 8);
-                        }
+                    log::warn!(
+                        "[sys_waitpid] child {} exit with code {}, exit_code_ptr: {:x}",
+                        found_tid,
+                        child.exit_code(),
+                        exit_code_ptr
+                    );
+                    if exit_code_ptr != 0 {
+                        // exit_code_ptr为空, 表示不关心子进程的退出状态
+                        copy_to_user(
+                            exit_code_ptr as *mut i32,
+                            &child.exit_code() as *const i32,
+                            1,
+                        )
+                        .unwrap();
                     }
                     return found_tid as isize;
                 } else {
