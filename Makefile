@@ -10,7 +10,8 @@ qemu: all
 	-device virtio-net-device,netdev=net -netdev user,id=net
 
 all: 
-	@cd ./os && make all
+	@cd ./user && make 
+	@cd ./os && make run
 
 clean:
 	@cd ./os && make clean

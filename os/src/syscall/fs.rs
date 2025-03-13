@@ -12,6 +12,7 @@ use crate::{
         namei::{filename_create, filename_lookup, path_openat, Nameidata},
         path::Path,
         pipe::Pipe,
+        uio::IoVec,
         AT_FDCWD,
     },
     mm::copy_to_user,
@@ -28,7 +29,9 @@ pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> isize {
             return -1;
         }
         let ret = file.read(unsafe { core::slice::from_raw_parts_mut(buf, len) });
-        log::info!("sys_read: fd: {}, len: {}, ret: {}", fd, len, ret);
+        if fd >= 3 {
+            log::info!("sys_read: fd: {}, len: {}, ret: {}", fd, len, ret);
+        }
         ret as isize
     } else {
         -1
@@ -51,6 +54,37 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     } else {
         -1
     }
+}
+
+pub fn sys_writev(fd: usize, iov: *const IoVec, iovcnt: usize) -> isize {
+    if fd > 3 {
+        log::info!("sys_writev: fd: {}, iovcnt: {}", fd, iovcnt);
+    }
+    let task = current_task();
+    let file = task.fd_table().get_file(fd);
+    if file.is_none() {
+        return -1;
+    }
+    let file = file.unwrap();
+    if !file.writable() {
+        return -1;
+    }
+    let mut total_written = 0isize;
+    for i in 0..iovcnt {
+        let iovec = unsafe { &*iov.add(i) };
+        let buf = unsafe { core::slice::from_raw_parts(iovec.base as *const u8, iovec.len) };
+        let written = file.write(buf);
+        // 如果写入失败, 则返回已经写入的字节数, 或错误码
+        if written == 0 {
+            return if total_written > 0 {
+                total_written
+            } else {
+                written as isize
+            };
+        }
+        total_written += written as isize;
+    }
+    total_written
 }
 
 pub fn sys_dup(oldfd: usize) -> isize {
