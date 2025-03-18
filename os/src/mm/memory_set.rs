@@ -12,10 +12,7 @@ use crate::{
     utils::ceil_to_page_size,
 };
 use alloc::{
-    collections::btree_map::BTreeMap,
-    string::{String, ToString},
-    vec,
-    vec::Vec,
+    collections::btree_map::BTreeMap, ffi::CString, string::{String, ToString}, vec::Vec, vec,
 };
 use bitflags::bitflags;
 use log::info;
@@ -65,8 +62,8 @@ lazy_static! {
 lazy_static! {
     pub static ref kstack_second_level_frame: Arc<FrameTracker> = {
         let frame = frame_alloc().unwrap();
-        log::error!(
-            "kstack_second_level_frame: {:#x}",
+        log::info!(
+            "[kstack_second_level_frame] kstack_second_level_frame: {:#x}",
             frame.ppn.0 << PAGE_SIZE_BITS
         );
         Arc::new(frame)
@@ -158,47 +155,16 @@ impl MemorySet {
         let mut memory_set = Self::from_global();
         // 创建`TaskContext`时使用
         let satp = memory_set.page_table.token();
-
         // map program segments of elf, with U flag
         let elf = xmas_elf::ElfFile::new(elf_data).unwrap();
         let elf_header = elf.header;
         let magic = elf_header.pt1.magic;
         assert_eq!(magic, [0x7f, 0x45, 0x4c, 0x46], "invalid elf!");
         let ph_count = elf_header.pt2.ph_count();
+        let ph_entsize = elf_header.pt2.ph_entry_size() as usize;
         let mut entry_point = elf_header.pt2.entry_point() as usize;
         let mut aux_vec: Vec<AuxHeader> = Vec::with_capacity(64);
         let ph_va = elf.program_header(0).unwrap().virtual_addr() as usize;
-
-        // 程序头表的虚拟地址
-        aux_vec.push(AuxHeader {
-            aux_type: AT_PHDR,
-            value: ph_va,
-        });
-
-        // 页大小为4K
-        aux_vec.push(AuxHeader {
-            aux_type: AT_PAGESZ,
-            value: PAGE_SIZE,
-        });
-
-        // 程序头表中元素大小
-        aux_vec.push(AuxHeader {
-            aux_type: AT_PHENT,
-            value: elf_header.pt2.ph_entry_size() as usize,
-        });
-
-        // 程序头表中元素个数
-        aux_vec.push(AuxHeader {
-            aux_type: AT_PHNUM,
-            value: ph_count as usize,
-        });
-
-        // 应用程序入口
-        aux_vec.push(AuxHeader {
-            aux_type: AT_ENTRY,
-            value: entry_point,
-        });
-
         /* 映射程序头 */
         // 程序头表在内存中的起始虚拟地址
         // 程序头表一般是从LOAD段(且是代码段)开始
@@ -247,6 +213,43 @@ impl MemorySet {
             }
         }
 
+        // 程序头表的虚拟地址
+        aux_vec.push(AuxHeader {
+            aux_type: AT_PHDR,
+            value: ph_va,
+        });
+
+        // 页大小为4K
+        aux_vec.push(AuxHeader {
+            aux_type: AT_PAGESZ,
+            value: PAGE_SIZE,
+        });
+
+        // 程序头表中元素大小
+        aux_vec.push(AuxHeader {
+            aux_type: AT_PHENT,
+            value: ph_entsize,
+        });
+
+        // 程序头表中元素个数
+        aux_vec.push(AuxHeader {
+            aux_type: AT_PHNUM,
+            value: ph_count as usize,
+        });
+
+        // 应用程序入口
+        aux_vec.push(AuxHeader {
+            aux_type: AT_ENTRY,
+            value: entry_point,
+        });
+        
+        log::error!("[from_elf] AT_PHDR: {:#x}", ph_va);
+        log::error!("[from_elf] AT_PAGESZ: {}", PAGE_SIZE);
+        log::error!("[from_elf] AT_PHENT: {}", ph_entsize);
+        log::error!("[from_elf] AT_PHNUM: {}", ph_count);
+        log::error!("[from_elf] AT_ENTRY: {:#x}", entry_point);
+        log::error!("[from_elf] AT_BASE: {:#x}", DL_INTERP_OFFSET);
+
         // 需要动态链接
         if need_dl {
             log::info!("[from_elf] need dynamic link");
@@ -269,7 +272,7 @@ impl MemorySet {
                     let interp_elf = xmas_elf::ElfFile::new(interp_data.as_slice()).unwrap();
                     let interp_head = interp_elf.header;
                     let interp_ph_count = interp_head.pt2.ph_count();
-                    let interp_base = interp_head.pt2.entry_point() as usize + DL_INTERP_OFFSET;
+                    entry_point = interp_head.pt2.entry_point() as usize + DL_INTERP_OFFSET;
                     for i in 0..interp_ph_count {
                         // 程序头部的类型是Load, 代码段或数据段
                         let ph = interp_elf.program_header(i).unwrap();
@@ -312,12 +315,11 @@ impl MemorySet {
                             );
                         }
                     }
+                    // 动态链接器的基址
                     aux_vec.push(AuxHeader {
                         aux_type: AT_BASE,
-                        value: interp_base,
+                        value: DL_INTERP_OFFSET,
                     });
-                    entry_point = interp_base;
-                    log::info!("[from_elf] interpreter entry: {:#x}", interp_base);
                 } else {
                     log::error!("[from_elf] interpreter open failed");
                 }
@@ -344,20 +346,22 @@ impl MemorySet {
         memory_set.heap_bottom = heap_bottom;
         memory_set.brk = heap_bottom;
 
+        log::error!("[from_elf] entry_point: {:#x}", entry_point);
+
         return (memory_set, satp, ustack_top, entry_point, aux_vec);
     }
 
     pub fn new_kernel() -> Self {
         let mut memory_set = Self::new_bare();
         // map kernel sections
-        info!(".text [{:#x}, {:#x})", stext as usize, etext as usize);
-        info!(".rodata [{:#x}, {:#x})", srodata as usize, erodata as usize);
-        info!(".data [{:#x}, {:#x})", sdata as usize, edata as usize);
+        info!("[new_kernel] .text \t[{:#x}, {:#x})", stext as usize, etext as usize);
+        info!("[new_kernel] .rodata \t[{:#x}, {:#x})", srodata as usize, erodata as usize);
+        info!("[new_kernel] .data \t[{:#x}, {:#x})", sdata as usize, edata as usize);
         info!(
-            ".bss [{:#x}, {:#x})",
+            "[new_kernel] .bss \t[{:#x}, {:#x})",
             sbss_with_stack as usize, ebss as usize
         );
-        info!("mapping .text section");
+        log::trace!("mapping .text section");
         memory_set.push_with_offset(
             MapArea::new_from_va(
                 (stext as usize).into(),
@@ -373,7 +377,7 @@ impl MemorySet {
         //     VirtAddr::from(sigreturn_trampoline as usize).floor(),
         //     PTEFlags::R | PTEFlags::X | PTEFlags::U,
         // );
-        info!("mapping .rodata section");
+        log::trace!("mapping .rodata section");
         memory_set.push_with_offset(
             MapArea::new_from_va(
                 (srodata as usize).into(),
@@ -385,7 +389,7 @@ impl MemorySet {
             None,
             0,
         );
-        info!("mapping .data section");
+        log::trace!("mapping .data section");
         memory_set.push_with_offset(
             MapArea::new_from_va(
                 (sdata as usize).into(),
@@ -397,7 +401,7 @@ impl MemorySet {
             None,
             0,
         );
-        info!("mapping .bss section");
+        log::trace!("mapping .bss section");
         memory_set.push_with_offset(
             MapArea::new_from_va(
                 (sbss_with_stack as usize).into(),
@@ -409,7 +413,7 @@ impl MemorySet {
             None,
             0,
         );
-        info!("mapping physical memory");
+        log::trace!("mapping physical memory");
         memory_set.push_with_offset(
             MapArea::new_from_va(
                 (ekernel as usize).into(),
@@ -421,7 +425,7 @@ impl MemorySet {
             None,
             0,
         );
-        info!("mapping memory-mapped registers");
+        log::trace!("mapping memory-mapped registers");
         for pair in MMIO {
             memory_set.push_with_offset(
                 MapArea::new_from_va(
@@ -435,7 +439,7 @@ impl MemorySet {
                 0,
             );
         }
-        info!("mapping kernel stack area");
+        log::trace!("mapping kernel stack area");
         // 注意这里仅在内核的第一级页表加一个映射, 之后的映射由kstack_alloc通过`find_pte_create`完成
         // 这样做只是为了让`user_space`中也有内核栈的映射, user_space通过`from_global`浅拷贝内核的一级页表的后256项
         let kernel_root_page_table = memory_set.page_table.root_ppn.get_pte_array();
@@ -444,7 +448,7 @@ impl MemorySet {
         // log::error!("pte: {:?}", pte); // 这里可以看到511项的pte是0
         // 注意不能让kstack_second_level_frame被drop, 否则frame会被回收, 但是内核栈的映射还在
         *pte = PageTableEntry::new(kstack_second_level_frame.ppn, PTEFlags::V);
-
+        log::trace!("mapping complete!");
         memory_set
     }
 }

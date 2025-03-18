@@ -12,9 +12,7 @@ use crate::{
     mutex::SpinNoIrqLock,
     syscall::CloneFlags,
     task::{
-        kstack,
-        scheduler::{add_task, remove_thread_group, SCHEDULER},
-        INITPROC,
+        aux, kstack, scheduler::{add_task, remove_thread_group, SCHEDULER}, INITPROC
     },
     trap::TrapContext,
 };
@@ -251,6 +249,8 @@ impl Task {
         let (memory_set, _satp, ustack_top, entry_point, aux_vec) = MemorySet::from_elf(elf_data);
         // 更新页表
         memory_set.activate();
+        // let pos = 0x30_0000_0000 as usize;
+        // unsafe { if need_dl {log::error!("[sys_mmap] pos : {:?}", core::slice::from_raw_parts_mut(pos as *mut u8, 64));} }
         // 初始化用户栈, 压入args和envs
         // ToDo：待完善
         let argc = args_vec.len();

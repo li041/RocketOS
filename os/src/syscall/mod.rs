@@ -81,7 +81,7 @@ pub fn syscall(
     syscall_id: usize,
 ) -> isize {
     if !CARELESS_SYSCALLS.contains(&syscall_id) {
-        log::info!("syscall_id: {}", syscall_id);
+        log::warn!("syscall_id: {}", syscall_id);
     }
     // if syscall_id == SYSCALL_WAIT4 {
     // log::warn!("syscall_id: {}", syscall_id);
