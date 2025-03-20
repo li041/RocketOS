@@ -154,7 +154,7 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: usize, option: i32) -> isize {
                         // exit_code_ptr为空, 表示不关心子进程的退出状态
                         copy_to_user(
                             exit_code_ptr as *mut i32,
-                            &child.exit_code() as *const i32,
+                            &((child.exit_code() & 0xff) << 8) as *const i32,
                             1,
                         )
                         .unwrap();
