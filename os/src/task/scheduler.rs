@@ -1,8 +1,8 @@
-use core::fmt::Debug;
+use super::{current_task, kernel_exit, Task, Tid};
+use crate::{arch::switch, mutex::SpinNoIrqLock};
 use alloc::{collections::vec_deque::VecDeque, sync::Arc};
-use crate::mutex::SpinNoIrqLock;
-use super::{Task, current_task, kernel_exit, switch, Tid};
 use bitflags::bitflags;
+use core::fmt::Debug;
 use lazy_static::lazy_static;
 
 // 初始化调度器
@@ -12,7 +12,7 @@ lazy_static! {
 
 /// 添加新任务到就绪队列
 pub fn add_task(task: Arc<Task>) {
-    // log::debug!("[add_task] ready_queue len:{:?}, added task: {:?}", 
+    // log::debug!("[add_task] ready_queue len:{:?}, added task: {:?}",
     // SCHEDULER.lock().ready_queue.len(), task.tid());
     //assert_eq!(2 , Arc::strong_count(&task));
     assert!(task.is_ready());
@@ -111,16 +111,11 @@ pub fn blocking_and_run_next() {
         crate::task::processor::PROCESSOR
             .lock()
             .switch_to(next_task);
-
         unsafe {
             switch::__switch(next_task_kernel_stack);
         }
     }
 }
-
-
-
-
 
 // FIFO Task scheduler
 pub struct Scheduler {
