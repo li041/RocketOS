@@ -12,7 +12,13 @@ user/target/*
 
 testsuits-for-oskernel/*
 img/*
+!img/Makefile
 
 kernel-qemu
 sbi-qemu
 sdcard.img
+
+os/venodr/
+testsuits-for-oskernel/
+os/.cargo/
+user/.cargo/

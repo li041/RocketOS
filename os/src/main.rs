@@ -3,38 +3,34 @@
 #![feature(map_try_insert)]
 #![feature(alloc_error_handler)]
 #![feature(negative_impls)]
-#![feature(panic_info_message)]
 
 extern crate alloc;
 
 #[macro_use]
 mod console;
-mod boards;
 pub mod index_list;
-mod lang_items;
 mod loader;
 mod logging;
 mod mm;
 pub mod mutex;
-mod sbi;
 // mod sched;
+mod arch;
+mod signal;
+
 mod drivers;
+
 mod ext4;
+
 mod fat32;
+
 mod fs;
+
+// 目前只支持riscv64
 mod syscall;
+
 mod task;
-mod timer;
-mod trap;
 
-pub mod config;
 pub mod utils;
-
-use config::KERNEL_BASE;
-use fs::mount::do_ext4_mount;
-use riscv::register::sstatus;
-use task::{add_initproc, run_tasks, TaskContext};
-use trap::TrapContext;
 
 use core::{
     arch::{asm, global_asm},
@@ -43,7 +39,6 @@ use core::{
     sync::atomic::AtomicU8,
 };
 
-global_asm!(include_str!("entry.S"));
 global_asm!(include_str!("link_app.S"));
 
 /// clear BSS segment
@@ -58,12 +53,15 @@ fn clear_bss() {
 }
 
 #[no_mangle]
-pub fn fake_main(hart_id: usize) {
+#[cfg(target_arch = "riscv64")]
+pub fn fake_main(hart_id: usize, dtb_address: usize) {
+    use arch::config::KERNEL_BASE;
     unsafe {
         asm!("add sp, sp, {}", in(reg) KERNEL_BASE);
         asm!("la t0, rust_main");
         asm!("add t0, t0, {}", in(reg) KERNEL_BASE);
         asm!("mv a0, {}", in(reg) hart_id);
+        asm!("mv a1, {}", in(reg) dtb_address);
         asm!("jalr zero, 0(t0)");
     }
 }
@@ -72,14 +70,32 @@ pub fn fake_main(hart_id: usize) {
 static DEBUG_FLAG: AtomicU8 = AtomicU8::new(0);
 
 #[no_mangle]
-pub fn rust_main(_hart_id: usize) -> ! {
+#[cfg(target_arch = "riscv64")]
+pub fn rust_main(_hart_id: usize, dtb_address: usize) -> ! {
+    use arch::config::KERNEL_BASE;
+    use arch::trap::{self, TrapContext};
+    use riscv::register::sstatus;
+    use task::{add_initproc, run_tasks, TaskContext};
+    use virtio_drivers::device;
+    pub fn show_context_size() {
+        log::info!(
+            "size of trap context: {}",
+            core::mem::size_of::<TrapContext>()
+        );
+        log::info!(
+            "size of task context: {}",
+            core::mem::size_of::<TaskContext>()
+        )
+    }
+
     clear_bss();
     println!("hello world!");
     logging::init();
-    mm::init();
+    arch::mm::init();
     trap::init();
     // 允许S mode访问U mode的页面
     //  S mode下会访问User的堆
+    #[cfg(target_arch = "riscv64")]
     unsafe {
         sstatus::set_sum();
     }
@@ -90,22 +106,38 @@ pub fn rust_main(_hart_id: usize) -> ! {
     }
     show_context_size();
     trap::enable_timer_interrupt();
-    timer::set_next_trigger();
+    arch::timer::set_next_trigger();
     add_initproc();
     loader::list_apps();
-    // pass block_device_test, 注意实际运行时别调用这个函数, 会覆盖Block内容
     DEBUG_FLAG.store(1, core::sync::atomic::Ordering::SeqCst);
     run_tasks();
     panic!("shutdown machine");
 }
 
-pub fn show_context_size() {
-    log::info!(
-        "size of trap context: {}",
-        core::mem::size_of::<TrapContext>()
-    );
-    log::info!(
-        "size of task context: {}",
-        core::mem::size_of::<TaskContext>()
-    )
+#[cfg(target_arch = "loongarch64")]
+#[no_mangle]
+pub fn rust_main() -> ! {
+    use arch::{
+        bootstrap_init,
+        drivers::pci,
+        trap::{
+            self,
+            timer::{enable_timer_interrupt, set_next_trigger},
+        },
+    };
+    use task::{add_initproc, run_tasks};
+
+    clear_bss();
+    logging::init();
+    bootstrap_init();
+    arch::mm::init();
+    pci::init();
+    trap::init();
+    add_initproc();
+    loader::list_apps();
+    enable_timer_interrupt();
+    set_next_trigger();
+    run_tasks();
+    panic!("shutdown machine");
+    // shutdown();
 }

@@ -1,7 +1,7 @@
 //!Stdin & Stdout
 use super::{file::FileOp, FileMeta, FileOld};
 // use crate::mm::UserBuffer;
-use crate::{sbi::console_getchar, task::yield_current_task};
+use crate::{arch::sbi::console_getchar, task::yield_current_task};
 // use crate::task::yield_task;
 ///Standard input
 pub struct Stdin;
@@ -13,13 +13,17 @@ impl FileOp for Stdin {
         self
     }
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> usize {
-        assert_eq!(buf.len(), 1);
+        // assert_eq!(buf.len(), 1);
         // busy loop
         let mut c: usize;
         loop {
             c = console_getchar();
             // opensbi returns usize::MAX if no char available
             if c == usize::MAX {
+                // 此处对ioctl要读取的参数进行了fake
+                if buf.len() != 1 {
+                    break;
+                }
                 yield_current_task();
                 continue;
             } else {

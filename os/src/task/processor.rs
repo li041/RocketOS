@@ -1,13 +1,14 @@
-use alloc::sync::Arc;
-use lazy_static::lazy_static;
-use core::arch::asm;
 use crate::mutex::SpinNoIrqLock;
+use alloc::sync::Arc;
+use core::arch::asm;
+use lazy_static::lazy_static;
 
-use super::{
-    Task, switch
-};
+use super::Task;
+use crate::arch::switch;
 
 // 创建空闲任务
+
+#[cfg(target_arch = "riscv64")]
 lazy_static! {
     pub static ref IDLE_TASK: Arc<Task> = {
         let idle_task = Arc::new(Task::zero_init());
@@ -16,6 +17,21 @@ lazy_static! {
             // 注意这里需要对Arc指针先解引用再取`IDLE_TASK`地址
             // 两种方法都可以, Arc::as_ptr或者直接解引用然后引用
             asm!("mv tp, {}", in(reg) &(*idle_task) as *const _ as usize);
+
+        }
+        idle_task
+    };
+}
+
+#[cfg(target_arch = "loongarch64")]
+lazy_static! {
+    pub static ref IDLE_TASK: Arc<Task> = {
+        let idle_task = Arc::new(Task::zero_init());
+        // 将tp寄存器指向idle_task
+        unsafe {
+            // 注意这里需要对Arc指针先解引用再取`IDLE_TASK`地址
+            // 两种方法都可以, Arc::as_ptr或者直接解引用然后引用
+            asm!("addi.d $r2, {}, 0", in(reg) &(*idle_task) as *const _ as usize);
 
         }
         idle_task
@@ -50,10 +66,9 @@ pub fn run_tasks() {
 }
 
 /// 获取当前任务
-pub fn current_task() -> Arc<Task>{
-   PROCESSOR.lock().current_task()
+pub fn current_task() -> Arc<Task> {
+    PROCESSOR.lock().current_task()
 }
-
 
 ///Processor management structure
 pub struct Processor {

@@ -1,32 +1,32 @@
 use super::{
-    aux::{AuxHeader, AT_EXECFN, AT_NULL, AT_RANDOM},
-    context::TaskContext,
-    id::{tid_alloc, TidHandle},
-    kstack::{get_stack_top_by_sp, kstack_alloc, KernelStack},
-    scheduler::switch_to_next_task,
-    String, Tid,
+    aux::{AuxHeader, AT_EXECFN, AT_NULL, AT_RANDOM}, context::TaskContext, id::{tid_alloc, TidHandle}, kstack::{get_stack_top_by_sp, kstack_alloc, KernelStack}, remove_task, scheduler::switch_to_next_task, String, Tid
 };
 use crate::{
+    arch::{mm::MemorySet, trap::TrapContext},
     fs::{fdtable::FdTable, file::FileOp, path::Path, FileOld, Stdin, Stdout},
-    mm::MemorySet,
     mutex::SpinNoIrqLock,
-    syscall::CloneFlags,
+    // syscall::CloneFlags,
     task::{
-        aux, kstack, scheduler::{add_task, remove_thread_group, SCHEDULER}, INITPROC
+        aux,
+        context::write_task_cx,
+        kstack,
+        scheduler::{add_task, remove_thread_group, SCHEDULER},
+        INITPROC,
     },
-    trap::TrapContext,
+    mutex::SpinNoIrq, signal::{SiField, Sig, SigHandler, SigInfo, SigPending, SigSet, SignalStack, UContext}, 
+    task::manager::TASK_MANAGER
 };
 use alloc::{
-    collections::btree_map::BTreeMap,
-    sync::{Arc, Weak},
-    vec,
-    vec::Vec,
+    collections::btree_map::BTreeMap, sync::{Arc, Weak}, vec::Vec, vec,
 };
-use core::{assert_ne, sync::atomic::AtomicI32};
+use bitflags::bitflags;
+use xmas_elf::sections::NoteHeader;
+use core::{any::Any, assert_ne, future::{pending, Pending}, sync::atomic::{AtomicI32, AtomicUsize}};
 
-const INIT_PROC_PID: usize = 0;
+pub const INIT_PROC_PID: usize = 0;
 
 /// tp寄存器指向Task结构体
+/// ToDo: 阻塞与唤醒
 #[repr(C)]
 pub struct Task {
     // 不变量
@@ -54,6 +54,9 @@ pub struct Task {
     root: Arc<SpinNoIrqLock<Arc<Path>>>,
     pwd: Arc<SpinNoIrqLock<Arc<Path>>>,
     // ToDo: 信号处理
+    sig_pending: SpinNoIrqLock<SigPending>,                 // 待处理信号
+    sig_handler: Arc<SpinNoIrqLock<SigHandler>>,            // 信号处理函数
+    sig_stack: SpinNoIrqLock<Option<SignalStack>>,          // 额外信号栈
     // Todo: 进程组
     // ToDo：运行时间(调度相关)
     // ToDo: 多核启动
@@ -90,12 +93,15 @@ impl Task {
             fd_table: FdTable::new(),
             root: Arc::new(SpinNoIrqLock::new(Path::zero_init())),
             pwd: Arc::new(SpinNoIrqLock::new(Path::zero_init())),
+            sig_pending: SpinNoIrqLock::new(SigPending::new()),
+            sig_handler: Arc::new(SpinNoIrqLock::new(SigHandler::new())),
+            sig_stack: SpinNoIrqLock::new(None),
         }
     }
 
     /// 初始化地址空间, 将 `TrapContext` 与 `TaskContext` 压入内核栈中
     pub fn initproc(elf_data: &[u8], root_path: Arc<Path>) -> Arc<Self> {
-        let (memory_set, satp, user_sp, entry_point, _aux_vec) = MemorySet::from_elf(elf_data);
+        let (memory_set, pgdl_ppn, user_sp, entry_point, _aux_vec) = MemorySet::from_elf(elf_data);
         let tid = tid_alloc();
         let tgid = SpinNoIrqLock::new(TidHandle(tid.0));
         // 申请内核栈
@@ -120,16 +126,19 @@ impl Task {
             exit_code: AtomicI32::new(0),
             memory_set: Arc::new(SpinNoIrqLock::new(memory_set)),
             fd_table: FdTable::new(),
-            // Todo
             root: Arc::new(SpinNoIrqLock::new(root_path.clone())),
             pwd: Arc::new(SpinNoIrqLock::new(root_path)),
+            sig_pending: SpinNoIrqLock::new(SigPending::new()),
+            sig_handler: Arc::new(SpinNoIrqLock::new(SigHandler::new())),
+            sig_stack: SpinNoIrqLock::new(None),
         });
         // 向线程组中添加该进程
         task.thread_group.lock().add(task.clone());
         add_task(task.clone());
+        TASK_MANAGER.add(&task);
         // 令tp寄存器指向主线程内核栈顶
         let task_ptr = Arc::as_ptr(&task) as usize;
-        let task_context = TaskContext::app_init_task_context(task_ptr, satp);
+        let task_context = TaskContext::app_init_task_context(task_ptr, pgdl_ppn);
         // 将TrapContext和TaskContext压入内核栈
         trap_context.set_tp(task_ptr);
         unsafe {
@@ -157,13 +166,18 @@ impl Task {
         let fd_table;
         let root;
         let pwd;
-        log::info!(
+        let sig_handler;
+        let sig_pending;
+        let sig_stack;
+        log::trace!(
             "[kernel_clone] current_task pid: {}, new_task pid: {}",
-            self.tid(),
-            tid
+            self.tid(), tid
         );
-        if flags.contains(CloneFlags::SIGCHLD) {
-            // ToDo:
+        // 是否与父进程共享信号处理器
+        if flags.contains(CloneFlags::CLONE_SIGHAND) {
+            sig_handler = self.sig_handler.clone();
+        } else {
+            sig_handler = Arc::new(SpinNoIrqLock::new(self.op_sig_handler_mut(|handler| handler.clone())))
         }
         // 创建线程
         if flags.contains(CloneFlags::CLONE_THREAD) {
@@ -188,8 +202,8 @@ impl Task {
             // Todo: execve可能有问题
             memory_set = self.memory_set.clone()
         } else {
-            memory_set = Arc::new(SpinNoIrqLock::new(MemorySet::from_existed_user_lazily(
-                // memory_set = Arc::new(SpinNoIrqLock::new(MemorySet::from_existed_user(
+            // memory_set = Arc::new(SpinNoIrqLock::new(MemorySet::from_existed_user_lazily(
+            memory_set = Arc::new(SpinNoIrqLock::new(MemorySet::from_existed_user(
                 &self.memory_set.lock(),
             )));
         }
@@ -203,6 +217,10 @@ impl Task {
         } else {
             fd_table = FdTable::from_existed_user(&self.fd_table);
         }
+        // 初始化其他未初始化属性
+        sig_pending = SpinNoIrqLock::new(SigPending::new());
+        sig_stack = SpinNoIrqLock::new(None);
+        // 创建新任务
         let task = Arc::new(Self {
             kstack,
             tid,
@@ -216,6 +234,9 @@ impl Task {
             fd_table,
             root,
             pwd,
+            sig_handler,
+            sig_pending,
+            sig_stack,
         });
         if !flags.contains(CloneFlags::CLONE_THREAD) {
             self.add_child(task.clone());
@@ -223,18 +244,14 @@ impl Task {
         task.op_thread_group_mut(|tg| tg.add(task.clone()));
         // 在内核栈中加入task_cx
         write_task_cx(task.clone());
+        TASK_MANAGER.add(&task);
         log::info!(
-            "[kernel_clone] task{}, kstack: {:#x}",
+            "[kernel_clone] task{}, kstack: {:#x}, strong_count {}",
             task.tid(),
-            task.kstack()
-        );
-        log::info!(
-            "[kernel_clone] task{}, strong_count {}",
-            task.tid(),
+            task.kstack(),
             Arc::strong_count(&task)
-        ); // 未加入调度器理论为 2
-        log::info!("[kernel_clone] task{} create sucessfully!", task.tid());
-
+        );  // 未加入调度器理论为 2
+        log::trace!("[kernel_clone] task{} create sucessfully!", task.tid());
         task
     }
 
@@ -249,8 +266,6 @@ impl Task {
         let (memory_set, _satp, ustack_top, entry_point, aux_vec) = MemorySet::from_elf(elf_data);
         // 更新页表
         memory_set.activate();
-        // let pos = 0x30_0000_0000 as usize;
-        // unsafe { if need_dl {log::error!("[sys_mmap] pos : {:?}", core::slice::from_raw_parts_mut(pos as *mut u8, 64));} }
         // 初始化用户栈, 压入args和envs
         // ToDo：待完善
         let argc = args_vec.len();
@@ -263,15 +278,7 @@ impl Task {
             memory_set.token()
         );
         // 关闭所有线程组其他进程
-        self.op_thread_group_mut(|tg| {
-            for thread in tg.iter() {
-                // 跳过当前线程
-                if thread.tid() == self.tid() {
-                    continue;
-                }
-                kernel_exit(thread, 0);
-            }
-        });
+        self.close_thread();
         // 如果当前任务为从线程, 则将线程组中所有任务从调度器中移除
         if !self.is_main_thread() {
             remove_thread_group(self.tgid());
@@ -281,7 +288,7 @@ impl Task {
         // 更新trap_cx
         let kstack_top = get_stack_top_by_sp(self.kstack());
         let trap_cx_ptr = (kstack_top - core::mem::size_of::<TrapContext>()) as *mut TrapContext;
-        let trap_cx = TrapContext::app_init_trap_context(
+        let mut trap_cx = TrapContext::app_init_trap_context(
             entry_point,
             ustack_top,
             argc,
@@ -289,6 +296,7 @@ impl Task {
             envp_base,
             auxv_base,
         );
+        trap_cx.set_tp(Arc::as_ptr(&self) as usize);
         unsafe {
             *trap_cx_ptr = trap_cx;
         }
@@ -301,6 +309,8 @@ impl Task {
         });
         // Todo: FdTable相关
         self.reset_fd_table();
+        // 重置信号处理器
+        self.op_sig_handler_mut(|handler| handler.reset());
 
         log::info!(
             "[kernel_execve] current_task ThreadGroup len {}",
@@ -316,12 +326,9 @@ impl Task {
         log::info!("[kernel_execve] execve complete!");
     }
 
+    // 判断当前任务是否为主线程
     pub fn is_main_thread(&self) -> bool {
         self.tid() == self.tgid()
-    }
-
-    pub fn alloc_fd(&mut self, file: Arc<dyn FileOp + Send + Sync>) -> usize {
-        self.fd_table.alloc_fd(file)
     }
 
     // 向当前任务中添加新的子任务
@@ -329,9 +336,23 @@ impl Task {
         self.children.lock().try_insert(task.tid(), task);
     }
 
+    // 关闭线程组所有其他线程（保留当前进程）
+    pub fn close_thread(&self) {
+        self.op_thread_group_mut(|tg| {
+            for thread in tg.iter() {
+                // 跳过当前线程
+                if thread.tid() == self.tid() {
+                    continue;
+                }
+                remove_task(thread.tid());
+                kernel_exit(thread, 0);
+            }
+        });
+    }
+
     // 复制当前内核栈trap_context内容到新内核栈中（用于kernel_clone)
     // 返回新内核栈当前指针位置（KernelStack）
-    fn trap_context_clone(&self) -> usize {
+    fn trap_context_clone(self: &Arc<Self>) -> usize {
         let src_kstack_top = get_stack_top_by_sp(self.kstack());
         let dst_kstack_top = kstack_alloc();
         log::info!(
@@ -346,7 +367,13 @@ impl Task {
         unsafe {
             dst_trap_cx_ptr.write(src_trap_cx_ptr.read());
         }
+        let dst_trap_cx_tp_ptr = (dst_trap_cx_ptr as usize + 4 * core::mem::size_of::<usize>()) as *mut usize;
+        unsafe { dst_trap_cx_tp_ptr.write(Arc::as_ptr(self) as usize) };
         dst_trap_cx_ptr as usize
+    }
+
+    pub fn alloc_fd(&mut self, file: Arc<dyn FileOp + Send + Sync>) -> usize {
+        self.fd_table.alloc_fd(file)
     }
 
     // 重置文件打开表
@@ -383,6 +410,13 @@ impl Task {
     pub fn fd_table(&self) -> Arc<FdTable> {
         self.fd_table.clone()
     }
+    pub fn mask(&self) -> SigSet {
+        self.sig_pending.lock().mask
+    }
+    // 注意：这里将sigstack取出
+    pub fn sigstack(&self) -> Option<SignalStack> {
+        self.sig_stack.lock().take()
+    }
 
     /*********************************** setter *************************************/
     pub fn set_tgid(&self, tgid: Tid) {
@@ -400,6 +434,9 @@ impl Task {
     }
     pub fn set_parent(&self, parent: Arc<Task>) {
         *self.parent.lock() = Some(Arc::downgrade(&parent));
+    }
+    pub fn set_sigstack(&self, sigstack: SignalStack) {
+        *self.sig_stack.lock() = Some(sigstack)
     }
 
     /*********************************** operator *************************************/
@@ -420,6 +457,15 @@ impl Task {
     }
     pub fn op_thread_group_mut<T>(&self, f: impl FnOnce(&mut ThreadGroup) -> T) -> T {
         f(&mut self.thread_group.lock())
+    }
+    pub fn op_sig_pending_mut<T>(&self, f: impl FnOnce(&mut SigPending)-> T) -> T {
+        f(&mut self.sig_pending.lock())
+    }
+    pub fn op_sig_handler<T>(&self, f: impl FnOnce(&SigHandler) -> T) -> T {
+        f(&self.sig_handler.lock())
+    }
+    pub fn op_sig_handler_mut<T>(&self, f: impl FnOnce(&mut SigHandler)-> T) -> T {
+        f(&mut self.sig_handler.lock())
     }
     /******************************** 任务状态判断 **************************************/
     pub fn is_ready(&self) -> bool {
@@ -454,7 +500,8 @@ impl Task {
 /// 2. 修改task_status为Zombie
 /// 3. 修改exit_code
 /// 4. 托孤给initproc
-/// 5. 将当前进程的fd_table清空, memory_set回收, children清空
+/// 5. 将当前进程的fd_table清空, memory_set回收, children清空, sigpending清空
+/// 6. 向父进程发送SIGCHLD
 pub fn kernel_exit(task: Arc<Task>, exit_code: i32) {
     log::error!(
         "[kernel_exit] Task {} exit with exit_code {:?} ...",
@@ -487,18 +534,23 @@ pub fn kernel_exit(task: Arc<Task>, exit_code: i32) {
     });
     // 清空文件描述符表
     task.fd_table().clear();
+    // 清空信号
+    task.op_sig_pending_mut(|pending|{
+        pending.clear();
+    });
+    // 向父进程发送SIGCHID
+    task.op_parent(|parent|{
+        if let Some(parent) = parent {
+            parent.upgrade().unwrap().receive_siginfo(
+                SigInfo{
+                    signo: Sig::SIGCHLD.raw(),
+                    code: SigInfo::CLD_EXITED,
+                    fields: SiField::kill { tid: task.tid() },
+                }, false);
+        }
+    });
+    TASK_MANAGER.remove(task.tid());
     drop(task);
-}
-
-// 向指定任务内核栈中保存当前task_cx
-fn write_task_cx(task: Arc<Task>) {
-    let task_tp = Arc::as_ptr(&task) as usize;
-    let task_satp = task.op_memory_set(|m| m.token());
-    let task_cx = TaskContext::app_init_task_context(task_tp, task_satp);
-    let task_cx_ptr = task.kstack() as *mut TaskContext;
-    unsafe {
-        task_cx_ptr.write(task_cx);
-    }
 }
 
 // 在clone时没有设置`CLONE_THREAD`标志, 为新任务创建新的`Path`结构
@@ -560,7 +612,11 @@ fn init_user_stack(
         }
         base
     }
-    log::info!("[init_user_stack] args: {:?}, envs: {:?}", args_vec, envs_vec);
+    log::info!(
+        "[init_user_stack] args: {:?}, envs: {:?}",
+        args_vec,
+        envs_vec
+    );
 
     // Push environment variables to the stack
     let envp = push_strings_to_stack(envs_vec, &mut user_sp);
@@ -652,4 +708,47 @@ pub enum TaskStatus {
     // 目前用来支持waitpid的阻塞, usize是等待进程的pid
     Blocked,
     Zombie,
+}
+
+bitflags! {
+    /// Open file flags
+    pub struct CloneFlags: u32 {
+        // SIGCHLD 是一个信号，在UNIX和类UNIX操作系统中，当一个子进程改变了它的状态时，内核会向其父进程发送这个信号。这个信号可以用来通知父进程子进程已经终止或者停止了。父进程可以采取适当的行动，比如清理资源或者等待子进程的状态。
+        // 以下是SIGCHLD信号的一些常见用途：
+        // 子进程终止：当子进程结束运行时，无论是正常退出还是因为接收到信号而终止，操作系统都会向其父进程发送SIGCHLD信号。
+        // 资源清理：父进程可以处理SIGCHLD信号来执行清理工作，例如释放子进程可能已经使用的资源。
+        // 状态收集：父进程可以通过调用wait()或waitpid()系统调用来获取子进程的终止状态，了解子进程是如何结束的。
+        // 孤儿进程处理：在某些情况下，如果父进程没有适当地处理SIGCHLD信号，子进程可能会变成孤儿进程。孤儿进程最终会被init进程（PID为1的进程）收养，并由init进程来处理其终止。
+        // 避免僵尸进程：通过正确响应SIGCHLD信号，父进程可以避免产生僵尸进程（zombie process）。僵尸进程是已经终止但父进程尚未收集其终止状态的进程。
+        // 默认情况下，SIGCHLD信号的处理方式是忽略，但是开发者可以根据需要设置自定义的信号处理函数来响应这个信号。在多线程程序中，如果需要，也可以将SIGCHLD信号的传递方式设置为线程安全。
+        const SIGCHLD = (1 << 4) | (1 << 0);
+        // 如果设置此标志，调用进程和子进程将共享同一内存空间。
+        // 在一个进程中的内存写入在另一个进程中可见。
+        const CLONE_VM = 1 << 8;
+        // 如果设置此标志，子进程将与父进程共享文件系统信息（如当前工作目录）
+        const CLONE_FS = 1 << 9;
+        // 如果设置此标志，子进程将与父进程共享文件描述符表。
+        const CLONE_FILES = 1 << 10;
+        const CLONE_SIGHAND = 1 << 11;
+        const CLONE_PIDFD = 1 << 12;
+        const CLONE_PTRACE = 1 << 13;
+        const CLONE_VFORK = 1 << 14;
+        const CLONE_PARENT = 1 << 15;
+        const CLONE_THREAD = 1 << 16;
+        const CLONE_NEWNS = 1 << 17;
+        const CLONE_SYSVSEM = 1 << 18;
+        const CLONE_SETTLS = 1 << 19;
+        const CLONE_PARENT_SETTID = 1 << 20;
+        const CLONE_CHILD_CLEARTID = 1 << 21;
+        const CLONE_DETACHED = 1 << 22;
+        const CLONE_UNTRACED = 1 << 23;
+        const CLONE_CHILD_SETTID = 1 << 24;
+        const CLONE_NEWCGROUP = 1 << 25;
+        const CLONE_NEWUTS = 1 << 26;
+        const CLONE_NEWIPC = 1 << 27;
+        const CLONE_NEWUSER = 1 << 28;
+        const CLONE_NEWPID = 1 << 29;
+        const CLONE_NEWNET = 1 << 30;
+        const CLONE_IO = 1 << 31;
+    }
 }
