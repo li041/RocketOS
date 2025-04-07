@@ -106,7 +106,10 @@ impl File {
 
     pub fn readdir(&self) -> Result<Vec<LinuxDirent64>, &'static str> {
         if self.is_dir() {
-            return Ok(self.inner_handler(|inner| inner.inode.getdents()));
+            let (offset, linux_dirents) =
+                self.inner_handler(|inner| inner.inode.getdents(inner.offset));
+            self.add_offset(offset);
+            return Ok(linux_dirents);
         }
         return Err("not a directory");
     }

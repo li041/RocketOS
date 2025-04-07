@@ -53,7 +53,7 @@ pub trait InodeOp: Any + Send + Sync {
     // 检查是否是目录, 且有子目录项可以用于lookup
     fn can_lookup(&self) -> bool;
     // 上层readdir调用
-    fn getdents(&self) -> Vec<LinuxDirent64>;
+    fn getdents(&self, offset: usize) -> (usize, Vec<LinuxDirent64>);
     fn getattr(&self) -> Kstat;
     fn get_link(&self) -> String;
     fn get_inode_num(&self) -> usize;

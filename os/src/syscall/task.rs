@@ -216,7 +216,6 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: usize, option: i32) -> isize {
                     } else {
                         // 没有子进程退出, 则挂起当前进程
                         yield_current_task();
-                        // blocking_current_task_and_run_next();
                     }
                 }
             }
