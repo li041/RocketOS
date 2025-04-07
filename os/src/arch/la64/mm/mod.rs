@@ -38,15 +38,20 @@ pub fn copy_to_user<T: Copy>(to: *mut T, from: *const T, n: usize) -> Result<usi
     let start_vpn = VirtAddr::from(to as usize).floor();
     let end_vpn = VirtAddr::from(to as usize + n * core::mem::size_of::<T>()).ceil();
     let vpn_range = VPNRange::new(start_vpn, end_vpn);
-    let (ret, to_pa) = current_task().op_memory_set_mut(|memory_set| {
-        let ret = memory_set.check_valid_user_vpn_range(vpn_range, MapPermission::W);
-        // memory_set.pre_handle_page_fault(vpn_range)
-        let to_pa = memory_set
+    current_task().op_memory_set_mut(|memory_set| {
+        memory_set.check_valid_user_vpn_range(vpn_range, MapPermission::W)?;
+        memory_set.pre_handle_cow(vpn_range)
+    })?;
+    // 将用户的虚拟地址转换为内核的虚拟地址(由于直接映射, 在数值上等于物理地址)
+    let to_pa = current_task().op_memory_set_mut(|memory_set| {
+        memory_set
             .translate_va_to_pa(VirtAddr::from(to as usize))
-            .unwrap();
-        (ret, to_pa)
+            .unwrap()
     });
-    ret?;
+    unsafe {
+        let data = from_raw_parts(from as *const u8, n);
+        log::error!("copy data: {:?}, to_pa: {:#x}", data, to_pa);
+    }
     // 执行复制
     unsafe {
         let from_slice = from_raw_parts(from, n);
