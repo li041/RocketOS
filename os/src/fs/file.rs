@@ -1,3 +1,4 @@
+use alloc::vec;
 use core::any::Any;
 
 use alloc::{sync::Arc, vec::Vec};
@@ -80,22 +81,24 @@ impl File {
     pub fn read_all(&self) -> Vec<u8> {
         info!("[File::read_all]");
         let inode = self.inner_handler(|inner| inner.inode.clone());
-        let mut buffer = [0u8; PAGE_SIZE];
-        let mut v: Vec<u8> = Vec::new();
-        // Debug
-        let mut totol_read = 0;
-        loop {
-            let offset = self.get_offset();
-            let len = inode.read(offset, &mut buffer);
-            totol_read += len;
-            if len == 0 {
-                break;
-            }
-            self.add_offset(len);
-            v.extend_from_slice(&buffer[..len]);
-        }
-        log::info!("read_all: totol_read: {}", totol_read);
-        v
+        let size = inode.get_size();
+        let mut buffer = vec![0u8; size];
+        let offset = self.get_offset();
+        let total_read = inode.read(offset, &mut buffer);
+        self.add_offset(total_read);
+        // loop {
+        //     let offset = self.get_offset();
+        //     let len = inode.read(offset, &mut buffer);
+        //     totol_read += len;
+        //     if len == 0 {
+        //         break;
+        //     }
+        //     self.add_offset(len);
+        //     v.extend_from_slice(&buffer[..len]);
+        //     log::warn!("read one paeg at offset: {}", offset);
+        // }
+        log::info!("read_all: total_read: {}", total_read);
+        buffer
     }
     pub fn is_dir(&self) -> bool {
         self.inner_handler(|inner| inner.inode.can_lookup())
@@ -103,7 +106,10 @@ impl File {
 
     pub fn readdir(&self) -> Result<Vec<LinuxDirent64>, &'static str> {
         if self.is_dir() {
-            return Ok(self.inner_handler(|inner| inner.inode.getdents()));
+            let (offset, linux_dirents) =
+                self.inner_handler(|inner| inner.inode.getdents(inner.offset));
+            self.add_offset(offset);
+            return Ok(linux_dirents);
         }
         return Err("not a directory");
     }

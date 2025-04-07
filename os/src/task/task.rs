@@ -100,7 +100,7 @@ impl Task {
 
     /// 初始化地址空间, 将 `TrapContext` 与 `TaskContext` 压入内核栈中
     pub fn initproc(elf_data: &[u8], root_path: Arc<Path>) -> Arc<Self> {
-        let (memory_set, pgdl_ppn, user_sp, entry_point, _aux_vec) = MemorySet::from_elf(elf_data);
+        let (memory_set, pgdl_ppn, user_sp, entry_point, _aux_vec) = MemorySet::from_elf(elf_data.to_vec(), &mut Vec::<String>::new());
         let tid = tid_alloc();
         let tgid = SpinNoIrqLock::new(TidHandle(tid.0));
         // 申请内核栈
@@ -289,7 +289,7 @@ impl Task {
             // Todo: execve可能有问题
             memory_set = self.memory_set.clone()
         } else {
-            memory_set = Arc::new(SpinNoIrqLock::new(MemorySet::from_existed_user(
+            memory_set = Arc::new(SpinNoIrqLock::new(MemorySet::from_existed_user_lazily(
                 &self.memory_set.lock(),
             )));
         }
@@ -342,11 +342,12 @@ impl Task {
     pub fn kernel_execve(
         self: &Arc<Self>,
         elf_data: &[u8],
-        args_vec: Vec<String>,
+        mut args_vec: Vec<String>,
         envs_vec: Vec<String>,
     ) {
         // 创建地址空间
-        let (memory_set, _satp, ustack_top, entry_point, aux_vec) = MemorySet::from_elf(elf_data);
+        let (mut memory_set, _satp, ustack_top, entry_point, aux_vec) 
+            = MemorySet::from_elf(elf_data.to_vec(), &mut args_vec);
         // 更新页表
         memory_set.activate();
         // let pos = 0x30_0000_0000 as usize;

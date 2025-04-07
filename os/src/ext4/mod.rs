@@ -236,7 +236,7 @@ impl InodeOp for Ext4Inode {
             });
         // 更新inode的extent tree
         new_inode
-            .update_extent(
+            .insert_extent(
                 0,
                 new_block_num as u64,
                 1,
@@ -251,12 +251,12 @@ impl InodeOp for Ext4Inode {
         self.add_entry(dentry.clone(), new_inode_num as u32, EXT4_DT_DIR);
         dentry.inner.lock().inode = Some(new_inode);
     }
-    fn getdents(&self) -> Vec<LinuxDirent64> {
-        let ext4_dirents: Vec<dentry::Ext4DirEntry> = self.getdents();
+    fn getdents(&self, offset: usize) -> (usize, Vec<LinuxDirent64>) {
+        let ext4_dirents: Vec<dentry::Ext4DirEntry> = self.getdents(offset);
 
         let mut offset = 0;
         const NAME_OFFSET: usize = 19;
-        ext4_dirents
+        let linux_dirents = ext4_dirents
             .iter()
             .map(|entry| {
                 let null_term_name_len = entry.name.len() + 1;
@@ -272,7 +272,8 @@ impl InodeOp for Ext4Inode {
                 offset += entry.rec_len as usize;
                 dirent
             })
-            .collect()
+            .collect();
+        (offset, linux_dirents)
     }
     fn getattr(&self) -> Kstat {
         self.getattr()
@@ -292,5 +293,8 @@ impl InodeOp for Ext4Inode {
     }
     fn get_inode_num(&self) -> usize {
         self.inode_num
+    }
+    fn get_size(&self) -> usize {
+        self.inner.read().inode_on_disk.get_size() as usize
     }
 }

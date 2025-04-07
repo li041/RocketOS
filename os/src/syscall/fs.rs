@@ -5,6 +5,7 @@ use alloc::{string::String, vec};
 use alloc::string::ToString;
 use xmas_elf::header::parse_header;
 
+use crate::arch::timer::TimeSpec;
 use crate::fs::kstat::Statx;
 use crate::{
     ext4::{self, inode::S_IFDIR},
@@ -511,6 +512,17 @@ pub fn sys_close(fd: usize) -> isize {
     }
 }
 
+pub fn sys_utimensat(dirfd: i32, pathname: *const u8, times: *const TimeSpec, flags: i32) -> isize {
+    log::info!(
+        "[sys_utimensat] dirfd: {}, pathname: {:?}, times: {:?}, flags: {}",
+        dirfd,
+        pathname,
+        times,
+        flags
+    );
+    0
+}
+
 /* Todo: fake  */
 pub fn sys_mount(
     source: *const u8,
@@ -564,6 +576,7 @@ pub fn sys_faccessat(fd: usize, pathname: *const u8, mode: i32, flags: i32) -> i
         mode,
         flags
     );
+    log::warn!("[sys_faccessat] Unimplemented");
     let path = c_str_to_string(pathname);
     if path.is_empty() {
         log::error!("[sys_faccessat] pathname is empty");
