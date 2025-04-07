@@ -2,28 +2,23 @@ use super::{
     aux::{AuxHeader, AT_EXECFN, AT_NULL, AT_RANDOM}, context::TaskContext, id::{tid_alloc, TidHandle}, kstack::{get_stack_top_by_sp, kstack_alloc, KernelStack}, remove_task, scheduler::switch_to_next_task, String, Tid
 };
 use crate::{
-    arch::{mm::MemorySet, trap::TrapContext},
-    fs::{fdtable::FdTable, file::FileOp, path::Path, FileOld, Stdin, Stdout},
-    mutex::SpinNoIrqLock,
-    // syscall::CloneFlags,
-    task::{
-        aux,
-        context::write_task_cx,
-        kstack,
-        scheduler::{add_task, remove_thread_group, SCHEDULER},
-        INITPROC,
-    },
-    mutex::SpinNoIrq, signal::{SiField, Sig, SigHandler, SigInfo, SigPending, SigSet, SignalStack, UContext}, 
-    task::manager::TASK_MANAGER
+    arch::{mm::copy_to_user, trap::TrapContext}, fs::{fdtable::FdTable, file::FileOp, path::Path, FileOld, Stdin, Stdout}, mm::{MapArea, MapPermission, MapType, MemorySet, VPNRange, VirtAddr}, mutex::{SpinNoIrq, SpinNoIrqLock}, signal::{SiField, Sig, SigHandler, SigInfo, SigPending, SigSet, SignalStack, UContext}, task::{
+        aux, context::write_task_cx, kstack, manager::TASK_MANAGER, scheduler::{add_task, remove_thread_group, SCHEDULER}, INITPROC
+    }
 };
 use alloc::{
     collections::btree_map::BTreeMap, sync::{Arc, Weak}, vec::Vec, vec,
 };
 use bitflags::bitflags;
 use xmas_elf::sections::NoteHeader;
-use core::{any::Any, assert_ne, future::{pending, Pending}, sync::atomic::{AtomicI32, AtomicUsize}};
+use core::{any::Any, assert_ne, future::{pending, Pending}, mem, sync::atomic::{AtomicI32, AtomicUsize}};
 
 pub const INIT_PROC_PID: usize = 0;
+
+extern "C" {
+    fn strampoline();
+    fn etrampoline();
+}
 
 /// tp寄存器指向Task结构体
 /// ToDo: 阻塞与唤醒
@@ -202,8 +197,7 @@ impl Task {
             // Todo: execve可能有问题
             memory_set = self.memory_set.clone()
         } else {
-            // memory_set = Arc::new(SpinNoIrqLock::new(MemorySet::from_existed_user_lazily(
-            memory_set = Arc::new(SpinNoIrqLock::new(MemorySet::from_existed_user(
+            memory_set = Arc::new(SpinNoIrqLock::new(MemorySet::from_existed_user_lazily(
                 &self.memory_set.lock(),
             )));
         }
@@ -263,14 +257,29 @@ impl Task {
         envs_vec: Vec<String>,
     ) {
         // 创建地址空间
-        let (memory_set, _satp, ustack_top, entry_point, aux_vec) = MemorySet::from_elf(elf_data);
+        let (mut memory_set, _satp, ustack_top, entry_point, aux_vec) = MemorySet::from_elf(elf_data);
         // 更新页表
         memory_set.activate();
+        #[cfg(target_arch = "loongarch64")]
+        memory_set.push_with_offset(
+            MapArea::new(
+                VPNRange::new(
+                    VirtAddr::from(strampoline as usize).floor(),
+                    VirtAddr::from(etrampoline as usize).ceil(),
+                ),
+                MapType::Linear,
+                MapPermission::R | MapPermission::X | MapPermission::U,
+                None,
+                0,
+            ),
+            None,
+            0,
+        );
         // 初始化用户栈, 压入args和envs
         // ToDo：待完善
         let argc = args_vec.len();
         let (argv_base, envp_base, auxv_base, ustack_top) =
-            init_user_stack(&args_vec, &envs_vec, aux_vec, ustack_top);
+            init_user_stack(&memory_set, &args_vec, &envs_vec, aux_vec, ustack_top);
         log::info!(
             "[kernel_execve] entry_point: {:x}, user_sp: {:x}, page_table: {:x}",
             entry_point,
@@ -565,16 +574,20 @@ fn clone_path(old_path: &Arc<SpinNoIrqLock<Arc<Path>>>) -> Arc<SpinNoIrqLock<Arc
 // argv_base, envp_base, auxv_base, user_sp
 // 压入顺序从高地址到低地址: envp, argv, platform, random bytes, auxs, envp[], argv[], argc
 fn init_user_stack(
+    memory_set: &MemorySet,
     args_vec: &[String],
     envs_vec: &[String],
     mut auxs_vec: Vec<AuxHeader>,
     mut user_sp: usize,
 ) -> (usize, usize, usize, usize) {
-    fn push_strings_to_stack(strings: &[String], stack_ptr: &mut usize) -> Vec<usize> {
+    fn push_strings_to_stack(memory_set: &MemorySet, strings: &[String], stack_ptr: &mut usize) -> Vec<usize> {
         let mut addresses = vec![0; strings.len()];
         for (i, string) in strings.iter().enumerate() {
             *stack_ptr -= string.len() + 1; // '\0'
             *stack_ptr -= *stack_ptr % core::mem::size_of::<usize>(); // 按照usize对齐
+            #[cfg(target_arch = "loongarch64")]
+            let ptr = (memory_set.translate_va_to_pa(VirtAddr::from(*stack_ptr)).unwrap()) as *mut u8;
+            #[cfg(target_arch = "riscv64")]
             let ptr = *stack_ptr as *mut u8;
             unsafe {
                 ptr.copy_from(string.as_ptr(), string.len());
@@ -585,9 +598,12 @@ fn init_user_stack(
         addresses
     }
 
-    fn push_pointers_to_stack(pointers: &[usize], stack_ptr: &mut usize) -> usize {
+    fn push_pointers_to_stack(memory_set: &MemorySet, pointers: &[usize], stack_ptr: &mut usize) -> usize {
         let len = (pointers.len() + 1) * core::mem::size_of::<usize>(); // +1 for null terminator
         *stack_ptr -= len;
+        #[cfg(target_arch = "loongarch64")]
+        let base = memory_set.translate_va_to_pa(VirtAddr::from(*stack_ptr)).unwrap();
+        #[cfg(target_arch = "riscv64")]
         let base = *stack_ptr;
         unsafe {
             for (i, &ptr) in pointers.iter().enumerate() {
@@ -599,9 +615,12 @@ fn init_user_stack(
         base
     }
 
-    fn push_aux_headers_to_stack(aux_headers: &[AuxHeader], stack_ptr: &mut usize) -> usize {
+    fn push_aux_headers_to_stack(memory_set: &MemorySet, aux_headers: &[AuxHeader], stack_ptr: &mut usize) -> usize {
         let len = aux_headers.len() * core::mem::size_of::<AuxHeader>();
         *stack_ptr -= len;
+        #[cfg(target_arch = "loongarch64")]
+        let base = memory_set.translate_va_to_pa(VirtAddr::from(*stack_ptr)).unwrap();
+        #[cfg(target_arch = "riscv64")]
         let base = *stack_ptr;
         unsafe {
             for (i, header) in aux_headers.iter().enumerate() {
@@ -619,17 +638,24 @@ fn init_user_stack(
     );
 
     // Push environment variables to the stack
-    let envp = push_strings_to_stack(envs_vec, &mut user_sp);
+    let envp = push_strings_to_stack(memory_set, envs_vec,  &mut user_sp);
 
     // Push arguments to the stack
-    let argv = push_strings_to_stack(args_vec, &mut user_sp);
+    let argv = push_strings_to_stack(memory_set, args_vec, &mut user_sp);
 
     // Push platform string to the stack
+    #[cfg(target_arch = "riscv64")]
     let platform = "RISC-V64";
+    #[cfg(target_arch = "loongarch64")]
+    let platform = "loongarch64";
+    
     user_sp -= platform.len() + 1;
     user_sp -= user_sp % core::mem::size_of::<usize>();
+    #[cfg(target_arch = "loongarch64")]
+    let ptr = (memory_set.translate_va_to_pa(VirtAddr::from(user_sp)).unwrap()) as *mut u8;
+    #[cfg(target_arch = "riscv64")]
+    let ptr = user_sp as *mut u8;
     unsafe {
-        let ptr = user_sp as *mut u8;
         ptr.copy_from(platform.as_ptr(), platform.len());
         *((ptr as usize + platform.len()) as *mut u8) = 0;
     }
@@ -653,18 +679,22 @@ fn init_user_stack(
         aux_type: AT_NULL,
         value: 0,
     });
-    let auxv_base = push_aux_headers_to_stack(&auxs_vec, &mut user_sp);
-
+    let auxv_base = push_aux_headers_to_stack(&memory_set,&auxs_vec, &mut user_sp);
+    
     // Push environment pointers to the stack
-    let envp_base = push_pointers_to_stack(&envp, &mut user_sp);
+    let envp_base = push_pointers_to_stack(&memory_set,&envp, &mut user_sp);
 
     // Push argument pointers to the stack
-    let argv_base = push_pointers_to_stack(&argv, &mut user_sp);
+    let argv_base = push_pointers_to_stack(&memory_set,&argv, &mut user_sp);
 
     // Push argc (number of arguments)
-    user_sp -= core::mem::size_of::<usize>();
+    user_sp -= core::mem::size_of::<usize>(); 
+    #[cfg(target_arch = "loongarch64")]
+    let user_sp_pa = (memory_set.translate_va_to_pa(VirtAddr::from(user_sp.clone())).unwrap()) as *mut u8;
+    #[cfg(target_arch = "riscv64")]
+    let user_sp_pa = user_sp as *mut u8;
     unsafe {
-        *(user_sp as *mut usize) = args_vec.len();
+        *(user_sp_pa as *mut usize) = args_vec.len();
     }
 
     (argv_base, envp_base, auxv_base, user_sp)

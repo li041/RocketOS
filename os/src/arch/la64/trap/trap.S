@@ -94,7 +94,7 @@ __return_to_user:
     # 保存内核tp
     st.d $r2, $sp, -1*8
     # 恢复用户tp
-    ld.d $r2, $sp, -2*8
+    ld.d $r2, $sp, 2*8
     # release TrapContext on kernel stack
     addi.d $sp, $sp, 34*8
     # 交换sp和SAVE0的值

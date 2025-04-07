@@ -1,10 +1,12 @@
+use alloc::vec;
 use core::any::Any;
 
 use alloc::{sync::Arc, vec::Vec};
 use log::info;
+use spin::RwLock;
 use virtio_drivers::PAGE_SIZE;
 
-use crate::mutex::SpinNoIrqLock;
+use crate::{arch::config::PAGE_SIZE_BITS, mm::Page, mutex::SpinNoIrqLock};
 
 use super::{
     dentry::{Dentry, LinuxDirent64},
@@ -34,6 +36,9 @@ pub trait FileOp: Any + Send + Sync {
     fn as_any(&self) -> &dyn Any;
     // 从文件中读取数据到buf中, 返回读取的字节数, 同时更新文件偏移量
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> usize;
+    fn get_page(self: Arc<Self>, page_offset: usize) -> Result<Arc<Page>, &'static str> {
+        unimplemented!();
+    }
     /// Write `UserBuffer` to file
     fn write<'a>(&'a self, buf: &'a [u8]) -> usize;
     // move the file offset
@@ -76,22 +81,24 @@ impl File {
     pub fn read_all(&self) -> Vec<u8> {
         info!("[File::read_all]");
         let inode = self.inner_handler(|inner| inner.inode.clone());
-        let mut buffer = [0u8; PAGE_SIZE];
-        let mut v: Vec<u8> = Vec::new();
-        // Debug
-        let mut totol_read = 0;
-        loop {
-            let offset = self.get_offset();
-            let len = inode.read(offset, &mut buffer);
-            totol_read += len;
-            if len == 0 {
-                break;
-            }
-            self.add_offset(len);
-            v.extend_from_slice(&buffer[..len]);
-        }
-        log::info!("read_all: totol_read: {}", totol_read);
-        v
+        let size = inode.get_size();
+        let mut buffer = vec![0u8; size];
+        let offset = self.get_offset();
+        let total_read = inode.read(offset, &mut buffer);
+        self.add_offset(total_read);
+        // loop {
+        //     let offset = self.get_offset();
+        //     let len = inode.read(offset, &mut buffer);
+        //     totol_read += len;
+        //     if len == 0 {
+        //         break;
+        //     }
+        //     self.add_offset(len);
+        //     v.extend_from_slice(&buffer[..len]);
+        //     log::warn!("read one paeg at offset: {}", offset);
+        // }
+        log::info!("read_all: total_read: {}", total_read);
+        buffer
     }
     pub fn is_dir(&self) -> bool {
         self.inner_handler(|inner| inner.inode.can_lookup())
@@ -113,6 +120,12 @@ impl FileOp for File {
         let read_size = self.inner_handler(|inner| inner.inode.read(inner.offset, buf));
         self.add_offset(read_size);
         read_size
+    }
+    /// 共享文件映射和私有文件映射只读时调用
+    fn get_page(self: Arc<Self>, page_aligned_offset: usize) -> Result<Arc<Page>, &'static str> {
+        debug_assert!(page_aligned_offset % PAGE_SIZE == 0);
+        let inode = self.inner_handler(|inner| inner.inode.clone());
+        inode.get_page(page_aligned_offset >> PAGE_SIZE_BITS)
     }
 
     fn write<'a>(&'a self, buf: &'a [u8]) -> usize {

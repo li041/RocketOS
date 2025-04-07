@@ -12,8 +12,7 @@ pub use sigStack::*;
 pub use sigStruct::*;
 
 use crate::{
-    arch::trap::TrapContext,
-    task::{current_task, get_stack_top_by_sp, kernel_exit, remove_task, switch_to_next_task, Task},
+    arch::{mm::copy_to_user, trap::TrapContext}, mm::VirtAddr, task::{current_task, get_stack_top_by_sp, kernel_exit, remove_task, switch_to_next_task, Task}
 };
 
 // 1. 检查是否有信号触发
@@ -123,7 +122,7 @@ pub fn handle_signal() {
                 user_sp = user_sp - ((sig_context_size + 15) & !0xF);
                 log::info!("[handle_signal] SigContext size {:x}", sig_context_size);
                 log::info!("[handle_signal] current user stack {:x}", user_sp);
-                let sig_context_ptr = user_sp as *mut SigContext;
+                let user_sig_context_ptr = user_sp as *mut SigContext;
                 #[cfg(target_arch = "riscv64")]
                 let sig_context = SigContext {
                     x: trap_cx.x,
@@ -138,7 +137,10 @@ pub fn handle_signal() {
                     mask: old_mask,
                     info: 0,
                 };
-                unsafe { sig_context_ptr.write(sig_context); }
+                let sig_context_ptr = &sig_context as *const SigContext;
+                if let Err(err) = copy_to_user(user_sig_context_ptr, sig_context_ptr,1){
+                    panic!("[handle_signal] copy_to_user failed: {}", err);
+                }
                 // 修改栈顶trap的a0
                 trap_cx.set_a0(sig.raw() as usize);
                 log::info!("[handle_signal] a0 = {}", sig.raw() as usize);

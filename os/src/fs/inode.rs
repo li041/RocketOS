@@ -1,6 +1,9 @@
 //! new
 use crate::ext4::inode::Ext4Inode;
+use crate::mm::Page;
 use crate::mutex::SpinNoIrqLock;
+use log::SetLoggerError;
+use spin::RwLock;
 
 use super::dentry::{Dentry, LinuxDirent64};
 use super::kstat::Kstat;
@@ -17,6 +20,8 @@ pub trait InodeOp: Any + Send + Sync {
     fn as_any(&self) -> &dyn Any;
     // 用于文件读写
     fn read<'a>(&'a self, offset: usize, buf: &'a mut [u8]) -> usize;
+    // 先查找页缓存, 如果没有则从块设备中读取
+    fn get_page(self: Arc<Self>, page_index: usize) -> Result<Arc<Page>, &'static str>;
     fn write<'a>(&'a self, page_offset: usize, buf: &'a [u8]) -> usize;
     // 返回目录项
     // 先查找Denrty的children, 如果没有再查找目录
@@ -52,6 +57,7 @@ pub trait InodeOp: Any + Send + Sync {
     fn getattr(&self) -> Kstat;
     fn get_link(&self) -> String;
     fn get_inode_num(&self) -> usize;
+    fn get_size(&self) -> usize;
 }
 
 // pub struct InodeMeta {

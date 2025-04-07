@@ -1,4 +1,4 @@
-use crate::{arch::trap::TrapContext, signal::{SiField, Sig, SigAction, SigContext, SigHandler, SigInfo, SigSet, UContext}, task::{current_task, get_stack_top_by_sp, INITPROC, INIT_PROC_PID, TASK_MANAGER}};
+use crate::{arch::{mm::copy_from_user, trap::TrapContext}, signal::{SiField, Sig, SigAction, SigContext,  SigInfo, SigSet}, task::{current_task, get_stack_top_by_sp, INITPROC, INIT_PROC_PID, TASK_MANAGER}};
 
 
 
@@ -141,14 +141,17 @@ pub fn sys_rt_sigaction(signum: i32, act: usize, oldact: usize) -> isize{
     }
     // 将新action写入
     if act != 0 {
-        unsafe { 
-            let mut new_action: SigAction = act_ptr.read(); 
-            new_action.mask.remove(SigSet::SIGKILL | SigSet::SIGSTOP);
-            task.op_sig_handler_mut(|handler|{
-                handler.update(sig, new_action);
-            });
-            log::info!("[sys_rt_sigaction] new:{:?}", new_action);
-        }
+        let mut new_action = if let Ok(action) = copy_from_user(act_ptr, 1) {
+            action[0]
+        } else  {
+            log::error!("[sys_rt_sigaction] copy_from_user failed");
+            return -1;
+        }; 
+        new_action.mask.remove(SigSet::SIGKILL | SigSet::SIGSTOP);
+        task.op_sig_handler_mut(|handler|{
+            handler.update(sig, new_action);
+        });
+        log::info!("[sys_rt_sigaction] new:{:?}", new_action);
     }
     0
 }
@@ -181,21 +184,24 @@ pub fn sys_rt_sigprocmask(how: usize, set: usize, oldset: usize) -> isize{
     } 
     // set不为NULL（为NULL时直接跳过，即忽略how）
     if set != 0 {
-        unsafe{
-            let mut new_mask = set_ptr.read();
-            log::info!("[sys_rt_sigprocmask] current mask {:?}", new_mask);
-            new_mask.remove(SigSet::SIGKILL | SigSet::SIGCONT);
-            let mut change_mask = SigSet::empty();
-            match how {
-                SIG_BLOCK => { change_mask = new_mask | current_mask; }
-                SIG_UNBLOCK => { change_mask = new_mask & current_mask; }
-                SIG_SETMASK => { change_mask = new_mask }
-                _ => { return -1; }
-            }
-            task.op_sig_pending_mut(|pending|{
-                pending.change_mask(change_mask);
-            })
+        let mut new_mask = if let Ok(mask) = copy_from_user(set_ptr, 1) {
+            mask[0]
+        } else  {
+            log::error!("[sys_rt_sigprocmask] copy_from_user failed");
+            return -1;
+        };
+        log::info!("[sys_rt_sigprocmask] current mask {:?}", new_mask);
+        new_mask.remove(SigSet::SIGKILL | SigSet::SIGCONT);
+        let mut change_mask = SigSet::empty();
+        match how {
+            SIG_BLOCK => { change_mask = new_mask | current_mask; }
+            SIG_UNBLOCK => { change_mask = new_mask & current_mask; }
+            SIG_SETMASK => { change_mask = new_mask }
+            _ => { return -1; }
         }
+        task.op_sig_pending_mut(|pending|{
+            pending.change_mask(change_mask);
+        })
     }
     0
 }
@@ -245,7 +251,12 @@ pub fn sys_rt_sigreturn() -> isize {
     // 获取用户栈中sigcontext
     let user_sp = trap_cx.get_sp();
     let sig_context_ptr = user_sp as *const SigContext;
-    let sig_context = unsafe { sig_context_ptr.read() };
+    let sig_context = if let Ok(sig_context) = copy_from_user(sig_context_ptr, 1) {
+        sig_context[0]
+    } else  {
+        log::error!("[sys_rt_sigreturn] copy_from_user failed");
+        return -1;
+    }; 
     // flags中不包含SIGINFO
     #[cfg(target_arch = "riscv64")]
     if sig_context.info == 0 {

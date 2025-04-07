@@ -13,18 +13,11 @@
     .globl __trap_from_user
     .globl __return_to_user
     .globl __trap_from_kernel
-    .globl __trap_from_signal
     .align 2
 # 在trap进入内核态时, 将用户态的上下文保存到内核栈上, 然后调用trap_handler
 __trap_from_user:
     # 交换sp和sscratch的值
-    # csrrw sp, sscratch, sp
-    # new begin
-    csrrw tp, sscratch, tp
-    csrrw sp, sscratch, sp 
-    ld sp, 0(tp)
-    # 让sp指向内核栈 
-    # new end 
+    csrrw sp, sscratch, sp
     # now sp->kernel stack, sscratch->user stack
     # 在内核栈上保存用户的上下文 
     addi sp, sp, -34*8
@@ -32,8 +25,7 @@ __trap_from_user:
     sd x1, 1*8(sp)
     # skip sp(x2), we will save it later
     sd x3, 3*8(sp)
-    # skip tp(x4), application does not use it 
-    sd x4, 4*8(sp)
+    # skip tp(x4), application does not use it
     # save x5~x31
     .set n, 5
     .rept 27
@@ -52,18 +44,6 @@ __trap_from_user:
     mv a0, sp
     # 注意要在保存上下文后设置stvec
     # 设置stvec为Mode(0~1 bits) Direct, 基地址为__trap_from_kernel
-    la t0, __trap_from_user
-    csrw stvec, t0
-    # 设置sstatus的SPP位为1, 表示进入内核态, 实际并没有作用
-    csrs sstatus, 8
-    call trap_handler
-    j __return_to_user
-
-# 该trap仅由sigreturn_trampoline进行调用，作为信号的处理程序入口
-__trap_from_signal:
-    csrrw sp, sscratch, sp
-    mv a0, sp
-    # 恢复stvec设置
     la t0, __trap_from_user
     csrw stvec, t0
     # 设置sstatus的SPP位为1, 表示进入内核态, 实际并没有作用
@@ -99,12 +79,7 @@ __return_to_user:
     .endr
     # release TrapContext on kernel stack
     addi sp, sp, 34*8
-    # new begin
-    # 更新tp中的内核栈
-    sd sp, 0(tp)
     csrrw sp, sscratch, sp
-    csrrw tp, sscratch, tp 
-    # new end 
     # 现在sp指向的是用户栈, sscratch指向的是内核栈, 然后返回到用户态
     # 置sstatus的SPP位为0, 表示返回到用户态
     csrc sstatus, 8 
