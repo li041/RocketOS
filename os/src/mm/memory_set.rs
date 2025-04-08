@@ -282,16 +282,31 @@ impl MemorySet {
 
     /// return (user_memory_set, satp, ustack_top, entry_point, aux_vec)
     /// Todo: elf_data是完整的, 还要lazy_allocation?
-    pub fn from_elf(elf_data: &[u8]) -> (Self, usize, usize, usize, Vec<AuxHeader>) {
+    pub fn from_elf(mut elf_data: Vec<u8>, argv: &mut Vec<String>) -> (Self, usize, usize, usize, Vec<AuxHeader>) {
         #[cfg(target_arch = "riscv64")]
         let mut memory_set = Self::from_global();
         #[cfg(target_arch = "loongarch64")]
         let mut memory_set = Self::new_bare();
 
+        // 处理 .sh 文件
+        if argv.len() > 0 {
+            let file_name = &argv[0];
+            if file_name.ends_with(".sh") {
+                let prepend_args = vec![
+                    String::from("busybox"),
+                    String::from("sh")
+                ];
+                argv.splice(0..0, prepend_args);
+                if let Ok(busybox) = path_openat("/busybox", 0, AT_FDCWD, 0) {
+                    elf_data = busybox.read_all()
+                }
+            }
+        }
+
         // 创建`TaskContext`时使用
         let pgtbl_ppn = memory_set.page_table.token();
         // map program segments of elf, with U flag
-        let elf = xmas_elf::ElfFile::new(elf_data).unwrap();
+        let elf = xmas_elf::ElfFile::new(&elf_data).unwrap();
         let elf_header = elf.header;
         let magic = elf_header.pt1.magic;
         assert_eq!(magic, [0x7f, 0x45, 0x4c, 0x46], "invalid elf!");

@@ -173,8 +173,8 @@ pub fn syscall(
             a4 as *mut Statx,
         ),
         _ => {
-            log::warn!("Unsupported syscall_id: {}", syscall_id);
-            -1
+            log::error!("Unsupported syscall_id: {}", syscall_id);
+            0
         } // panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }
