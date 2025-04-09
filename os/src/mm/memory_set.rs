@@ -254,7 +254,10 @@ impl MemorySet {
 
     /// return (user_memory_set, satp, ustack_top, entry_point, aux_vec)
     /// Todo: elf_data是完整的, 还要lazy_allocation?
-    pub fn from_elf(mut elf_data: Vec<u8>, argv: &mut Vec<String>) -> (Self, usize, usize, usize, Vec<AuxHeader>) {
+    pub fn from_elf(
+        mut elf_data: Vec<u8>,
+        argv: &mut Vec<String>,
+    ) -> (Self, usize, usize, usize, Vec<AuxHeader>) {
         #[cfg(target_arch = "riscv64")]
         let mut memory_set = Self::from_global();
         #[cfg(target_arch = "loongarch64")]
@@ -264,10 +267,7 @@ impl MemorySet {
         if argv.len() > 0 {
             let file_name = &argv[0];
             if file_name.ends_with(".sh") {
-                let prepend_args = vec![
-                    String::from("busybox"),
-                    String::from("sh")
-                ];
+                let prepend_args = vec![String::from("busybox"), String::from("sh")];
                 argv.splice(0..0, prepend_args);
                 if let Ok(busybox) = path_openat("/busybox", 0, AT_FDCWD, 0) {
                     elf_data = busybox.read_all()
@@ -320,9 +320,10 @@ impl MemorySet {
 
                 let map_offset = start_va.0 - start_va.floor().0 * PAGE_SIZE;
                 log::info!(
-                    "[from_elf] app map area: [{:#x}, {:#x})",
+                    "[from_elf] app map area: [{:#x}, {:#x}), map_perm: {:?}",
                     start_va.0,
-                    end_va.0
+                    end_va.0,
+                    map_perm
                 );
                 memory_set.push_with_offset(
                     map_area,
@@ -478,6 +479,7 @@ impl MemorySet {
         memory_set.brk = heap_bottom;
 
         log::error!("[from_elf] entry_point: {:#x}", entry_point);
+        memory_set.page_table.dump_all_user_mapping();
 
         return (memory_set, pgtbl_ppn, ustack_top, entry_point, aux_vec);
     }
@@ -515,13 +517,22 @@ impl MemorySet {
     }
     pub fn from_existed_user_lazily(user_memory_set: &MemorySet) -> Self {
         let page_table = PageTable::from_existed_user(&user_memory_set.page_table);
-        MemorySet {
+        user_memory_set.areas.iter().for_each(|(_, area)| {
+            log::error!(
+                "[MemorySet::from_existed_user_lazily] area: {:#x} {:#x}",
+                area.vpn_range.get_start().0,
+                area.vpn_range.get_end().0
+            );
+        });
+        let memory_set = MemorySet {
             brk: user_memory_set.brk,
             heap_bottom: user_memory_set.heap_bottom,
             mmap_start: MMAP_MIN_ADDR,
             page_table,
             areas: user_memory_set.areas.clone(),
-        }
+        };
+        memory_set.page_table.dump_all_user_mapping();
+        memory_set
     }
 }
 
@@ -846,18 +857,25 @@ impl MemorySet {
                         if area.vpn_range.contains_vpn(vpn) {
                             let data_frame = area.pages.get(&vpn).unwrap();
                             if Arc::strong_count(data_frame) == 1 {
+                                log::warn!("arc strong count == 1");
                                 let mut flags = pte.flags();
                                 flags.remove(PTEFlags::COW);
                                 flags.insert(PTEFlags::W);
+                                #[cfg(target_arch = "loongarch64")]
+                                flags.insert(PTEFlags::D);
                                 *pte = PageTableEntry::new(pte.ppn(), flags);
                             } else {
+                                log::warn!("arc strong count > 1");
                                 let page = Page::new_private(None);
                                 let src_frame = pte.ppn().get_bytes_array();
                                 let dst_frame = page.ppn().get_bytes_array();
+                                log::warn!("dst_frame: {:#x}", page.ppn().0);
                                 dst_frame.copy_from_slice(src_frame);
                                 let mut flags = pte.flags();
                                 flags.remove(PTEFlags::COW);
                                 flags.insert(PTEFlags::W);
+                                #[cfg(target_arch = "loongarch64")]
+                                flags.insert(PTEFlags::D);
                                 *pte = PageTableEntry::new(page.ppn(), flags);
                                 area.pages.insert(vpn, Arc::new(page));
                             }
@@ -900,9 +918,12 @@ impl MemorySet {
                         // 根据VPN找到对应的data_frame, 并查看Arc的引用计数
                         if Arc::strong_count(data_frame) == 1 {
                             // 直接修改pte
+                            log::warn!("arc strong count == 1");
                             let mut flags = pte.flags();
                             flags.remove(PTEFlags::COW);
                             flags.insert(PTEFlags::W);
+                            #[cfg(target_arch = "loongarch64")]
+                            flags.insert(PTEFlags::D);
                             *pte = PageTableEntry::new(pte.ppn(), flags);
                         } else {
                             // 分配新的frame, 修改pte, 更新MemorySet
@@ -913,6 +934,8 @@ impl MemorySet {
                             let mut flags = pte.flags();
                             flags.remove(PTEFlags::COW);
                             flags.insert(PTEFlags::W);
+                            #[cfg(target_arch = "loongarch64")]
+                            flags.insert(PTEFlags::D);
                             *pte = PageTableEntry::new(page.ppn(), flags);
                             area.pages.insert(vpn, Arc::new(page));
                         }

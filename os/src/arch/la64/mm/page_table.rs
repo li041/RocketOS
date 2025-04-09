@@ -56,7 +56,7 @@ impl From<MapPermission> for PTEFlags {
             flags |= PTEFlags::NR;
         }
         if perm.contains(MapPermission::W) {
-            flags |= PTEFlags::W;
+            flags |= PTEFlags::D | PTEFlags::W;
         }
         if !perm.contains(MapPermission::X) {
             flags |= PTEFlags::NX;
@@ -67,8 +67,8 @@ impl From<MapPermission> for PTEFlags {
         if perm.contains(MapPermission::G) {
             flags |= PTEFlags::G;
         }
-        if perm.contains(MapPermission::D) {
-            flags |= PTEFlags::D;
+        if perm.contains(MapPermission::S) {
+            flags |= PTEFlags::S;
         }
         flags
     }
@@ -98,6 +98,7 @@ impl PageTableEntry {
     pub fn from_pte_cow(pte: PageTableEntry) -> Self {
         let mut flags = pte.flags();
         flags.remove(PTEFlags::W);
+        flags.remove(PTEFlags::D);
         flags.insert(PTEFlags::COW);
         Self {
             bits: pte.ppn().0 << 12 | flags.bits(),
@@ -120,7 +121,7 @@ impl PageTableEntry {
         !self.flags().contains(PTEFlags::NR)
     }
     pub fn writable(&self) -> bool {
-        self.flags().contains(PTEFlags::W)
+        self.flags().contains(PTEFlags::D)
     }
     pub fn executable(&self) -> bool {
         !self.flags().contains(PTEFlags::NX)
@@ -177,6 +178,13 @@ impl PTEFlags {
             ret.push_str("MAT_WUC");
         } else if self.contains(PTEFlags::MAT_SUC) {
             ret.push_str("MAT_SUC");
+        }
+
+        if self.contains(PTEFlags::COW) {
+            ret.push_str("COW");
+        }
+        if self.contains(PTEFlags::S) {
+            ret.push_str("S");
         }
 
         ret
@@ -298,22 +306,23 @@ impl PageTable {
         let mut result: Option<&mut PageTableEntry> = None;
         for (i, idx) in idxs.iter().enumerate() {
             let pte = &mut ppn.get_pte_array()[*idx];
+            if !pte.is_valid() {
+                return None;
+            }
             if i == 2 {
                 result = Some(pte);
                 break;
-            }
-            if !pte.is_valid() {
-                return None;
             }
             ppn = pte.ppn();
         }
         result
     }
+    /// Todo: 对于loongarch, 好像D是可写位
     pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {
         let pte = self.find_pte_create(vpn).unwrap();
         assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
-        // *pte = PageTableEntry::new(ppn, flags | PTEFlags::V);
-        *pte = PageTableEntry::new(ppn, flags | PTEFlags::V | PTEFlags::D);
+        *pte = PageTableEntry::new(ppn, flags | PTEFlags::V);
+        // *pte = PageTableEntry::new(ppn, flags | PTEFlags::V | PTEFlags::D);
     }
     pub fn remap(&mut self, vpn: VirtPageNum, flags: PTEFlags) {
         let pte = self.find_pte_create(vpn).unwrap();
