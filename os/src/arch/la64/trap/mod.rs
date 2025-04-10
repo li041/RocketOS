@@ -6,11 +6,7 @@ use crate::{
         mm::PageTable,
         tlbrelo::{TLBRELo0, TLBRELo1},
         Interrupt, TLBRBadV, TLBREHi, PGDL, PWCL, TLBRERA,
-    },
-    mm::VirtAddr,
-    signal::handle_signal,
-    syscall::syscall,
-    task::{current_task, yield_current_task},
+    }, mm::VirtAddr, signal::handle_signal, syscall::syscall, task::{current_task, yield_current_task}
 };
 
 use super::{register, Exception, TIClr, Trap, ERA};

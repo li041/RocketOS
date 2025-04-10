@@ -123,8 +123,6 @@ impl Task {
     pub fn initproc(elf_data: &[u8], root_path: Arc<Path>) -> Arc<Self> {
         let (memory_set, pgdl_ppn, user_sp, entry_point, _aux_vec) =
             MemorySet::from_elf(elf_data.to_vec(), &mut Vec::<String>::new());
-        let (memory_set, pgdl_ppn, user_sp, entry_point, _aux_vec) =
-            MemorySet::from_elf(elf_data.to_vec(), &mut Vec::<String>::new());
         let tid = tid_alloc();
         let tgid = SpinNoIrqLock::new(TidHandle(tid.0));
         // 申请内核栈
@@ -375,6 +373,9 @@ impl Task {
     // 向当前任务中添加新的子任务
     pub fn add_child(&self, task: Arc<Task>) {
         self.children.lock().try_insert(task.tid(), task);
+    }
+    pub fn remove_child_task(&self, tid: Tid) {
+        self.children.lock().remove(&tid);
     }
 
     // 关闭线程组所有其他线程（保留当前进程）
