@@ -8,7 +8,6 @@ use crate::{
         Interrupt, TLBRBadV, TLBREHi, PGDL, PWCL, TLBRERA,
     },
     mm::VirtAddr,
-    signal::handle_signal,
     syscall::syscall,
     task::{current_task, yield_current_task},
 };

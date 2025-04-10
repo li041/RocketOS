@@ -100,7 +100,8 @@ impl Task {
 
     /// 初始化地址空间, 将 `TrapContext` 与 `TaskContext` 压入内核栈中
     pub fn initproc(elf_data: &[u8], root_path: Arc<Path>) -> Arc<Self> {
-        let (memory_set, pgdl_ppn, user_sp, entry_point, _aux_vec) = MemorySet::from_elf(elf_data.to_vec(), &mut Vec::<String>::new());
+        let (memory_set, pgdl_ppn, user_sp, entry_point, _aux_vec) =
+            MemorySet::from_elf(elf_data.to_vec(), &mut Vec::<String>::new());
         let tid = tid_alloc();
         let tgid = SpinNoIrqLock::new(TidHandle(tid.0));
         // 申请内核栈
@@ -346,8 +347,8 @@ impl Task {
         envs_vec: Vec<String>,
     ) {
         // 创建地址空间
-        let (mut memory_set, _satp, ustack_top, entry_point, aux_vec) 
-            = MemorySet::from_elf(elf_data.to_vec(), &mut args_vec);
+        let (mut memory_set, _satp, ustack_top, entry_point, aux_vec) =
+            MemorySet::from_elf(elf_data.to_vec(), &mut args_vec);
         // 更新页表
         memory_set.activate();
         // let pos = 0x30_0000_0000 as usize;
@@ -428,6 +429,9 @@ impl Task {
     // 向当前任务中添加新的子任务
     pub fn add_child(&self, task: Arc<Task>) {
         self.children.lock().try_insert(task.tid(), task);
+    }
+    pub fn remove_child_task(&self, tid: Tid) {
+        self.children.lock().remove(&tid);
     }
 
     // 复制当前内核栈trap_context内容到新内核栈中（用于kernel_clone)
