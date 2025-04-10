@@ -55,6 +55,7 @@ pub fn sys_clone(
     );
     // ToDo: 更新信号检验
     add_task(new_task);
+    yield_current_task();
     new_tid as isize
 }
 
@@ -97,6 +98,7 @@ pub fn sys_clone(
     );
     // ToDo: 更新信号检验
     add_task(new_task);
+    yield_current_task();
     new_tid as isize
 }
 

@@ -27,7 +27,7 @@ else
 endif
 
 # User
-USER_TARGET_PATH := ../user/target/$(TARGET)/release/
+USER_TARGET_PATH := ../user/target/$(TARGET)/$(MODE)/
 
 KERNEL_ELF := target/$(TARGET)/$(MODE)/os
 KERNEL_BIN := $(KERNEL_ELF).bin

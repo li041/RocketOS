@@ -557,7 +557,6 @@ impl MemorySet {
             page_table,
             areas: user_memory_set.areas.clone(),
         };
-        memory_set.page_table.dump_all_user_mapping();
         memory_set
     }
 }
@@ -784,9 +783,6 @@ impl MemorySet {
                         // 增加页的引用计数
                         area.pages.insert(va.floor(), page);
                         // 刷新tlb
-                        unsafe {
-                            sfence_vma_vaddr(va.0);
-                        }
                         return Ok(());
                     } else {
                         // 私有文件映射, 写时复制
@@ -812,9 +808,6 @@ impl MemorySet {
                         // 增加页的引用计数
                         area.pages.insert(va.floor(), Arc::new(new_page));
                         // 刷新tlb
-                        unsafe {
-                            sfence_vma_vaddr(va.0);
-                        }
                         return Ok(());
                     }
                 } else {
@@ -825,10 +818,6 @@ impl MemorySet {
                     let ppn = page.ppn();
                     self.page_table.map(vpn, ppn, pte_flags);
                     area.pages.insert(vpn, Arc::new(page));
-                    // 刷新tlb
-                    unsafe {
-                        sfence_vma_vaddr(va.0);
-                    }
                     log::error!(
                         "[handle_lazy_allocation_area] lazy alloc area, vpn: {:#x}, ppn: {:#x}",
                         vpn.0,

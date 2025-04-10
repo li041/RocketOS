@@ -5,7 +5,8 @@ use core::fmt::{self, Debug};
 use core::result;
 
 use crate::arch::config::{PAGE_SIZE_BITS, PALEN, USER_MAX_VA};
-use crate::arch::la64::tlb::tlb_global_invalidate;
+use crate::arch::la64::tlb::{tlb_global_invalidate, tlb_invalidate};
+use crate::arch::mm::sfence_vma_vaddr;
 use crate::arch::{PGDH, PGDL};
 
 use crate::mm::{
@@ -268,8 +269,9 @@ impl PageTable {
                 }
             }
         }
-
         frames.push(cld_root_frame);
+        // 注意修改了当前用户空间的页表项刷新tlb
+        tlb_invalidate();
         // 子进程的页表拥有自己的所有三级页表
         PageTable {
             root_ppn: cld_root_ppn,
@@ -281,6 +283,7 @@ impl PageTable {
 // 操作页表项pte
 // complete
 impl PageTable {
+    /// 由上层调用者保证刷新页表
     pub fn find_pte_create(&mut self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {
         let idxs = vpn.indexes();
         let mut ppn = self.root_ppn;
@@ -323,6 +326,9 @@ impl PageTable {
         assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
         *pte = PageTableEntry::new(ppn, flags | PTEFlags::V);
         // *pte = PageTableEntry::new(ppn, flags | PTEFlags::V | PTEFlags::D);
+        unsafe {
+            sfence_vma_vaddr(vpn.0 << PAGE_SIZE_BITS);
+        }
     }
     pub fn remap(&mut self, vpn: VirtPageNum, flags: PTEFlags) {
         let pte = self.find_pte_create(vpn).unwrap();
@@ -332,6 +338,9 @@ impl PageTable {
             vpn
         );
         *pte = PageTableEntry::new(pte.ppn(), flags | PTEFlags::V | PTEFlags::D);
+        unsafe {
+            sfence_vma_vaddr(vpn.0 << PAGE_SIZE_BITS);
+        }
     }
     pub fn unmap(&mut self, vpn: VirtPageNum) {
         let pte = self.find_pte(vpn).unwrap();
@@ -341,6 +350,9 @@ impl PageTable {
             vpn
         );
         *pte = PageTableEntry::empty();
+        unsafe {
+            sfence_vma_vaddr(vpn.0 << PAGE_SIZE_BITS);
+        }
     }
 }
 
