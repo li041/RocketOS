@@ -11,7 +11,7 @@
 
 # ARCH ?= loongarch64
 ARCH ?= riscv64
-MODE ?= release
+MODE ?= debug
 
 all: clean run
 
