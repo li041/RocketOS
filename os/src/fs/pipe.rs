@@ -152,7 +152,6 @@ impl FileOp for Pipe {
         self
     }
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> usize {
-        log::error!("[Pipe::read] entered");
         debug_assert!(self.readable);
         let mut read_size = 0usize;
         loop {
@@ -164,7 +163,6 @@ impl FileOp for Pipe {
                 }
                 // wait for data, 注意释放锁
                 drop(buffer);
-                log::error!("wait for data");
                 yield_current_task();
                 continue;
             }

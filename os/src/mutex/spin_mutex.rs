@@ -167,6 +167,7 @@ impl<'a, T: ?Sized, S: MutexSupport> Drop for MutexGuard<'a, T, S> {
     #[inline(always)]
     fn drop(&mut self) {
         debug_assert!(
+            // assert!(
             self.mutex.lock.load(Ordering::Relaxed),
             "drop lock at {:p}",
             self.mutex

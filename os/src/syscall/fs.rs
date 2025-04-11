@@ -27,6 +27,7 @@ use crate::{
 
 use crate::arch::mm::{copy_from_user, copy_from_user_mut, copy_to_user};
 
+// #[cfg(target_arch = "riscv64")]
 pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> isize {
     let task = current_task();
     let file = task.fd_table().get_file(fd);
@@ -38,8 +39,16 @@ pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> isize {
         // let ret = file.read(unsafe { core::slice::from_raw_parts_mut(buf, len) });
         let mut ker_buf = vec![0u8; len];
         let read_len = file.read(&mut ker_buf);
+        log::error!(
+            "ker_buf: {:?}, len: {:#x}, read_len: {:#x}",
+            ker_buf,
+            len,
+            read_len
+        );
+        let ker_buf_ptr = ker_buf.as_ptr();
+        assert!(ker_buf_ptr != core::ptr::null());
         // 写回用户空间
-        let ret = copy_to_user(buf, ker_buf.as_ptr(), read_len as usize);
+        let ret = copy_to_user(buf, ker_buf_ptr, read_len as usize);
         match ret {
             Ok(ret) => return ret as isize,
             Err(e) => {
@@ -54,6 +63,8 @@ pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> isize {
 
 // #[cfg(target_arch = "loongarch64")]
 // pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> isize {
+//     use crate::mm::VirtAddr;
+
 //     let task = current_task();
 //     let file = task.fd_table().get_file(fd);
 //     if let Some(file) = file {

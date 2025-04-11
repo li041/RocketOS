@@ -214,6 +214,8 @@ impl PageTable {
         }
     }
     pub fn from_existed_user(parent_pagetbl: &PageTable) -> Self {
+        // 注意这行别删, 是loongarch relesae跑起来的神奇咒语
+        log::trace!("[PageTable] from_existed_user");
         let cld_root_frame = frame_alloc().unwrap();
         let cld_root_ppn = cld_root_frame.ppn;
         let mut frames: Vec<FrameTracker> = Vec::new();
