@@ -5,11 +5,14 @@ use alloc::{string::String, vec};
 use alloc::string::ToString;
 use xmas_elf::header::parse_header;
 
-use crate::arch::timer::TimeSpec;
+use crate::arch::timer::{get_time_ms, TimeSpec};
 use crate::fs::fdtable::FdFlags;
 use crate::fs::file::OpenFlags;
 use crate::fs::kstat::Statx;
 use crate::fs::pipe::make_pipe;
+use crate::fs::uio::{PollEvents, PollFd};
+use crate::signal::SigSet;
+use crate::task::yield_current_task;
 use crate::{
     ext4::{self, inode::S_IFDIR},
     fs::{
@@ -139,6 +142,7 @@ pub fn sys_writev(fd: usize, iov: *const IoVec, iovcnt: usize) -> isize {
 
 /// 注意Fd_flags并不会在dup中继承
 pub fn sys_dup(oldfd: usize) -> isize {
+    log::info!("[sys_dup] oldfd: {}", oldfd);
     let task = current_task();
     // let file = task.fd_table().get_file(oldfd);
     let fd_entry = task.fd_table().get_fdentry(oldfd);
@@ -156,6 +160,12 @@ pub fn sys_dup(oldfd: usize) -> isize {
 /// 如果`newfd`已经打开, 则关闭`newfd`, 再分配, 关闭newfd中出现的错误不会影响sys_dup2
 ///
 pub fn sys_dup3(oldfd: usize, newfd: usize, flags: i32) -> isize {
+    log::info!(
+        "[sys_dup3] oldfd: {}, newfd: {}, flags: {}",
+        oldfd,
+        newfd,
+        flags
+    );
     let task = current_task();
     let flags = OpenFlags::from_bits(flags).unwrap();
     if oldfd == newfd {
@@ -498,9 +508,6 @@ pub fn sys_pipe2(fdset: *const u8, flags: i32) -> isize {
     let fd2 = fd_table.alloc_fd(pipe_pair.1.clone(), fd_flags);
     let pipe = [fd1 as i32, fd2 as i32];
     let fdset_ptr = fdset as *mut [i32; 2];
-    // unsafe {
-    //     core::ptr::write(fdset_ptr, pipe);
-    // }
     copy_to_user(
         fdset_ptr as *mut u8,
         pipe.as_ptr() as *const u8,
@@ -550,36 +557,137 @@ impl TryFrom<i32> for FcntlOp {
     }
 }
 
+// Todo: 还有Op没有实现
 pub fn sys_fcntl(fd: i32, op: i32, arg: usize) -> isize {
     log::info!("[sys_fcntl] fd: {}, op: {}, arg: {}", fd, op, arg);
     let task = current_task();
-    let file = task.fd_table().get_file(fd as usize);
+    // let file = task.fd_table().get_file(fd as usize);
+    let fd_entry = task.fd_table().get_fdentry(fd as usize);
     let op = FcntlOp::try_from(op).unwrap_or(FcntlOp::F_UNIMPL);
     let fd_flags = FdFlags::from(&op);
-    if let Some(file) = file {
+    if let Some(entry) = fd_entry {
         match op {
             FcntlOp::F_DUPFD => {
                 // let newfd = task.fd_table().alloc_fd(file.clone(), FdFlags::empty());
-                let newfd = task
-                    .fd_table()
-                    .alloc_fd_above_lower_bound(file.clone(), fd_flags, arg);
+                let newfd = task.fd_table().alloc_fd_above_lower_bound(
+                    entry.get_file().clone(),
+                    fd_flags,
+                    arg,
+                );
                 return newfd as isize;
             }
             FcntlOp::F_DUPFD_CLOEXEC => {
-                let newfd = task
-                    .fd_table()
-                    .alloc_fd_above_lower_bound(file.clone(), fd_flags, arg);
+                let newfd = task.fd_table().alloc_fd_above_lower_bound(
+                    entry.get_file().clone(),
+                    fd_flags,
+                    arg,
+                );
                 return newfd as isize;
             }
+            FcntlOp::F_GETFD => {
+                return i32::from(entry.get_flags()) as isize;
+            }
+            FcntlOp::F_SETFD => {
+                // 仅仅是设置fd的flags, 不会影响fd_table中的fd
+                let mut fd_entry = entry.clone();
+                fd_entry.set_flags(FdFlags::from_bits(arg).unwrap());
+                return 0;
+            }
             _ => {
-                log::warn!("[sys_fcntl] Unimplemented");
-                return -1;
+                panic!("[sys_fcntl] Unimplemented");
             }
         }
     }
     -1
 }
 
+/// Todo: 目前只支持了Pipe的hang_up, r_ready, w_ready
+pub fn sys_ppoll(fds: *mut PollFd, nfds: usize, timeout: *const TimeSpec, sigmask: usize) -> isize {
+    log::info!(
+        "[sys_ppoll] fds: {:?}, nfds: {}, timeout: {:?}, sigmask: {}",
+        fds,
+        nfds,
+        timeout,
+        sigmask
+    );
+    let task = current_task();
+    // 处理参数
+    let timeout = if timeout.is_null() {
+        // timeout为负数对于poll来说是无限等待
+        -1
+    } else {
+        let tmo = copy_from_user(timeout, 1).unwrap()[0];
+        (tmo.sec * 1000 + tmo.nsec / 1000000) as isize
+    };
+    // Todo: 设置sigmaskconst
+    // 用于保存原来的sigmask, 后续需要恢复
+    let origin_sigset = task.op_sig_pending_mut(|sig_pending| sig_pending.mask.clone());
+    if sigmask != 0 {
+        let sigset = copy_from_user(sigmask as *const SigSet, 1).unwrap()[0];
+        task.op_sig_pending_mut(|sig_pending| sig_pending.mask = sigset);
+    }
+    drop(task);
+
+    // 内核直接操作用户空间的pollfd
+    let poll_fds = copy_from_user_mut(fds, nfds).unwrap();
+    for poll_fd in poll_fds.iter_mut() {
+        poll_fd.revents = PollEvents::empty();
+    }
+    let mut done;
+    loop {
+        done = 0;
+        let task = current_task();
+        for poll_fd in poll_fds.iter_mut() {
+            if poll_fd.fd < 0 {
+                continue;
+            } else {
+                if let Some(file) = task.fd_table().get_file(poll_fd.fd as usize) {
+                    let mut trigger = 0;
+                    if file.hang_up() {
+                        poll_fd.revents |= PollEvents::HUP;
+                        trigger = 1;
+                    }
+                    // Todo: 如果文件描述符是pipe写端, 且没有读端打开, 则设置POLLERR
+                    if poll_fd.events.contains(PollEvents::IN) && file.r_ready() {
+                        poll_fd.revents |= PollEvents::IN;
+                        trigger = 1;
+                    }
+                    if poll_fd.events.contains(PollEvents::OUT) && file.w_ready() {
+                        poll_fd.revents |= PollEvents::OUT;
+                        trigger = 1;
+                    }
+                    done += trigger;
+                } else {
+                    // pollfd的fd字段大于0, 但是对应文件描述符并没有打开, 设置pollfd.revents为POLLNVAL
+                    poll_fd.revents |= PollEvents::INVAL;
+                    log::error!("[sys_ppoll] invalid fd: {}", poll_fd.fd);
+                }
+            }
+        }
+        if done > 0 {
+            break;
+        }
+        if timeout == 0 {
+            // timeout为0表示立即返回, 即使没有fd准备好
+            break;
+        } else if timeout > 0 {
+            if get_time_ms() > timeout as usize {
+                // 超时了, 返回
+                break;
+            }
+        }
+        drop(task);
+        yield_current_task();
+    }
+    // 恢复origin sigmask
+    if sigmask != 0 {
+        let task = current_task();
+        task.op_sig_pending_mut(|sig_pending| sig_pending.mask = origin_sigset);
+    }
+    done
+}
+
+// Todo:
 pub fn sys_utimensat(dirfd: i32, pathname: *const u8, times: *const TimeSpec, flags: i32) -> isize {
     log::info!(
         "[sys_utimensat] dirfd: {}, pathname: {:?}, times: {:?}, flags: {}",
@@ -589,7 +697,47 @@ pub fn sys_utimensat(dirfd: i32, pathname: *const u8, times: *const TimeSpec, fl
         flags
     );
     log::warn!("[sys_utimensat] Unimplemented");
+    panic!("[sys_utimensat] Unimplemented");
     0
+}
+
+pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset_ptr: *mut usize, count: usize) -> isize {
+    log::info!(
+        "[sys_sendfile] out_fd: {}, in_fd: {}, offset: {:?}, count: {}",
+        out_fd,
+        in_fd,
+        offset_ptr,
+        count
+    );
+    let fd_table = current_task().fd_table();
+    let (in_file, out_file) = match (fd_table.get_file(in_fd), fd_table.get_file(out_fd)) {
+        (Some(in_file), Some(out_file)) => (in_file, out_file),
+        _ => {
+            log::error!("[sys_sendfile] invalid fd");
+            return -1;
+        }
+    };
+    if !in_file.readable() || !out_file.writable() {
+        log::error!("[sys_sendfile] invalid fd");
+        return -1;
+    }
+    let mut buf = vec![0u8; count];
+    let len;
+    if offset_ptr.is_null() {
+        len = in_file.read(&mut buf);
+    } else {
+        // offset不为NULL, 则sendfile不会修改`in_fd`的文件偏移量
+        let offset = copy_from_user(offset_ptr, 1).unwrap()[0];
+        let origin_offset = in_file.get_offset();
+        in_file.seek(offset);
+        len = in_file.read(&mut buf);
+        in_file.seek(origin_offset);
+        // 将新的偏移量写回用户空间
+        copy_to_user(offset_ptr, &(offset + len + 1), 1).unwrap();
+    }
+    let ret = out_file.write(&buf[..len]) as isize;
+    log::info!("[sys_sendfile] ret: {}", ret);
+    ret
 }
 
 /* Todo: fake  */

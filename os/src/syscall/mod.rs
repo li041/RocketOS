@@ -13,7 +13,8 @@
 use fs::{
     sys_chdir, sys_close, sys_dup, sys_dup3, sys_faccessat, sys_fcntl, sys_fstat, sys_fstatat,
     sys_getcwd, sys_getdents64, sys_ioctl, sys_linkat, sys_mkdirat, sys_mount, sys_openat,
-    sys_pipe2, sys_read, sys_statx, sys_umount2, sys_unlinkat, sys_write, sys_writev,
+    sys_pipe2, sys_ppoll, sys_read, sys_sendfile, sys_statx, sys_umount2, sys_unlinkat, sys_write,
+    sys_writev,
 };
 use mm::{sys_brk, sys_madvise, sys_mmap, sys_mprotect, sys_munmap};
 use signal::{
@@ -26,9 +27,12 @@ use task::{
 };
 use util::{sys_times, sys_uname};
 
-use crate::fs::{
-    kstat::{Stat, Statx},
-    uio::IoVec,
+use crate::{
+    arch::timer::TimeSpec,
+    fs::{
+        kstat::{Stat, Statx},
+        uio::{IoVec, PollFd},
+    },
 };
 pub use fs::FcntlOp;
 pub use mm::MmapFlags;
@@ -58,6 +62,8 @@ const SYSCALL_GETDENTS64: usize = 61;
 const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
 const SYSCALL_WRITEV: usize = 66;
+const SYSCALL_SENDFILE: usize = 71;
+const SYSCALL_PPOLL: usize = 73;
 const SYSCALL_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_UTIMENSAT: usize = 88;
@@ -146,6 +152,8 @@ pub fn syscall(
         SYSCALL_READ => sys_read(a0, a1 as *mut u8, a2),
         SYSCALL_WRITE => sys_write(a0, a1 as *const u8, a2),
         SYSCALL_WRITEV => sys_writev(a0, a1 as *const IoVec, a2),
+        SYSCALL_SENDFILE => sys_sendfile(a0, a1, a2 as *mut usize, a3),
+        SYSCALL_PPOLL => sys_ppoll(a0 as *mut PollFd, a1, a2 as *const TimeSpec, a3),
         SYSCALL_FSTATAT => sys_fstatat(a0 as i32, a1 as *const u8, a2 as *mut Stat, a3 as i32),
         SYSCALL_FSTAT => sys_fstat(a0 as i32, a1 as *mut Stat),
         SYSCALL_EXIT => sys_exit(a0 as i32),
@@ -184,7 +192,7 @@ pub fn syscall(
         ),
         _ => {
             log::warn!("Unsupported syscall_id: {}", syscall_id);
-            0
+            -1
         } // panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }

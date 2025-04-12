@@ -25,12 +25,16 @@ pub struct Nameidata {
     depth: usize,
 }
 
+/// 特殊处理根目录, 如果path为`\`, 则path_segments格外压入`.`
 pub fn parse_path(path: &str) -> Vec<String> {
     let mut path_segments: Vec<String> = Vec::new();
     for segment in path.split("/") {
         if !segment.is_empty() {
             path_segments.push(segment.to_string());
         }
+    }
+    if path_segments.is_empty() {
+        path_segments.push(".".to_string());
     }
     path_segments
 }
@@ -372,6 +376,7 @@ pub fn link_path_walk(nd: &mut Nameidata) -> Result<String, isize> {
     assert!(!nd.dentry.is_negative());
     log::info!("[link_path_walk] path: {:?}", nd.path_segments);
     // 解析路径的目录部分，遇到最后一个组件时停止检查最后一个路径分量
+    // 注意对于根目录, nd.path_segments是空的
     let mut len = nd.path_segments.len() - 1;
     let mut symlink_count = 0;
     while nd.depth < len {

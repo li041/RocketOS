@@ -211,4 +211,28 @@ impl FileOp for Pipe {
     fn writable(&self) -> bool {
         self.writable
     }
+    fn r_ready(&self) -> bool {
+        if self.readable {
+            let buffer = self.buffer.lock();
+            buffer.status != RingBufferStatus::EMPTY
+        } else {
+            false
+        }
+    }
+    fn w_ready(&self) -> bool {
+        if self.writable {
+            let buffer = self.buffer.lock();
+            buffer.status != RingBufferStatus::FULL
+        } else {
+            false
+        }
+    }
+    /// 表示另一端已关闭
+    fn hang_up(&self) -> bool {
+        if self.readable {
+            self.buffer.lock().all_write_ends_closed()
+        } else {
+            self.buffer.lock().all_read_ends_closed()
+        }
+    }
 }

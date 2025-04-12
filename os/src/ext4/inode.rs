@@ -793,7 +793,7 @@ impl Ext4Inode {
             let copy_len = (wbuf_len - current_write).min(PAGE_SIZE - page_offset_in_page);
             page.modify(0, |data: &mut [u8; PAGE_SIZE]| {
                 data[page_offset_in_page..page_offset_in_page + copy_len]
-                    .copy_from_slice(&buf[page_offset_in_page..page_offset_in_page + copy_len]);
+                    .copy_from_slice(&buf[current_write..current_write + copy_len]);
             });
             current_write += copy_len;
             page_offset += 1;

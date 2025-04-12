@@ -63,6 +63,15 @@ pub trait FileOp: Any + Send + Sync {
     fn writable(&self) -> bool {
         unimplemented!();
     }
+    fn hang_up(&self) -> bool {
+        unimplemented!();
+    }
+    fn r_ready(&self) -> bool {
+        unimplemented!();
+    }
+    fn w_ready(&self) -> bool {
+        unimplemented!();
+    }
     fn ioctl(&self, _op: usize, _arg_ptr: usize) -> isize {
         -ENOTTY
     }
