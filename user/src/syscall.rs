@@ -1,9 +1,12 @@
 use core::arch::asm;
 
+use alloc::ffi::CString;
+
 const SYSCALL_OPEN: usize = 56;
 const SYSCALL_CLOSE: usize = 57;
 const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
+const SYSCALL_DUP3: usize = 24;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_YIELD: usize = 124;
 const SYSCALL_GET_TIME: usize = 169;
@@ -47,10 +50,17 @@ pub fn syscall(id: usize, args: [usize; 6]) -> isize {
     ret
 }
 
-pub fn sys_open(path: &str, flags: u32) -> isize {
+pub fn sys_open(dirfd: i32, path: &CString, flags: u32) -> isize {
     syscall(
         SYSCALL_OPEN,
-        [path.as_ptr() as usize, flags as usize, 0, 0, 0, 0],
+        [
+            dirfd as usize,
+            path.as_ptr() as usize,
+            flags as usize,
+            0,
+            0,
+            0,
+        ],
     )
 }
 
@@ -70,6 +80,10 @@ pub fn sys_write(fd: usize, buffer: &[u8]) -> isize {
         SYSCALL_WRITE,
         [fd, buffer.as_ptr() as usize, buffer.len(), 0, 0, 0],
     )
+}
+
+pub fn sys_dup3(oldfd: usize, newfd: usize, flags: i32) -> isize {
+    syscall(SYSCALL_DUP3, [oldfd, newfd, flags as usize, 0, 0, 0])
 }
 
 pub fn sys_exit(exit_code: i32) -> ! {

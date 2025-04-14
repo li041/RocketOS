@@ -14,7 +14,7 @@ extern crate bitflags;
 
 use core::ptr::null;
 
-use alloc::vec::Vec;
+use alloc::{ffi::CString, vec::Vec};
 use buddy_system_allocator::LockedHeap;
 use syscall::*;
 
@@ -53,11 +53,14 @@ bitflags! {
         const RDWR = 1 << 1;
         const CREATE = 1 << 9;
         const TRUNC = 1 << 10;
+        const APPEND =  1 << 11;
     }
 }
 
-pub fn open(path: &str, flags: OpenFlags) -> isize {
-    sys_open(path, flags.bits)
+pub const AT_FDCWD: i32 = -100; // Current working directory
+
+pub fn open(path: &CString, flags: OpenFlags) -> isize {
+    sys_open(AT_FDCWD, path, flags.bits)
 }
 pub fn close(fd: usize) -> isize {
     sys_close(fd)
@@ -67,6 +70,9 @@ pub fn read(fd: usize, buf: &mut [u8]) -> isize {
 }
 pub fn write(fd: usize, buf: &[u8]) -> isize {
     sys_write(fd, buf)
+}
+pub fn dup3(oldfd: usize, newfd: usize, flags: i32) -> isize {
+    sys_dup3(oldfd, newfd, flags)
 }
 pub fn exit(exit_code: i32) -> ! {
     sys_exit(exit_code);

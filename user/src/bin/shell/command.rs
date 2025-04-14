@@ -7,6 +7,29 @@ use user_lib::{execve, exit};
 
 pub struct Command {
     tokens: Vec<CString>,
+    stdin_redirect: Option<CString>,
+    stdout_redirect: Option<CString>,
+    append: bool,
+}
+
+/// 辅助函数：从字符迭代器中读取下一个 token（跳过空格）
+fn parse_next_token(chars: &mut core::iter::Peekable<core::str::Chars>) -> Option<CString> {
+    let mut token = String::new();
+    while let Some(&c) = chars.peek() {
+        if c == ' ' {
+            chars.next(); // 跳过空格
+            if !token.is_empty() {
+                break;
+            }
+        } else {
+            token.push(chars.next().unwrap());
+        }
+    }
+    if token.is_empty() {
+        None
+    } else {
+        Some(CString::new(token).unwrap())
+    }
 }
 
 impl From<&str> for Command {
@@ -15,6 +38,11 @@ impl From<&str> for Command {
         let mut current_token = String::new();
         let mut in_quote = None; // None = not in quote, Some('"') or Some('\'') = in quote
         let mut chars = line.chars().peekable();
+
+        // 重定向相关字段
+        let mut stdin_redirect = None;
+        let mut stdout_redirect = None;
+        let mut append = false;
 
         while let Some(c) = chars.next() {
             match c {
@@ -26,10 +54,29 @@ impl From<&str> for Command {
                 '"' | '\'' if in_quote == Some(c) => {
                     in_quote = None;
                 }
-                // Handle spaces (only split if not in a quote)
+                // 空格分割(仅在非引号中)
                 ' ' if in_quote.is_none() => {
                     if !current_token.is_empty() {
-                        tokens.push(current_token);
+                        // 检查是否是重定向符号（>、<、>>）
+                        match current_token.as_str() {
+                            ">" => {
+                                if let Some(next_token) = parse_next_token(&mut chars) {
+                                    stdout_redirect = Some(next_token);
+                                }
+                            }
+                            ">>" => {
+                                if let Some(next_token) = parse_next_token(&mut chars) {
+                                    stdout_redirect = Some(next_token);
+                                    append = true;
+                                }
+                            }
+                            "<" => {
+                                if let Some(next_token) = parse_next_token(&mut chars) {
+                                    stdin_redirect = Some(next_token);
+                                }
+                            }
+                            _ => tokens.push(current_token),
+                        }
                         current_token = String::new();
                     }
                 }
@@ -67,7 +114,12 @@ impl From<&str> for Command {
             .into_iter()
             .map(|s| CString::new(s).unwrap())
             .collect();
-        Command { tokens }
+        Command {
+            tokens,
+            stdin_redirect,
+            stdout_redirect,
+            append,
+        }
     }
 }
 
@@ -92,7 +144,39 @@ impl Command {
         self.tokens.iter().map(|s| s.to_str().unwrap()).collect()
     }
 
+    // pub fn exec(&self) {
+    //     execve(self.get_name(), &self.get_argv(), &[]);
+    //     exit(-1);
+    // }
     pub fn exec(&self) {
+        use user_lib::OpenFlags;
+        use user_lib::{close, dup3, open};
+
+        // 输入重定向
+        if let Some(file) = &self.stdin_redirect {
+            let fd = open(file, OpenFlags::RDONLY);
+            if fd >= 0 {
+                dup3(fd as usize, 0, 0); // 将 stdin 重定向到文件
+                close(fd as usize);
+            }
+        }
+
+        // 输出重定向
+        if let Some(file) = &self.stdout_redirect {
+            println!("file: {:?}", file);
+            let flags = if self.append {
+                OpenFlags::WRONLY | OpenFlags::CREATE | OpenFlags::APPEND
+            } else {
+                OpenFlags::WRONLY | OpenFlags::CREATE | OpenFlags::TRUNC
+            };
+            let fd = open(file, flags);
+            if fd >= 0 {
+                dup3(fd as usize, 1, 0); // 将stdout重定向到文件
+                close(fd as usize);
+            }
+        }
+
+        // 执行命令
         execve(self.get_name(), &self.get_argv(), &[]);
         exit(-1);
     }
