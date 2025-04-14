@@ -30,14 +30,22 @@ fn print_prompt() {
 #[no_mangle]
 pub fn main() -> i32 {
     let mut line: String = String::new();
+    let mut history: Vec<String> = Vec::new(); // 存储历史命令
+    let mut history_index: usize = 0; // 当前显示的历史命令索引
     print_prompt();
+
     loop {
         let c = getchar();
         match c {
             LF | CR => {
                 println!("");
                 if !line.is_empty() {
-                    let mut cmd = Command::from(line.as_str());
+                    // 存入历史
+                    history.push(line.clone());
+                    history_index = history.len(); // 重置索引到最新
+
+                    // 执行命令
+                    let cmd = Command::from(line.as_str());
                     let pid = fork();
                     if pid == 0 {
                         cmd.exec();
@@ -58,6 +66,42 @@ pub fn main() -> i32 {
                     print!(" ");
                     print!("{}", BS as char);
                     line.pop();
+                }
+            }
+            // 处理方向键（上键 `ESC [ A`，下键 `ESC [ B`）
+            0x1B => {
+                // 检查是否是方向键（`ESC [ A` 或 `ESC [ B`）
+                let next_c = getchar();
+                if next_c == 0x5B {
+                    // '['
+                    match getchar() {
+                        0x41 => {
+                            // 上键 'A'
+                            if history_index > 0 {
+                                history_index -= 1;
+                                // 清除当前行并替换为历史命令
+                                print!("\x1B[2K\r"); // ANSI 清行
+                                print_prompt();
+                                line = history[history_index].clone();
+                                print!("{}", line);
+                            }
+                        }
+                        0x42 => {
+                            // 下键 'B'
+                            if history_index < history.len() {
+                                history_index += 1;
+                                print!("\x1B[2K\r"); // ANSI 清行
+                                print_prompt();
+                                if history_index < history.len() {
+                                    line = history[history_index].clone();
+                                } else {
+                                    line.clear();
+                                }
+                                print!("{}", line);
+                            }
+                        }
+                        _ => {} // 其他键忽略
+                    }
                 }
             }
             _ => {
