@@ -1,9 +1,12 @@
 use crate::{
+    arch::timer::TimeSpec,
     drivers::block::block_cache::get_block_cache,
     fs::{
         dentry::{Dentry, LinuxDirent64, DCACHE_SYMLINK_TYPE},
+        dev::tty::TtyInode,
         inode::InodeOp,
         kstat::Kstat,
+        uio::DevT,
     },
     mm::Page,
 };
@@ -14,11 +17,11 @@ use alloc::{
     sync::Arc,
 };
 use block_op::Ext4DirContentWE;
-use dentry::EXT4_DT_DIR;
+use dentry::{EXT4_DT_CHR, EXT4_DT_DIR};
 use fs::EXT4_BLOCK_SIZE;
 use inode::{
-    load_inode, write_inode, Ext4Inode, EXT4_EXTENTS_FL, EXT4_INLINE_DATA_FL, S_IALLUGO, S_IFDIR,
-    S_IFREG,
+    load_inode, write_inode, Ext4Inode, EXT4_EXTENTS_FL, EXT4_INLINE_DATA_FL, S_IALLUGO, S_IFCHR,
+    S_IFDIR, S_IFREG,
 };
 
 use alloc::vec::Vec;
@@ -209,7 +212,7 @@ impl InodeOp for Ext4Inode {
             .alloc_inode(self.block_device.clone(), true);
         // 初始化新的inode结构
         let new_inode = Ext4Inode::new(
-            (mode & S_IALLUGO) as u16,
+            (mode & S_IALLUGO) | S_IFDIR as u16,
             EXT4_EXTENTS_FL,
             self.ext4_fs.clone(),
             new_inode_num,
@@ -228,12 +231,6 @@ impl InodeOp for Ext4Inode {
             new_inode_num as u32,
             ext4_block_size,
         );
-        // 将数据块写回block cache
-        get_block_cache(new_block_num, self.block_device.clone(), ext4_block_size)
-            .lock()
-            .modify(0, |data: &mut [u8; EXT4_BLOCK_SIZE]| {
-                data.copy_from_slice(&buffer);
-            });
         // 更新inode的extent tree
         new_inode
             .insert_extent(
@@ -244,12 +241,54 @@ impl InodeOp for Ext4Inode {
                 ext4_block_size,
             )
             .expect("[Ext4Inode::mkdir]");
+        // 将数据块写回page cache
+        new_inode
+            .get_page_cache(0)
+            .unwrap()
+            .modify(0, |data: &mut [u8; EXT4_BLOCK_SIZE]| {
+                data.copy_from_slice(&buffer);
+            });
+        // 更新inode的size
+        new_inode.set_size(ext4_block_size as u64);
         // 将inode写入block_cache
         write_inode(&new_inode, new_inode_num, self.block_device.clone());
         // 在父目录中添加对应项
         // 关联到dentry
         self.add_entry(dentry.clone(), new_inode_num as u32, EXT4_DT_DIR);
         dentry.inner.lock().inode = Some(new_inode);
+    }
+    /// 不同的字符设备类型, 使用Inode不同
+    /// 目前仅支持字符设备, 设备号都是静态分配
+    fn mknod<'a>(&'a self, dentry: Arc<Dentry>, mode: u16, dev: DevT) {
+        assert!(dentry.is_negative());
+        assert!(mode & S_IFCHR != 0);
+        // 提取主,次设备号
+        let (major, minor) = dev.unpack();
+        /// 主设备号1表示mem
+        match (major, minor) {
+            (1, 3) => {
+                unimplemented!();
+            } // /dev/null
+            (1, 5) => {
+                unimplemented!();
+            } // /dev/zero
+            (5, 0) => {
+                // /dev/tty
+                // 分配inode_num
+                assert!(dentry.absolute_path == "/dev/tty");
+                let new_inode_num = self
+                    .ext4_fs
+                    .upgrade()
+                    .unwrap()
+                    .alloc_inode(self.block_device.clone(), true);
+                let tty_inode = TtyInode::new(new_inode_num, mode, 5, 0);
+                // 在父目录中添加对应项
+                self.add_entry(dentry.clone(), new_inode_num as u32, EXT4_DT_CHR);
+                // 关联到dentry
+                dentry.inner.lock().inode = Some(tty_inode);
+            } // /dev/tty
+            _ => panic!("Unsupported device: major: {}, minor: {}", major, minor),
+        }
     }
     fn getdents(&self, offset: usize) -> (usize, Vec<LinuxDirent64>) {
         let ext4_dirents: Vec<dentry::Ext4DirEntry> = self.getdents(offset);
@@ -296,5 +335,29 @@ impl InodeOp for Ext4Inode {
     }
     fn get_size(&self) -> usize {
         self.inner.read().inode_on_disk.get_size() as usize
+    }
+    fn get_mode(&self) -> u16 {
+        self.inner.read().inode_on_disk.get_mode()
+    }
+    fn get_devt(&self) -> (u32, u32) {
+        self.inner.read().inode_on_disk.get_devt()
+    }
+    fn get_atime(&self) -> TimeSpec {
+        self.inner.read().inode_on_disk.get_atime()
+    }
+    fn get_ctime(&self) -> TimeSpec {
+        self.inner.read().inode_on_disk.get_ctime()
+    }
+    fn get_mtime(&self) -> TimeSpec {
+        self.inner.read().inode_on_disk.get_mtime()
+    }
+    fn set_atime(&self, atime: TimeSpec) {
+        self.inner.write().inode_on_disk.set_atime(atime);
+    }
+    fn set_ctime(&self, ctime: TimeSpec) {
+        self.inner.write().inode_on_disk.set_ctime(ctime);
+    }
+    fn set_mtime(&self, mtime: TimeSpec) {
+        self.inner.write().inode_on_disk.set_mtime(mtime);
     }
 }

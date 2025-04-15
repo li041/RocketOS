@@ -12,9 +12,9 @@
 
 use fs::{
     sys_chdir, sys_close, sys_dup, sys_dup3, sys_faccessat, sys_fcntl, sys_fstat, sys_fstatat,
-    sys_getcwd, sys_getdents64, sys_ioctl, sys_linkat, sys_mkdirat, sys_mount, sys_openat,
-    sys_pipe2, sys_ppoll, sys_read, sys_sendfile, sys_statx, sys_umount2, sys_unlinkat, sys_write,
-    sys_writev,
+    sys_getcwd, sys_getdents64, sys_ioctl, sys_linkat, sys_mkdirat, sys_mknodat, sys_mount,
+    sys_openat, sys_pipe2, sys_ppoll, sys_read, sys_sendfile, sys_statx, sys_umount2, sys_unlinkat,
+    sys_utimensat, sys_write, sys_writev,
 };
 use mm::{sys_brk, sys_madvise, sys_mmap, sys_mprotect, sys_munmap};
 use signal::{
@@ -35,7 +35,6 @@ use crate::{
     },
 };
 pub use fs::FcntlOp;
-pub use mm::MmapFlags;
 pub use task::sys_exit;
 mod fs;
 mod mm;
@@ -48,6 +47,7 @@ const SYSCALL_DUP: usize = 23;
 const SYSCALL_DUP3: usize = 24;
 const SYSCALL_FCNTL: usize = 25;
 const SYSCALL_IOCTL: usize = 29;
+const SYSCALL_MKNODAT: usize = 33;
 const SYSCALL_MKDIRAT: usize = 34;
 const SYSCALL_UNLINKAT: usize = 35;
 const SYSCALL_LINKAT: usize = 37;
@@ -72,6 +72,7 @@ const SYS_EXIT_GROUP: usize = 94;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
 const SYSCALL_SET_ROBUST_LIST: usize = 99;
 const SYSCALL_NANOSLEEP: usize = 101;
+const SYSCALL_CLOCK_GETTIME: usize = 113;
 const SYSCALL_YIELD: usize = 124;
 const SYSCALL_KILL: usize = 129;
 const SYSCALL_TKILL: usize = 130;
@@ -84,15 +85,18 @@ const SYSCALL_RT_SIGPENDING: usize = 136;
 const SYSCALL_RT_SIGTIMEDWAIT: usize = 137;
 const SYSCALL_RT_SIGQUEUEINFO: usize = 138;
 const SYSCALL_RT_SIGRETURN: usize = 139;
+const SYSCALL_SETGID: usize = 144;
+const SYSCALL_SETUID: usize = 146;
 const SYSCALL_TIMES: usize = 153;
 const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_GITPID: usize = 172;
 const SYSCALL_GETPPID: usize = 173;
 const SYSCALL_GETUID: usize = 174;
+const SYSCALL_GETGID: usize = 176;
+const SYSCALL_GETTID: usize = 178;
 const SYSCALL_BRK: usize = 214;
 const SYSCALL_MUNMAP: usize = 215;
-const SYSCALL_MREMAP: usize = 216;
 const SYSCALL_FORK: usize = 220;
 const SYSCALL_EXEC: usize = 221;
 const SYSCALL_MMAP: usize = 222;
@@ -102,6 +106,18 @@ const SYSCALL_WAIT4: usize = 260;
 const SYSCALL_STATX: usize = 291;
 
 const CARELESS_SYSCALLS: [usize; 4] = [63, 64, 124, 260];
+// const SYSCALL_NUM_2_NAME: [(&str, usize); 4] = [
+const SYSCALL_NUM_2_NAME: [(usize, &str); 9] = [
+    (SYSCALL_SET_TID_ADDRESS, "SYS_SET_TID_ADDRESS"),
+    (SYSCALL_GETUID, "SYS_GETUID"),
+    (SYS_EXIT_GROUP, "SYS_EXIT_GROUP"),
+    (SYSCALL_SET_ROBUST_LIST, "SYS_SET_ROBUST_LIST"),
+    (SYSCALL_SETGID, "SYS_SETGID"),
+    (SYSCALL_SETUID, "SYS_SETUID"),
+    (SYSCALL_GETGID, "SYS_GETGID"),
+    (SYSCALL_CLOCK_GETTIME, "SYS_CLOCK_GETTIME"),
+    (SYSCALL_GETTID, "SYS_GETTID"),
+];
 
 #[no_mangle]
 pub fn syscall(
@@ -126,6 +142,7 @@ pub fn syscall(
         SYSCALL_DUP3 => sys_dup3(a0, a1, a2 as i32),
         SYSCALL_FCNTL => sys_fcntl(a0 as i32, a1 as i32, a2),
         SYSCALL_IOCTL => sys_ioctl(a0, a1, a2),
+        SYSCALL_MKNODAT => sys_mknodat(a0 as i32, a1 as *const u8, a2, a3 as u64),
         SYSCALL_MKDIRAT => sys_mkdirat(a0 as isize, a1 as *const u8, a2),
         SYSCALL_UNLINKAT => sys_unlinkat(a0 as i32, a1 as *const u8, a2 as i32),
         SYSCALL_LINKAT => sys_linkat(
@@ -156,6 +173,9 @@ pub fn syscall(
         SYSCALL_PPOLL => sys_ppoll(a0 as *mut PollFd, a1, a2 as *const TimeSpec, a3),
         SYSCALL_FSTATAT => sys_fstatat(a0 as i32, a1 as *const u8, a2 as *mut Stat, a3 as i32),
         SYSCALL_FSTAT => sys_fstat(a0 as i32, a1 as *mut Stat),
+        SYSCALL_UTIMENSAT => {
+            sys_utimensat(a0 as i32, a1 as *const u8, a2 as *const TimeSpec, a4 as i32)
+        }
         SYSCALL_EXIT => sys_exit(a0 as i32),
         SYSCALL_NANOSLEEP => sys_nanosleep(a0),
         SYSCALL_YIELD => sys_yield(),
@@ -191,8 +211,16 @@ pub fn syscall(
             a4 as *mut Statx,
         ),
         _ => {
-            log::warn!("Unsupported syscall_id: {}", syscall_id);
+            log::warn!(
+                "Unsupported syscall_id: {}, {}",
+                syscall_id,
+                SYSCALL_NUM_2_NAME
+                    .iter()
+                    .find(|x| x.0 == syscall_id)
+                    .map(|x| x.1)
+                    .unwrap_or("Unknown")
+            );
             -1
-        } // panic!("Unsupported syscall_id: {}", syscall_id),
+        }
     }
 }

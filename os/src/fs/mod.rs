@@ -20,8 +20,10 @@ use lazy_static::lazy_static;
 pub use old::{FileMeta, FileOld};
 
 pub mod dentry;
+pub mod dev;
 pub mod fdtable;
 pub mod file;
+pub mod manager;
 pub mod inode;
 pub mod kstat;
 pub mod mount;
@@ -30,8 +32,9 @@ pub mod old;
 pub mod page_cache;
 pub mod path;
 pub mod pipe;
+pub mod proc;
 mod stdio;
-pub mod super_block;
+// pub mod tty;
 pub mod uio;
 
 // 文件系统的锁先使用SpinNoIrqLock, Todo: 改成RwLock

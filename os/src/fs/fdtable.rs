@@ -6,6 +6,7 @@ use bitflags::bitflags;
 use spin::RwLock;
 
 use super::{
+    dev::tty::TTY,
     file::{FileOp, OpenFlags},
     Stdin, Stdout,
 };
@@ -105,9 +106,13 @@ impl FdEntry {
 impl FdTable {
     pub fn new() -> Arc<Self> {
         let mut vec = vec![None; MAX_FDS];
-        vec[0] = Some(FdEntry::new(Arc::new(Stdin), FdFlags::empty()));
-        vec[1] = Some(FdEntry::new(Arc::new(Stdout), FdFlags::empty()));
-        vec[2] = Some(FdEntry::new(Arc::new(Stdout), FdFlags::empty()));
+        // vec[0] = Some(FdEntry::new(Arc::new(Stdin), FdFlags::empty()));
+        // vec[1] = Some(FdEntry::new(Arc::new(Stdout), FdFlags::empty()));
+        // vec[2] = Some(FdEntry::new(Arc::new(Stdout), FdFlags::empty()));
+        let tty_file = TTY.get().unwrap();
+        vec[0] = Some(FdEntry::new(tty_file.clone(), FdFlags::empty()));
+        vec[1] = Some(FdEntry::new(tty_file.clone(), FdFlags::empty()));
+        vec[2] = Some(FdEntry::new(tty_file.clone(), FdFlags::empty()));
         Arc::new(Self {
             table: RwLock::new(vec),
             rlimit: RLimit::new(MAX_FDS),

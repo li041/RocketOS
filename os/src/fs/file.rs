@@ -40,7 +40,13 @@ pub trait FileOp: Any + Send + Sync {
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> usize {
         unimplemented!();
     }
+    fn read_all(&self) -> Vec<u8> {
+        unimplemented!();
+    }
     fn get_page(self: Arc<Self>, page_offset: usize) -> Result<Arc<Page>, &'static str> {
+        unimplemented!();
+    }
+    fn get_inode(&self) -> Arc<dyn InodeOp> {
         unimplemented!();
     }
     /// Write `UserBuffer` to file
@@ -109,17 +115,6 @@ impl File {
         let offset = self.get_offset();
         let total_read = inode.read(offset, &mut buffer);
         self.add_offset(total_read);
-        // loop {
-        //     let offset = self.get_offset();
-        //     let len = inode.read(offset, &mut buffer);
-        //     totol_read += len;
-        //     if len == 0 {
-        //         break;
-        //     }
-        //     self.add_offset(len);
-        //     v.extend_from_slice(&buffer[..len]);
-        //     log::warn!("read one paeg at offset: {}", offset);
-        // }
         log::info!("read_all: total_read: {}", total_read);
         buffer
     }
@@ -147,11 +142,17 @@ impl FileOp for File {
         self.add_offset(read_size);
         read_size
     }
+    fn read_all(&self) -> Vec<u8> {
+        self.read_all()
+    }
     /// 共享文件映射和私有文件映射只读时调用
     fn get_page(self: Arc<Self>, page_aligned_offset: usize) -> Result<Arc<Page>, &'static str> {
         debug_assert!(page_aligned_offset % PAGE_SIZE == 0);
         let inode = self.inner_handler(|inner| inner.inode.clone());
         inode.get_page(page_aligned_offset >> PAGE_SIZE_BITS)
+    }
+    fn get_inode(&self) -> Arc<dyn InodeOp> {
+        self.inner_handler(|inner| inner.inode.clone())
     }
 
     fn write<'a>(&'a self, buf: &'a [u8]) -> usize {

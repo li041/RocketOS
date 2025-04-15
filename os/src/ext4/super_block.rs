@@ -9,7 +9,7 @@ use crate::{
         self,
         block_cache::{self, BlockCache},
     },
-    fs::{super_block::FileSystemOp, FSMutex},
+    fs::{manager::FileSystemOp, FSMutex},
     mutex::SpinNoIrqLock,
 };
 

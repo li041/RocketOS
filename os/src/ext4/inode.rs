@@ -34,6 +34,7 @@ use super::{
 const EXT4_N_BLOCKS: usize = 15;
 
 // File mode
+pub const S_IFMT: u16 = 0xF000; // File type mask
 pub const S_IXOTH: u16 = 0x1; // Others have execute permission
 pub const S_IWOTH: u16 = 0x2; // Others have write permission
 pub const S_IROTH: u16 = 0x4; // Others have read permission
@@ -47,6 +48,7 @@ pub const S_ISVTX: u16 = 0x200; // Sticky bit
 pub const S_ISGID: u16 = 0x400; // Set GID
 pub const S_ISUID: u16 = 0x800; // Set UID
 
+pub const S_IFCHR: u16 = 0x2000; // Character device
 pub const S_IFDIR: u16 = 0x4000; // Directory
 pub const S_IFREG: u16 = 0x8000; // Regular file
 pub const S_IFLNK: u16 = 0xA000; // Symbolic link
@@ -94,16 +96,16 @@ pub struct Ext4InodeDisk {
     // 符号链接: 目标字符串长度小于60字节, 直接存储在blocks中
     // ext2/3文件: 存储文件数据块指针, 0-11直接, 12间接, 13二级间接, 14三级间接
     // block: [u32; EXT4_N_BLOCKS], // 文件数据块指针
-    block: [u8; 60],  // 文件数据块指针
-    generation: u32,  // 文件版本(用于NFS)
-    file_acl_lo: u32, // 文件访问控制列表
-    size_hi: u32,     // 文件大小(字节, 高32位)
-    obso_faddr: u32,  // 已废弃碎片地址
+    block: [u8; 60],     // 文件数据块指针
+    pub generation: u32, // 文件版本(用于NFS)
+    file_acl_lo: u32,    // 文件访问控制列表
+    obso_faddr: u32,     // 已废弃碎片地址
+    size_hi: u32,        // 文件大小(字节, 高32位)
     // 具体可能不是3个u32, 但是这里只是为了占位(大小是12字节)
     osd2: [u32; 3],               // 操作系统相关
     extra_isize: u16,             // Inode扩展大小
     checksum_hi: u16,             // CRC32校验和高16位
-    change_inode_time_extra: u32, // 额外的Inode修改时间(nsec << 2 | epoch)
+    change_inode_time_extra: u32, // 额外的Inode修改时间(nsec << 2 | epoch), epoch对应[1:0]位, 表示翻了多少个2^32秒
     modify_file_time_extra: u32,  // 额外的内容修改时间(nsec << 2 | epoch)
     atime_extra: u32,             // 额外的访问时间(nsec << 2 | epoch)
     create_time: u32,             // 文件创建时间
@@ -172,6 +174,28 @@ impl Ext4InodeDisk {
         );
         ext4_root_inode
     }
+    /// 创建一个字符设备, mode字段被设置为S_IFCHR
+    /// 字符设备不占用数据块(blocks_lo = 0, size_lo = size_hi = 0), blocks不存储数据块(block前4个字节存主设备号, 4~8字节存次设备号)
+    pub fn new_chr(mode: u16, major: u32, minor: u32) -> Self {
+        let mut inode = Ext4InodeDisk::default();
+        let current_time = TimeSpec::new_wall_time();
+        inode.mode = mode | S_IFCHR;
+        inode.uid = 0;
+        inode.gid = 0;
+        inode.size_lo = 0;
+        inode.size_hi = 0;
+        inode.blocks_lo = 0;
+        inode.links_count = 1;
+        inode.flags = 0;
+        // 设置主设备号和次设备号
+        inode.block[0..4].copy_from_slice(&major.to_le_bytes());
+        inode.block[4..8].copy_from_slice(&minor.to_le_bytes());
+        // 设置时间戳
+        inode.set_atime(current_time);
+        inode.set_ctime(current_time);
+        inode.set_mtime(current_time);
+        inode
+    }
 }
 
 /// 辅助函数
@@ -218,6 +242,49 @@ impl Ext4InodeDisk {
     pub fn set_size(&mut self, size: u64) {
         self.size_lo = size as u32;
         self.size_hi = (size >> 32) as u32;
+    }
+    pub fn get_devt(&self) -> (u32, u32) {
+        let major = u32::from_le_bytes(self.block[0..4].try_into().unwrap());
+        let minor = u32::from_le_bytes(self.block[4..8].try_into().unwrap());
+        (major, minor)
+    }
+    pub fn get_uid(&self) -> u32 {
+        self.uid as u32
+    }
+    pub fn get_gid(&self) -> u32 {
+        self.gid as u32
+    }
+    pub fn get_atime(&self) -> TimeSpec {
+        TimeSpec {
+            sec: (self.atime as u64 + (((self.atime_extra & 0x3) as u64) << 32)) as usize,
+            nsec: self.atime_extra as usize,
+        }
+    }
+    pub fn set_atime(&mut self, atime: TimeSpec) {
+        self.atime = atime.sec as u32;
+        self.atime_extra = (atime.nsec as u32) << 2 | ((atime.sec >> 32) as u32 & 0x3);
+    }
+    pub fn get_mtime(&self) -> TimeSpec {
+        TimeSpec {
+            sec: (self.modify_file_time as u64
+                + (((self.modify_file_time_extra & 0x3) as u64) << 32)) as usize,
+            nsec: self.modify_file_time_extra as usize,
+        }
+    }
+    pub fn set_mtime(&mut self, mtime: TimeSpec) {
+        self.modify_file_time = mtime.sec as u32;
+        self.modify_file_time_extra = (mtime.nsec as u32) << 2 | ((mtime.sec >> 32) as u32 & 0x3);
+    }
+    pub fn get_ctime(&self) -> TimeSpec {
+        TimeSpec {
+            sec: (self.change_inode_time as u64
+                + (((self.change_inode_time_extra & 0x3) as u64) << 32)) as usize,
+            nsec: self.change_inode_time_extra as usize,
+        }
+    }
+    pub fn set_ctime(&mut self, ctime: TimeSpec) {
+        self.change_inode_time = ctime.sec as u32;
+        self.change_inode_time_extra = (ctime.nsec as u32) << 2 | ((ctime.sec >> 32) as u32 & 0x3);
     }
     pub fn set_mode(&mut self, mode: u16) {
         self.mode = mode;
@@ -1047,15 +1114,6 @@ impl Ext4Inode {
             .unwrap()
             .alloc_block(self.block_device.clone())
     }
-    pub fn get_nlinks(&self) -> u16 {
-        self.inner.read().inode_on_disk.get_nlinks()
-    }
-    pub fn add_nlinks(&self) {
-        self.inner.write().inode_on_disk.add_nlinks();
-    }
-    pub fn sub_nlinks(&self) {
-        self.inner.write().inode_on_disk.sub_nlinks();
-    }
     /// 根据inode_num计算fs_block_id和inner_offset
     pub fn ino_2_blockid_and_offset(&self) -> (usize, usize) {
         let ext4_fs = self.ext4_fs.upgrade().unwrap();
@@ -1074,8 +1132,25 @@ impl Ext4Inode {
 
 // set/get系列方法, 判断标志, 辅助函数
 impl Ext4Inode {
-    fn set_mode(&self, mode: u16) {}
-    fn set_flags(&self, flags: u32) {
+    pub fn get_nlinks(&self) -> u16 {
+        self.inner.read().inode_on_disk.get_nlinks()
+    }
+    pub fn add_nlinks(&self) {
+        self.inner.write().inode_on_disk.add_nlinks();
+    }
+    pub fn sub_nlinks(&self) {
+        self.inner.write().inode_on_disk.sub_nlinks();
+    }
+    pub fn get_size(&self) -> u64 {
+        self.inner.read().inode_on_disk.get_size()
+    }
+    pub fn set_size(&self, size: u64) {
+        self.inner.write().inode_on_disk.set_size(size);
+    }
+    pub fn set_mode(&self, mode: u16) {
+        self.inner.write().inode_on_disk.mode = mode;
+    }
+    pub fn set_flags(&self, flags: u32) {
         self.inner.write().inode_on_disk.flags = flags;
     }
     pub fn get_block_size(&self) -> usize {

@@ -13,9 +13,10 @@ use crate::{
 
 use super::{
     dentry::{insert_dentry, Dentry},
+    dev::init_devfs,
     inode::InodeOp,
+    manager::{Fake_FS, FileSystemOp},
     path::Path,
-    super_block::{Fake_FS, FileSystemOp},
 };
 
 use lazy_static::lazy_static;
@@ -114,10 +115,11 @@ pub fn get_mount_by_path(path: Path) -> Option<Arc<Mount>> {
 }
 
 /// 挂载最初的文件系统, 返回根目录的Path
-// 初始化全局的根目录
-//  1. 创建根目录inode
-//  2. 创建根目录dentry
-//  3. 创建根目录的Mount
+// 1. 初始化全局的根目录
+//  a. 创建根目录inode
+//  b. 创建根目录dentry
+//  c. 创建根目录的Mount
+// 2. 初始化/dev下的设备文件
 pub fn do_ext4_mount(block_device: Arc<dyn BlockDevice>) -> Arc<Path> {
     let ext4_fs = Ext4FileSystem::open(block_device.clone());
     let root_inode = Ext4Inode::new_root(
@@ -136,6 +138,7 @@ pub fn do_ext4_mount(block_device: Arc<dyn BlockDevice>) -> Arc<Path> {
     add_mount(root_mount);
     // Path
     let root_path = Path::new(root_vfs_mount, root_dentry);
+    init_devfs(root_path.clone());
     root_path
 }
 

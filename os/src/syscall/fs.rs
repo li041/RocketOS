@@ -1,4 +1,4 @@
-use core::mem;
+use core::{mem, panic, time};
 
 use alloc::{string::String, vec};
 
@@ -10,7 +10,7 @@ use crate::fs::fdtable::FdFlags;
 use crate::fs::file::OpenFlags;
 use crate::fs::kstat::Statx;
 use crate::fs::pipe::make_pipe;
-use crate::fs::uio::{PollEvents, PollFd};
+use crate::fs::uio::{DevT, PollEvents, PollFd, UtimenatFlags};
 use crate::signal::SigSet;
 use crate::task::yield_current_task;
 use crate::{
@@ -32,6 +32,7 @@ use crate::{
 
 use crate::arch::mm::{copy_from_user, copy_from_user_mut, copy_to_user};
 
+#[cfg(target_arch = "riscv64")]
 pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> isize {
     let task = current_task();
     let file = task.fd_table().get_file(fd);
@@ -44,7 +45,7 @@ pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> isize {
         let mut ker_buf = vec![0u8; len];
         let read_len = file.read(&mut ker_buf);
         let ker_buf_ptr = ker_buf.as_ptr();
-        assert!(ker_buf_ptr != core::ptr::null());
+        // assert!(ker_buf_ptr != core::ptr::null());
         // 写回用户空间
         let ret = copy_to_user(buf, ker_buf_ptr, read_len as usize);
         match ret {
@@ -59,32 +60,32 @@ pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> isize {
     }
 }
 
-// #[cfg(target_arch = "loongarch64")]
-// pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> isize {
-//     use crate::mm::VirtAddr;
+#[cfg(target_arch = "loongarch64")]
+pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> isize {
+    use crate::mm::VirtAddr;
 
-//     let task = current_task();
-//     let file = task.fd_table().get_file(fd);
-//     if let Some(file) = file {
-//         let file = file.clone();
-//         if !file.readable() {
-//             return -1;
-//         }
-//         let buf = current_task().op_memory_set(|memory_set| {
-//             memory_set
-//                 .translate_va_to_pa(VirtAddr::from(buf as usize))
-//                 .unwrap()
-//         });
-//         let ret = file.read(unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len) });
-//         // ToOptimize:
-//         if fd >= 3 {
-//             log::info!("sys_read: fd: {}, len: {}, ret: {}", fd, len, ret);
-//         }
-//         ret as isize
-//     } else {
-//         -1
-//     }
-// }
+    let task = current_task();
+    let file = task.fd_table().get_file(fd);
+    if let Some(file) = file {
+        let file = file.clone();
+        if !file.readable() {
+            return -1;
+        }
+        let buf = current_task().op_memory_set(|memory_set| {
+            memory_set
+                .translate_va_to_pa(VirtAddr::from(buf as usize))
+                .unwrap()
+        });
+        let ret = file.read(unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len) });
+        // ToOptimize:
+        if fd >= 3 {
+            log::info!("sys_read: fd: {}, len: {}, ret: {}", fd, len, ret);
+        }
+        ret as isize
+    } else {
+        -1
+    }
+}
 
 #[no_mangle]
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
@@ -284,6 +285,33 @@ pub fn sys_openat(dirfd: i32, pathname: *const u8, flags: i32, mode: usize) -> i
     }
 }
 
+/// mode是inode类型+文件权限
+pub fn sys_mknodat(dirfd: i32, pathname: *const u8, mode: usize, dev: u64) -> isize {
+    log::info!(
+        "[sys_mknodat] dirfd: {}, pathname: {:?}, mode: {}, dev: {}",
+        dirfd,
+        pathname,
+        mode,
+        dev
+    );
+    let path = c_str_to_string(pathname);
+    let mut nd = Nameidata::new(&path, dirfd);
+    let fake_lookup_flags = 0;
+    match filename_create(&mut nd, fake_lookup_flags) {
+        Ok(dentry) => {
+            let parent_inode = nd.dentry.get_inode();
+            parent_inode.mknod(dentry, mode as u16, DevT::new(dev));
+            // Debug Ok
+            // ext4_list_apps();
+            return 0;
+        }
+        Err(e) => {
+            log::info!("[sys_mknodat] fail to create file: {}, {}", path, e);
+            -1
+        }
+    }
+}
+
 pub fn sys_mkdirat(dirfd: isize, pathname: *const u8, mode: usize) -> isize {
     log::info!(
         "[sys_mkdirat] dirfd: {}, pathname: {:?}, mode: {}",
@@ -298,8 +326,6 @@ pub fn sys_mkdirat(dirfd: isize, pathname: *const u8, mode: usize) -> isize {
         Ok(dentry) => {
             let parent_inode = nd.dentry.get_inode();
             parent_inode.mkdir(dentry, mode as u16 | S_IFDIR);
-            // Debug Ok
-            // ext4_list_apps();
             return 0;
         }
         Err(e) => {
@@ -498,6 +524,7 @@ pub fn sys_chdir(pathname: *const u8) -> isize {
 
 // Todo: 直接往用户地址空间写入, 没有检查
 pub fn sys_pipe2(fdset: *const u8, flags: i32) -> isize {
+    log::trace!("[sys_pipe2]");
     let flags = OpenFlags::from_bits(flags).unwrap();
     log::info!("[sys_pipe2] fdset: {:?}, flags: {:?}", fdset, flags);
     let task = current_task();
@@ -593,6 +620,10 @@ pub fn sys_fcntl(fd: i32, op: i32, arg: usize) -> isize {
                 fd_entry.set_flags(FdFlags::from_bits(arg).unwrap());
                 return 0;
             }
+            FcntlOp::F_GETFL => {
+                // 获取flags
+                return i32::from(entry.get_flags()) as isize;
+            }
             _ => {
                 panic!("[sys_fcntl] Unimplemented");
             }
@@ -687,17 +718,102 @@ pub fn sys_ppoll(fds: *mut PollFd, nfds: usize, timeout: *const TimeSpec, sigmas
     done
 }
 
-// Todo:
-pub fn sys_utimensat(dirfd: i32, pathname: *const u8, times: *const TimeSpec, flags: i32) -> isize {
+// 如果对应timespec.sec为UTIME_NOE, 时间戳设置为当前时间(墙上时间)
+pub const UTIME_NOW: usize = 0x3fffffff;
+// 如果对应timespec.sec为UTIME_OMIT, 则不修改对应的时间戳
+pub const UTIME_OMIT: usize = 0x3ffffffe;
+
+// Todo: 需要设置errno
+pub fn sys_utimensat(
+    dirfd: i32,
+    pathname: *const u8,
+    time_spec2: *const TimeSpec,
+    flags: i32,
+) -> isize {
+    let flags = UtimenatFlags::from_bits(flags).unwrap();
     log::info!(
-        "[sys_utimensat] dirfd: {}, pathname: {:?}, times: {:?}, flags: {}",
+        "[sys_utimensat] dirfd: {}, pathname: {:?}, times: {:?}, flags: {:?}",
         dirfd,
         pathname,
-        times,
+        time_spec2,
         flags
     );
-    log::warn!("[sys_utimensat] Unimplemented");
-    panic!("[sys_utimensat] Unimplemented");
+    let path = if flags.contains(UtimenatFlags::AT_EMPTY_PATH) {
+        None
+    } else {
+        if pathname.is_null() {
+            log::error!("[sys_utimensat] pathname is null, and AT_EMPTY_PATH is not set");
+            return -1;
+        }
+        Some(c_str_to_string(pathname))
+    };
+    let time_specs = if time_spec2.is_null() {
+        None
+    } else {
+        let time_spec = copy_from_user(time_spec2, 2).unwrap();
+        Some(time_spec)
+    };
+    let inode = if let Some(path) = path {
+        let mut nd = Nameidata::new(&path, dirfd);
+        let fake_lookup_flags = 0;
+        match filename_lookup(&mut nd, fake_lookup_flags) {
+            Ok(dentry) => dentry.get_inode(),
+            Err(e) => {
+                log::info!("[sys_utimensat] fail to lookup: {}, {}", path, e);
+                // Todo: 应该返回-1, 设置errno=ENOENT, 但是目前没有实现errno, 如果返回-1, busybox会检查errno, 报错
+                return e;
+            }
+        }
+    } else {
+        // 直接操作dirfd
+        match dirfd {
+            AT_FDCWD => current_task().pwd().dentry.get_inode(),
+            _ => {
+                let file = current_task().fd_table().get_file(dirfd as usize);
+                if let Some(file) = file {
+                    file.get_inode()
+                } else {
+                    log::error!("[sys_utimensat] invalid dirfd: {}", dirfd);
+                    return -1;
+                }
+            }
+        }
+    };
+    let current_time = TimeSpec::new_wall_time();
+    match time_specs {
+        Some(time_specs) => {
+            match time_specs[0].nsec {
+                UTIME_NOW => {
+                    log::info!("[sys_utimensat] set atime to now");
+                    inode.set_atime(current_time);
+                }
+                UTIME_OMIT => {
+                    log::info!("[sys_utimensat] omit atime");
+                }
+                _ => {
+                    inode.set_atime(time_specs[0]);
+                }
+            }
+            match time_specs[1].nsec {
+                UTIME_NOW => {
+                    log::info!("[sys_utimensat] set mtime to now");
+                    inode.set_mtime(current_time);
+                }
+                UTIME_OMIT => {
+                    log::info!("[sys_utimensat] omit mtime");
+                }
+                _ => {
+                    inode.set_mtime(time_specs[1]);
+                }
+            }
+        }
+        None => {
+            log::info!("[sys_utimensat] times is null, use current time to set atime and mtime");
+            inode.set_atime(current_time);
+            inode.set_mtime(current_time);
+            inode.set_ctime(current_time);
+        }
+    }
     0
 }
 
@@ -785,6 +901,7 @@ pub fn sys_ioctl(fd: usize, op: usize, _arg_ptr: usize) -> isize {
     if let Some(file) = file {
         return file.ioctl(op, _arg_ptr);
     }
+    panic!("sys_ioctl: invalid fd: {}", fd);
     return -EBADF;
 }
 

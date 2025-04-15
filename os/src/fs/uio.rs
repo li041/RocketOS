@@ -1,3 +1,4 @@
+/// writev
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct IoVec {
@@ -28,10 +29,56 @@ bitflags::bitflags! {
         const INVAL = 0x020;
     }
 }
+
+/// sys_ppoll
 #[derive(Debug, Copy, Clone)]
 #[repr(C)]
 pub struct PollFd {
     pub fd: i32,
     pub events: PollEvents,
     pub revents: PollEvents,
+}
+
+/// sys_utimensat
+bitflags::bitflags! {
+    #[derive(Debug, Clone, Copy)]
+    pub struct UtimenatFlags: i32 {
+        // 如果路径是空字符串, 直接操作dirfd指向的file
+        const AT_EMPTY_PATH = 0x1000;
+        // 不跟随符号链接, 如果路径是符号链接，则操作会在链接本身上进行，而不是链接指向的目标。
+        const AT_SYMLINK_NOFOLLOW = 0x100;
+    }
+}
+
+/// sys_mknod
+pub struct DevT(pub u64);
+
+impl DevT {
+    pub fn tty_devt() -> Self {
+        Self::makedev(5, 0)
+    }
+}
+
+impl DevT {
+    pub fn new(dev: u64) -> Self {
+        Self(dev)
+    }
+    pub fn makedev(major: u32, minor: u32) -> Self {
+        Self(((major as u64) << 20) | (minor as u64 & 0xFFFFF))
+    }
+    /// 从dev_t中获取设备号
+    pub fn major(&self) -> u32 {
+        ((self.0 >> 20) & 0xfff) as u32
+    }
+    pub fn minor(&self) -> u32 {
+        (self.0 & 0xfffff) as u32
+    }
+    pub fn unpack(&self) -> (u32, u32) {
+        (self.major(), self.minor())
+    }
+}
+impl From<DevT> for u64 {
+    fn from(dev: DevT) -> Self {
+        dev.0
+    }
 }

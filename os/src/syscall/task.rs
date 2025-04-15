@@ -19,7 +19,6 @@ use crate::{
 use alloc::sync::Arc;
 use bitflags::bitflags;
 
-
 pub fn sys_clone(
     flags: u32,
     stack_ptr: usize,
@@ -47,7 +46,9 @@ pub fn sys_execve(path: *const u8, args: *const usize, envs: *const usize) -> is
     let path = c_str_to_string(path);
     log::info!(
         "[sys_execve] path: {}, args: {:?}, envs: {:?}",
-        path, args, envs
+        path,
+        args,
+        envs
     );
     // argv[0]是应用程序的名字
     // 后续元素是用户在命令行中输入的参数
@@ -100,8 +101,10 @@ pub fn sys_yield() -> isize {
 pub fn sys_exit(exit_code: i32) -> ! {
     kernel_exit(current_task(), exit_code);
     remove_task(current_task().tid());
-    log::warn!( "[sys_exit] task {} exit with code {}",
-        current_task().tid(), exit_code
+    log::warn!(
+        "[sys_exit] task {} exit with code {}",
+        current_task().tid(),
+        exit_code
     );
     // 切换任务
     switch_to_next_task();
@@ -111,13 +114,15 @@ pub fn sys_exit(exit_code: i32) -> ! {
 // 使用block
 #[no_mangle]
 pub fn sys_waitpid(pid: isize, exit_code_ptr: usize, option: i32) -> isize {
+    log::trace!("[sys_waitpid]");
     let option = WaitOption::from_bits(option).unwrap();
     if pid != -1 {
         log::warn!(
-            "[sys_waitpid] pid: {}, exit_code_ptr: {:x}, option: {:?}",
+            "[sys_waitpid] pid: {}, exit_code_ptr: {:x}, option: {:?}, caller: {:?}",
             pid,
             exit_code_ptr,
-            option
+            option,
+            current_task().tid(),
         );
     }
     let current_task = current_task();

@@ -26,6 +26,7 @@ pub unsafe fn sfence_vma_vaddr(vaddr: usize) {
 
 // Todo: 支持page fault预处理
 pub fn copy_to_user<T: Copy>(to: *mut T, from: *const T, n: usize) -> Result<usize, &'static str> {
+    log::trace!("[copy_to_user]");
     if to.is_null() || from.is_null() {
         log::error!(
             "null pointer: to: {:#x}, from: {:#x}",
