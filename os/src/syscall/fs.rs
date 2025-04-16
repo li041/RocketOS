@@ -1,5 +1,6 @@
 use core::{mem, panic, time};
 
+use alloc::sync::Arc;
 use alloc::{string::String, vec};
 
 use alloc::string::ToString;
@@ -9,8 +10,9 @@ use crate::arch::timer::{get_time_ms, TimeSpec};
 use crate::fs::fdtable::FdFlags;
 use crate::fs::file::OpenFlags;
 use crate::fs::kstat::Statx;
+use crate::fs::namei::lookup_dentry;
 use crate::fs::pipe::make_pipe;
-use crate::fs::uio::{DevT, PollEvents, PollFd, UtimenatFlags};
+use crate::fs::uio::{DevT, PollEvents, PollFd, RenameFlags, UtimenatFlags};
 use crate::signal::SigSet;
 use crate::task::yield_current_task;
 use crate::{
@@ -105,6 +107,40 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     } else {
         -1
     }
+}
+
+pub fn sys_readv(fd: usize, iov: *const IoVec, iovcnt: usize) -> isize {
+    if fd > 3 {
+        log::info!("sys_readv: fd: {}, iovcnt: {}", fd, iovcnt);
+    }
+    let task = current_task();
+    let file = task.fd_table().get_file(fd);
+    if file.is_none() {
+        return -1;
+    }
+    let file = file.unwrap();
+    if !file.readable() {
+        return -1;
+    }
+    let mut total_read = 0isize;
+    let iov = copy_from_user(iov, iovcnt).unwrap();
+    for iovec in iov.iter() {
+        if iovec.len == 0 {
+            continue;
+        }
+        let buf = copy_from_user_mut(iovec.base as *mut u8, iovec.len).unwrap();
+        let read = file.read(buf);
+        // 如果读取失败, 则返回已经读取的字节数, 或错误码
+        if read == 0 {
+            return if total_read > 0 {
+                total_read
+            } else {
+                read as isize
+            };
+        }
+        total_read += read as isize;
+    }
+    total_read
 }
 
 pub fn sys_writev(fd: usize, iov: *const IoVec, iovcnt: usize) -> isize {
@@ -217,6 +253,7 @@ pub fn sys_unlinkat(dirfd: i32, pathname: *const u8, flag: i32) -> isize {
     }
 }
 
+/// 创建硬链接
 pub fn sys_linkat(
     olddirfd: i32,
     oldpath: *const u8,
@@ -417,7 +454,8 @@ pub fn sys_fstatat(dirfd: i32, pathname: *const u8, statbuf: *mut Stat, flags: i
         }
         Err(e) => {
             log::info!("[sys_fstatat] fail to fstatat: {}, {}", path, e);
-            return -1;
+            // Todo: 这里需要设置errno, 如果返回-1, 应用程序检查errno, 会认为Operation not permitted
+            return -2;
         }
     }
 }
@@ -480,9 +518,8 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> isize {
                 Ok(dirents) => {
                     let mut offset = 0;
                     for dirent in dirents {
-                        // log::error!("dirent_name: {}", String::from_utf8_lossy(&dirent.d_name));
+                        log::error!("dirent_name: {}", String::from_utf8_lossy(&dirent.d_name));
                         let dirent_size = dirent.d_reclen as usize;
-                        log::warn!("dirent_size: {}", dirent_size);
                         if offset + dirent_size > count {
                             break;
                         }
@@ -552,6 +589,115 @@ pub fn sys_close(fd: usize) -> isize {
         0
     } else {
         -1
+    }
+}
+
+/// 更改文件的名称(必要的时候会改变位置), 文件的其他硬链接(由link创建)不受影响, 对oldpth打开的文件描述符不受影响
+/// Todo: 实现oldpath是符号链接的情况
+pub fn sys_renameat2(
+    olddirfd: i32,
+    oldpath: *const u8,
+    newdirfd: i32,
+    newpath: *const u8,
+    flags: i32,
+) -> isize {
+    log::info!(
+        "[sys_renameat2] olddirfd: {}, oldpath: {:?}, newdirfd: {}, newpath: {:?}, flags: {}",
+        olddirfd,
+        oldpath,
+        newdirfd,
+        newpath,
+        flags
+    );
+    let oldpath = c_str_to_string(oldpath);
+    let newpath = c_str_to_string(newpath);
+    let flags = RenameFlags::from_bits(flags).unwrap();
+    // 检查flags
+    if (flags.contains(RenameFlags::NOREPLACE) || flags.contains(RenameFlags::WHITEOUT))
+        && flags.contains(RenameFlags::EXCHANGE)
+    {
+        log::error!("[sys_renameat2] NOREPLACE and RENAME_EXCHANGE cannot be used together");
+        return -1;
+    }
+    if flags.contains(RenameFlags::WHITEOUT) {
+        unimplemented!();
+    }
+    let mut old_nd = Nameidata::new(&oldpath, olddirfd);
+    let fake_lookup_flags = 0;
+    match filename_lookup(&mut old_nd, fake_lookup_flags) {
+        Ok(old_dentry) => {
+            let mut new_nd = Nameidata::new(&newpath, newdirfd);
+            // 检查newpath是否存在, 并进行相关的类型检查
+            let new_dentry = lookup_dentry(&mut new_nd);
+            if new_dentry.is_negative() {
+                // new_path不存在
+                if flags.contains(RenameFlags::EXCHANGE) {
+                    log::error!("[sys_renameat2] newpath must exist with EXCHANGE flag");
+                    return -1;
+                }
+            } else {
+                // new_path存在
+                if flags.contains(RenameFlags::NOREPLACE) {
+                    // 如果newpath存在, 则返回错误
+                    log::error!("[sys_renameat2] newpath already exists with NOREPLACE flag");
+                    return -1;
+                }
+                if flags.contains(RenameFlags::EXCHANGE) {
+                    // 进行ancestor检查
+                    if new_dentry.is_ancestor(&old_dentry) {
+                        log::error!(
+                            "[sys_renameat2] newpath is ancestor of oldpath with EXCHANGE flag"
+                        );
+                        return -1;
+                    }
+                }
+                // 先进行类型检查
+                if old_dentry.is_symlink() {
+                    // Todo: 处理符号链接
+                    unimplemented!();
+                }
+                if old_dentry.is_dir() && !new_dentry.get_inode().can_lookup() {
+                    // 如果old_dentry是目录, 则newpath必须不存在, 或者是空目录
+                    log::error!(
+                        "[sys_renameat2] oldpath is dir, newpath must not exist or be an empty dir"
+                    );
+                    return -1;
+                }
+            }
+            // 进行ancestor检查
+            if old_dentry.is_ancestor(&new_dentry) {
+                log::error!("[sys_renameat2] oldpath is ancestor of newpath");
+                return -1;
+            }
+            // 执行renameat操作
+            let old_dir_entry = old_dentry.get_parent();
+            let new_dir_entry = new_dentry.get_parent();
+            let old_dir_inode = old_dir_entry.get_inode();
+            let new_dir_inode = new_dir_entry.get_parent().get_inode();
+            let should_mv = Arc::ptr_eq(&old_dir_inode, &new_dir_inode);
+            // inode层次的操作
+            match old_dir_inode.rename(
+                new_dir_inode,
+                old_dentry.clone(),
+                new_dentry.clone(),
+                flags,
+                should_mv,
+            ) {
+                Ok(_) => {
+                    // dentry层次的操作
+                    return 0;
+                }
+                Err(e) => {
+                    log::error!("[sys_renameat2] rename failed: {}", e);
+                    return -1;
+                }
+            }
+        }
+        Err(e) => {
+            // old_path不存在
+            log::info!("[sys_renameat2] fail to lookup oldpath: {}, {}", oldpath, e);
+            return -1;
+        }
     }
 }
 
@@ -634,7 +780,7 @@ pub fn sys_fcntl(fd: i32, op: i32, arg: usize) -> isize {
 
 /// Todo: 目前只支持了Pipe的hang_up, r_ready, w_ready
 pub fn sys_ppoll(fds: *mut PollFd, nfds: usize, timeout: *const TimeSpec, sigmask: usize) -> isize {
-    log::info!(
+    log::error!(
         "[sys_ppoll] fds: {:?}, nfds: {}, timeout: {:?}, sigmask: {}",
         fds,
         nfds,
@@ -760,7 +906,7 @@ pub fn sys_utimensat(
             Ok(dentry) => dentry.get_inode(),
             Err(e) => {
                 log::info!("[sys_utimensat] fail to lookup: {}, {}", path, e);
-                // Todo: 应该返回-1, 设置errno=ENOENT, 但是目前没有实现errno, 如果返回-1, busybox会检查errno, 报错
+                // Todo: 应该返回-1, 设置errno=ENOENT, 但是目前没有实现errno, 如果返回-1, busybox会检查errno, 报Operation not permitted
                 return e;
             }
         }
@@ -895,7 +1041,6 @@ pub fn sys_ioctl(fd: usize, op: usize, _arg_ptr: usize) -> isize {
         op,
         _arg_ptr
     );
-    log::warn!("sys_ioctl Unimplemented");
     let task = current_task();
     let file = task.fd_table().get_file(fd);
     if let Some(file) = file {

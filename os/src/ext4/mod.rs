@@ -6,7 +6,7 @@ use crate::{
         dev::tty::TtyInode,
         inode::InodeOp,
         kstat::Kstat,
-        uio::DevT,
+        uio::{DevT, RenameFlags},
     },
     mm::Page,
 };
@@ -27,6 +27,7 @@ use inode::{
 use alloc::vec::Vec;
 use core::any::Any;
 use spin::RwLock;
+use virtio_drivers::PAGE_SIZE;
 
 mod block_group;
 pub mod block_op;
@@ -61,18 +62,21 @@ impl InodeOp for Ext4Inode {
         // 注意: 这里应该使用绝对路径
         // let mut dentry = Dentry::negative(absolute_path, Some(parent_entry.clone()));
         let mut dentry: Arc<Dentry> = Dentry::negative(
-            format!("{}/{}", parent_entry.absolute_path, name),
+            format!("{}/{}", parent_entry.get_absolute_path(), name),
             Some(parent_entry.clone()),
         );
         if let Some(child) = parent_entry.inner.lock().children.get(name) {
             // 先查找parent_entry的child
-            assert!(child.absolute_path == format!("{}/{}", parent_entry.absolute_path, name));
+            assert!(
+                child.get_absolute_path()
+                    == format!("{}/{}", parent_entry.get_absolute_path(), name)
+            );
             return child.clone();
         } else {
             // 从目录中查找
             if let Some(ext4_dentry) = self.lookup(name) {
                 log::info!("[InodeOp::lookup] ext4_dentry: {:?}", ext4_dentry);
-                let absolute_path = format!("{}/{}", parent_entry.absolute_path, name);
+                let absolute_path = format!("{}/{}", parent_entry.get_absolute_path(), name);
                 let inode_num = ext4_dentry.inode_num as usize;
                 // 1.从磁盘加载inode
                 let inode = load_inode(
@@ -135,6 +139,89 @@ impl InodeOp for Ext4Inode {
         // 关联到dentry
         dentry.inner.lock().inode = Some(new_inode);
     }
+    // ToOptimize: 对于new_dir_entry, 没有通过指针直接操作, 而是内存复制
+    fn rename<'a>(
+        &'a self,
+        new_dir: Arc<dyn InodeOp>,
+        old_dentry: Arc<Dentry>,
+        new_dentry: Arc<Dentry>,
+        flags: RenameFlags,
+        should_mv: bool,
+    ) -> Result<(), &'static str> {
+        // Noreplace已经在上层调用者中检查过了, exchange还未支持
+        if flags.contains(RenameFlags::EXCHANGE) {
+            panic!("[rename] EXCHANGE not supported");
+        }
+        let old_dir_entry = match self.lookup(&old_dentry.get_last_name()) {
+            Some(entry) => entry,
+            None => {
+                log::warn!("[rename] old_dentry not found");
+                return Err("old_dentry not found");
+            }
+        };
+        // 如果更新的old_dentry是目录, 且new_dentry所在的目录不同, 需要更新`..`条目, 使其指向new_dir
+        if old_dentry.is_dir() && should_mv {
+            // 需要更新`..`条目
+            old_dentry
+                .get_inode()
+                .as_any()
+                .downcast_ref::<Ext4Inode>()
+                .unwrap()
+                .set_entry("..", new_dir.get_inode_num() as u32, EXT4_DT_DIR);
+        }
+        // 添加新目录项
+        // 如果new_dentry已经存在, 则更新现有目录项, 如果不存在, 则创建新的目录项
+        if new_dentry.is_negative() {
+            // new_dentry是负目录项, 需要创建新的目录项
+            new_dir
+                .as_any()
+                .downcast_ref::<Ext4Inode>()
+                .unwrap()
+                .add_entry(
+                    new_dentry.clone(),
+                    old_dir_entry.inode_num as u32,
+                    old_dir_entry.file_type,
+                );
+        } else {
+            // new_dentry存在
+            if Arc::ptr_eq(&old_dentry.get_inode(), &new_dentry.get_inode()) {
+                // 如果old_dentry和new_dentry是同一个文件的两个硬链接, 则直接返回
+                log::warn!(
+                    "[rename] old_dentry and new_dentry are the hard links of the same file"
+                );
+                return Ok(());
+            }
+            let new_dir_entry = match self.lookup(&new_dentry.get_last_name()) {
+                Some(entry) => entry,
+                None => {
+                    log::warn!("[rename] new_dentry not found");
+                    return Err("new_dentry not found");
+                }
+            };
+            assert!(old_dir_entry.file_type == new_dir_entry.file_type);
+            new_dir
+                .as_any()
+                .downcast_ref::<Ext4Inode>()
+                .unwrap()
+                .set_entry(
+                    &new_dentry.get_last_name(),
+                    old_dir_entry.inode_num as u32,
+                    old_dir_entry.file_type,
+                );
+        }
+
+        let (old_name, old_inode_num) = {
+            let inode = old_dentry.get_inode();
+            let inode_num = inode.get_inode_num();
+            let ext4_inode = inode.as_any().downcast_ref::<Ext4Inode>().unwrap();
+            // 更新inode的ctime
+            ext4_inode.set_ctime(TimeSpec::new_wall_time());
+            (old_dentry.get_last_name(), inode_num as u32)
+        };
+        // 删除旧目录项
+        self.delete_entry(&old_name, old_inode_num);
+        return Ok(());
+    }
     // 上层调用者保证:
     //  1.old_dentry不是负目录项, new_dentry是负目录项
     //  2. new_dentry的父子关系已经建立
@@ -175,7 +262,7 @@ impl InodeOp for Ext4Inode {
             self.ext4_fs.upgrade().unwrap().add_orphan_inode(inode_num);
         }
         // 2. 在父目录中删除对应项
-        self.delete_entry(dentry.get_last_name(), inode_num as u32);
+        self.delete_entry(&dentry.get_last_name(), inode_num as u32);
     }
     fn tmpfile<'a>(&'a self, mode: u16) -> Arc<Ext4Inode> {
         // 创建临时文件, 用于临时文件系统, inode没有对应的路径, 不会分配目录项
@@ -275,7 +362,7 @@ impl InodeOp for Ext4Inode {
             (5, 0) => {
                 // /dev/tty
                 // 分配inode_num
-                assert!(dentry.absolute_path == "/dev/tty");
+                assert!(dentry.get_absolute_path() == "/dev/tty");
                 let new_inode_num = self
                     .ext4_fs
                     .upgrade()
@@ -297,7 +384,12 @@ impl InodeOp for Ext4Inode {
         const NAME_OFFSET: usize = 19;
         let linux_dirents = ext4_dirents
             .iter()
-            .map(|entry| {
+            .filter_map(|entry| {
+                // 跳过无效的目录项(inode_num为0)
+                if entry.inode_num == 0 {
+                    offset += entry.rec_len as usize;
+                    return None;
+                }
                 let null_term_name_len = entry.name.len() + 1;
                 // reclen需要对齐到8字节
                 let d_reclen = (NAME_OFFSET + null_term_name_len + 7) & !0x7;
@@ -309,7 +401,7 @@ impl InodeOp for Ext4Inode {
                     d_name: entry.name.clone(),
                 };
                 offset += entry.rec_len as usize;
-                dirent
+                Some(dirent)
             })
             .collect();
         (offset, linux_dirents)

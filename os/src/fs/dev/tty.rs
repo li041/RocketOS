@@ -92,6 +92,9 @@ impl InodeOp for TtyInode {
     fn get_devt(&self) -> (u32, u32) {
         self.inner.read().inode_on_disk.get_devt()
     }
+    fn get_mode(&self) -> u16 {
+        self.inner.read().inode_on_disk.get_mode()
+    }
     /* 时间戳 */
     fn get_atime(&self) -> TimeSpec {
         self.inner.read().inode_on_disk.get_atime()

@@ -82,3 +82,16 @@ impl From<DevT> for u64 {
         dev.0
     }
 }
+
+/// sys_fcntl
+bitflags::bitflags! {
+    #[derive(Debug, Clone, Copy)]
+    pub struct RenameFlags: i32 {
+        // 不要覆盖目标路径(newpath), 如果目标路径存在, 返回错误
+        const NOREPLACE = 1 << 0;
+        /// 原路径（oldpath）和新路径（newpath）进行原子交换。
+        const EXCHANGE = 1 << 1;
+        /// 仅对 Overlay 或 Union 文件系统实现有意义的操作。
+        const WHITEOUT = 1 << 2;
+    }
+}

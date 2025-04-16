@@ -8,7 +8,7 @@ use spin::RwLock;
 
 use super::dentry::{Dentry, LinuxDirent64};
 use super::kstat::Kstat;
-use super::uio::DevT;
+use super::uio::{DevT, RenameFlags};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -50,6 +50,19 @@ pub trait InodeOp: Any + Send + Sync {
     //      1. 创建的文件名在目录中不存在
     //      2. Dentry的inode字段为None(负目录项)
     fn create<'a>(&'a self, negative_dentry: Arc<Dentry>, mode: u16) {
+        unimplemented!();
+    }
+    // 由上层调用者保证: 进行了类型 + ancestor + flags检查
+    // rename不会做任何检查, 只会直接修改目录项
+    // self是old_dir, 注意如果移到另一个目录, 需要修改数据块中的`..`
+    fn rename<'a>(
+        &'a self,
+        new_dir: Arc<dyn InodeOp>,
+        old_dentry: Arc<Dentry>,
+        new_dentry: Arc<Dentry>,
+        flags: RenameFlags,
+        should_mv: bool,
+    ) -> Result<(), &'static str> {
         unimplemented!();
     }
     // self是目录inode, old_dentry是旧的目录项, new_dentry是新的目录项, 他们指向同一个inode

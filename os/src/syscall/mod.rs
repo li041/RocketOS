@@ -13,8 +13,8 @@
 use fs::{
     sys_chdir, sys_close, sys_dup, sys_dup3, sys_faccessat, sys_fcntl, sys_fstat, sys_fstatat,
     sys_getcwd, sys_getdents64, sys_ioctl, sys_linkat, sys_mkdirat, sys_mknodat, sys_mount,
-    sys_openat, sys_pipe2, sys_ppoll, sys_read, sys_sendfile, sys_statx, sys_umount2, sys_unlinkat,
-    sys_utimensat, sys_write, sys_writev,
+    sys_openat, sys_pipe2, sys_ppoll, sys_read, sys_readv, sys_renameat2, sys_sendfile, sys_statx,
+    sys_umount2, sys_unlinkat, sys_utimensat, sys_write, sys_writev,
 };
 use mm::{sys_brk, sys_madvise, sys_mmap, sys_mprotect, sys_munmap};
 use signal::{
@@ -61,6 +61,7 @@ const SYSCALL_PIPE2: usize = 59;
 const SYSCALL_GETDENTS64: usize = 61;
 const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
+const SYSCALL_READV: usize = 65;
 const SYSCALL_WRITEV: usize = 66;
 const SYSCALL_SENDFILE: usize = 71;
 const SYSCALL_PPOLL: usize = 73;
@@ -103,6 +104,7 @@ const SYSCALL_MMAP: usize = 222;
 const SYSCALL_MADVISE: usize = 233;
 const SYSCALL_MPROTECT: usize = 226;
 const SYSCALL_WAIT4: usize = 260;
+const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_STATX: usize = 291;
 
 const CARELESS_SYSCALLS: [usize; 4] = [63, 64, 124, 260];
@@ -168,6 +170,7 @@ pub fn syscall(
         SYSCALL_GETDENTS64 => sys_getdents64(a0, a1 as *mut u8, a2),
         SYSCALL_READ => sys_read(a0, a1 as *mut u8, a2),
         SYSCALL_WRITE => sys_write(a0, a1 as *const u8, a2),
+        SYSCALL_READV => sys_readv(a0, a1 as *const IoVec, a2),
         SYSCALL_WRITEV => sys_writev(a0, a1 as *const IoVec, a2),
         SYSCALL_SENDFILE => sys_sendfile(a0, a1, a2 as *mut usize, a3),
         SYSCALL_PPOLL => sys_ppoll(a0 as *mut PollFd, a1, a2 as *const TimeSpec, a3),
@@ -184,7 +187,7 @@ pub fn syscall(
         SYSCALL_TGKILL => sys_tgkill(a0 as isize, a1 as isize, a2 as i32),
         //SYSCALL_SIGALTSTACK => sys_sigaltstack()
         //SYSCALL_RT_SIGSUSPEND => sys_rt_sigsuspend(a0),
-        SYSCALL_RT_SIGACTION => sys_rt_sigaction(a0 as i32, a1, a2),
+        // SYSCALL_RT_SIGACTION => sys_rt_sigaction(a0 as i32, a1, a2),
         SYSCALL_RT_SIGPROCMASK => sys_rt_sigprocmask(a0, a1, a2),
         SYSCALL_RT_SIGPENDING => sys_rt_sigpending(a0),
         //SYSCALL_RT_SIGTIMEDWAIT => sys_rt_sigtimedwait(a0, a1, a2),
@@ -203,6 +206,13 @@ pub fn syscall(
         SYSCALL_EXEC => sys_execve(a0 as *mut u8, a1 as *const usize, a2 as *const usize),
         SYSCALL_MMAP => sys_mmap(a0, a1, a2, a3, a4 as i32, a5),
         SYSCALL_WAIT4 => sys_waitpid(a0 as isize, a1, a2 as i32),
+        SYSCALL_RENAMEAT2 => sys_renameat2(
+            a0 as i32,
+            a1 as *const u8,
+            a2 as i32,
+            a3 as *const u8,
+            a4 as i32,
+        ),
         SYSCALL_STATX => sys_statx(
             a0 as i32,
             a1 as *const u8,

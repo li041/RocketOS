@@ -866,8 +866,47 @@ impl Ext4Inode {
             page_offset += 1;
             page_offset_in_page = 0;
         }
+        // 如果新写入的数据导致文件增长, 更新inode的size
+        let end_offset = offset + current_write;
+        let inode_size = self.get_size() as usize;
+        if end_offset > inode_size {
+            self.set_size(end_offset as u64);
+        }
+
         current_write
     }
+    // pub fn lookup_or_create_extent(
+    //     &self,
+    //     logical_start_block: u32,
+    //     block_device: Arc<dyn BlockDevice>,
+    //     ext4_block_size: usize,
+    // ) -> Ext4Extent {
+    //     match self.inner.write().inode_on_disk.lookup_extent(
+    //         logical_start_block,
+    //         block_device.clone(),
+    //         ext4_block_size,
+    //     ) {
+    //         Some(extent) => extent,
+    //         None => {
+    //             // 创建新的extent
+    //             let new_block_num = self.alloc_block();
+    //             let new_extent = Ext4Extent::new(logical_start_block, 1, new_block_num);
+    //             self.inner
+    //                 .write()
+    //                 .inode_on_disk
+    //                 .insert_extent(
+    //                     logical_start_block,
+    //                     new_extent.physical_start_block() as u64,
+    //                     1,
+    //                     block_device,
+    //                     ext4_block_size,
+    //                 )
+    //                 .unwrap();
+    //             new_extent
+    //         }
+    //     }
+    // }
+
     // 可能会更新inode的内容
     /// 如果extent没有找到, 会创建新的extent
     pub fn lookup_or_create_extent(
@@ -876,31 +915,33 @@ impl Ext4Inode {
         block_device: Arc<dyn BlockDevice>,
         ext4_block_size: usize,
     ) -> Ext4Extent {
-        match self.inner.write().inode_on_disk.lookup_extent(
+        let mut inner = self.inner.write();
+
+        if let Some(extent) = inner.inode_on_disk.lookup_extent(
             logical_start_block,
             block_device.clone(),
             ext4_block_size,
         ) {
-            Some(extent) => extent,
-            None => {
-                // 创建新的extent
-                let new_block_num = self.alloc_block();
-                let new_extent = Ext4Extent::new(logical_start_block, 1, new_block_num);
-                self.inner
-                    .write()
-                    .inode_on_disk
-                    .insert_extent(
-                        logical_start_block,
-                        new_extent.physical_start_block() as u64,
-                        1,
-                        block_device,
-                        ext4_block_size,
-                    )
-                    .unwrap();
-                new_extent
-            }
+            extent
+        } else {
+            let new_block_num = self.alloc_block();
+            let new_extent = Ext4Extent::new(logical_start_block, 1, new_block_num);
+
+            inner
+                .inode_on_disk
+                .insert_extent(
+                    logical_start_block,
+                    new_extent.physical_start_block() as u64,
+                    1,
+                    block_device,
+                    ext4_block_size,
+                )
+                .unwrap();
+
+            new_extent
         }
     }
+
     pub fn write(&self, offset: usize, buf: &[u8]) -> usize {
         let wbuf_len = buf.len();
 
@@ -931,19 +972,22 @@ impl Ext4Inode {
 
         let inode_guard = self.inner.read();
         let inode_on_disk = &inode_guard.inode_on_disk;
+        let inode_size_before = self.inner.read().inode_on_disk.get_size();
         // 2. 若写入后文件大小超过60字节, 转换为extent tree
-        // 同样会调用write_extent_tree, 但是会先将inline_data写入新的block
-        if inode_on_disk.get_size() <= 60 {
+        // 同样会调用write_extent_tree, 但是如果size > 0, 说明有inline_data, 会先将inline_data写入新的block
+        if inode_size_before <= 60 {
             // 申请新的block
             let new_block = self.alloc_block();
             // 写入inline_data内容到新的block
-            // 注意这里应该通过页缓存来写入, 而不是直接写入block_cache
-            let page = self.get_page_cache(0).unwrap();
-            // 复制原来的inline_data, 同时写入新的block
-            page.modify(0, |data: &mut [u8; PAGE_SIZE]| {
-                data[0..EXT4_MAX_INLINE_DATA]
-                    .copy_from_slice(&inode_on_disk.block[..EXT4_MAX_INLINE_DATA]);
-            });
+            // 注意这里应该写入页缓存(在页缓存drop时写回), 而不是直接写入block_cache
+            if inode_size_before > 0 {
+                let page = self.get_page_cache(0).unwrap();
+                // 复制原来的inline_data, 同时写入新的block
+                page.modify(0, |data: &mut [u8; PAGE_SIZE]| {
+                    data[0..EXT4_MAX_INLINE_DATA]
+                        .copy_from_slice(&inode_on_disk.block[..EXT4_MAX_INLINE_DATA]);
+                });
+            }
             drop(inode_guard);
             let mut inode_guard = self.inner.write();
             let inode_on_disk = &mut inode_guard.inode_on_disk;
@@ -955,8 +999,10 @@ impl Ext4Inode {
             // 初始化extent tree, extent_header + extent
             let header_ptr = inode_on_disk.block.as_mut_ptr() as *mut Ext4ExtentHeader;
             unsafe {
-                header_ptr.write(Ext4ExtentHeader::default());
-                let extent_ptr = inode_on_disk.block.as_mut_ptr().add(3) as *mut Ext4Extent;
+                let mut extent_header = Ext4ExtentHeader::default();
+                extent_header.entries = 1;
+                header_ptr.write_volatile(extent_header);
+                let extent_ptr = inode_on_disk.block.as_mut_ptr().add(12) as *mut Ext4Extent;
                 extent_ptr.write(new_extent);
             }
         }
@@ -979,6 +1025,7 @@ impl Ext4Inode {
         let dir_content = Ext4DirContentRO::new(&buf);
         dir_content.find(name)
     }
+    // 注意: 这里没有检查目录项是否存在(inode_num != 0), 由上层调用者检查
     pub fn getdents(&self, offset: usize) -> Vec<Ext4DirEntry> {
         assert!(self.inner.read().inode_on_disk.is_dir(), "not a directory");
         let dir_size = self.inner.read().inode_on_disk.get_size();
@@ -1045,7 +1092,32 @@ impl Ext4Inode {
 // 设计修改inode内容的方法
 // 注意对于修改inode的文件内容, 一定要通过`write`方法
 // 对于修改inode的元信息的, 一定要由上层调用者通过`write_inode`写回block_cache
+// Todo: 更新inode的时间戳
 impl Ext4Inode {
+    pub fn set_entry(&self, old_name: &str, new_inode_num: u32, new_file_type: u8) {
+        assert!(self.inner.read().inode_on_disk.is_dir(), "not a directory");
+        log::info!(
+            "[Ext4Inode::set_entry] old_name: {}, new_inode_num: {}, new_file_type: {}",
+            old_name,
+            new_inode_num,
+            new_file_type
+        );
+        let dir_size = self.inner.read().inode_on_disk.get_size();
+        assert!(
+            dir_size & (PAGE_SIZE as u64 - 1) == 0,
+            "dir_size is not page aligned"
+        );
+        let mut buf = vec![0u8; dir_size as usize];
+        // buf中是目录的所有内容
+        self.read(0, &mut buf).expect("read failed");
+        let mut dir_content = Ext4DirContentWE::new(&mut buf);
+        // 更新目录内容, 以及可能目录会扩容, inode_on_disk的size会更新
+        dir_content
+            .set_entry(old_name, new_inode_num, new_file_type)
+            .expect("Ext4Inode::set_dentry failed");
+        // 写回page cache
+        self.write(0, &buf);
+    }
     /// 目录项的插入
     ///     1. 注意可能使用inline_data
     /// Todo: 1. 目前没有考虑目录扩容的情况
@@ -1068,9 +1140,10 @@ impl Ext4Inode {
         let mut dir_content = Ext4DirContentWE::new(&mut buf);
         // 更新目录内容, 以及可能目录会扩容, inode_on_disk的size会更新
         dir_content
-            .add_entry(dentry.get_last_name(), inode_num, file_type)
+            .add_entry(&dentry.get_last_name(), inode_num, file_type)
             .expect("Ext4Inode::add_entry failed");
-        // 写回Block_Cache
+        // 写回page cache
+        // Todo: 没有处理目录多页的情况
         self.write(0, &buf);
     }
     pub fn delete_entry(&self, name: &str, inode_num: u32) {
@@ -1089,7 +1162,8 @@ impl Ext4Inode {
         dir_content
             .delete_entry(name, inode_num)
             .expect("Ext4Inode::delete_entry failed");
-        // 写回Block_Cache
+        // 写回page cache
+        // Todo: 没有处理目录多页的情况
         self.write(0, &buf);
     }
     pub fn insert_extent(
