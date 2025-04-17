@@ -19,9 +19,9 @@ const RESET_COLOR: &str = "\u{1B}[0m";
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use shell::command::Command;
+use shell::command::{parse_pipeline, Command};
 use user_lib::console::getchar;
-use user_lib::{execve, fork, waitpid};
+use user_lib::{close, dup3, execve, fork, pipe, waitpid};
 
 fn print_prompt() {
     print!("{}RROS>> {}", THEME_COLOR, RESET_COLOR);
@@ -45,16 +45,65 @@ pub fn main() -> i32 {
                     history_index = history.len(); // 重置索引到最新
 
                     // 执行命令
-                    let cmd = Command::from(line.as_str());
-                    let pid = fork();
-                    if pid == 0 {
-                        cmd.exec();
+                    let cmds = parse_pipeline(line.as_str());
+                    if cmds.len() == 1 {
+                        let cmd = &cmds[0];
+                        let pid = fork();
+                        if pid == 0 {
+                            cmd.exec();
+                        } else {
+                            let mut exit_code: i32 = 0;
+                            let exit_pid = waitpid(pid, &mut exit_code);
+                            println!("pid: {}, exit_pid: {}", pid, exit_pid);
+                            assert_eq!(pid, exit_pid);
+                            println!("Shell: Process {} exited with code {}", pid, exit_code);
+                        }
                     } else {
-                        let mut exit_code: i32 = 0;
-                        let exit_pid = waitpid(pid as usize, &mut exit_code);
-                        println!("pid: {}, exit_pid: {}", pid, exit_pid);
-                        assert_eq!(pid, exit_pid);
-                        println!("Shell: Process {} exited with code {}", pid, exit_code);
+                        // 多个命令的pipeline情况
+                        let mut fds: [i32; 2] = [0; 2];
+                        let mut prev_fd_read: Option<usize> = None;
+
+                        for (i, cmd) in cmds.iter().enumerate() {
+                            if i != cmds.len() - 1 {
+                                pipe(&mut fds as *mut i32, 0); // 创建一个 pipe
+                            }
+
+                            let pid = fork();
+                            if pid == 0 {
+                                // 子进程
+
+                                // 如果有前一个 pipe 的 read 端，就作为 stdin
+                                if let Some(fd_in) = prev_fd_read {
+                                    dup3(fd_in, 0, 0);
+                                    close(fd_in);
+                                }
+
+                                // 如果不是最后一个命令，就设置 stdout 为 pipe 的写端
+                                if i != cmds.len() - 1 {
+                                    close(fds[0] as usize); // 关闭读端
+                                    dup3(fds[1] as usize, 1, 0); // 设置 stdout
+                                    close(fds[1] as usize);
+                                }
+
+                                cmd.exec(); // exec 会自动 exit
+                            }
+
+                            // 父进程：关闭已用的 pipe 文件描述符
+                            if let Some(fd_in) = prev_fd_read {
+                                close(fd_in);
+                            }
+                            if i != cmds.len() - 1 {
+                                prev_fd_read = Some(fds[0] as usize);
+                                close(fds[1] as usize);
+                            }
+                        }
+
+                        // 等待所有子进程
+                        for _ in 0..cmds.len() {
+                            let mut exit_code: i32 = 0;
+                            let pid = waitpid(-1, &mut exit_code);
+                            println!("Shell: Process {} exited with code {}", pid, exit_code);
+                        }
                     }
                     line.clear();
                 }

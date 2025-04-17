@@ -9,6 +9,7 @@ use bitflags::Flag;
 use hashbrown::HashMap;
 use lazy_static::lazy_static;
 use log::set_logger;
+use spin::RwLock;
 
 use crate::{
     ext4::{dentry::Ext4DirEntry, inode::S_IFDIR},
@@ -31,16 +32,14 @@ bitflags::bitflags! {
     }
 }
 
-impl From<OpenFlags> for DentryFlags {
-    fn from(flags: OpenFlags) -> Self {
-        let mut dentry_flags = DentryFlags::empty();
-        if flags.contains(OpenFlags::O_DIRECTORY) {
-            dentry_flags |= DentryFlags::DCACHE_DIRECTORY_TYPE;
-        }
-        if flags.contains(OpenFlags::O_SYMLINK) {
-            dentry_flags |= DentryFlags::DCACHE_SYMLINK_TYPE;
-        }
-        dentry_flags
+impl DentryFlags {
+    pub fn update_type_from_negative(&mut self, flags: DentryFlags) {
+        self.remove(DentryFlags::DCACHE_DIRECTORY_TYPE);
+        self.insert(flags);
+    }
+    pub fn get_type(&self) -> DentryFlags {
+        const DCACHE_ENTRY_TYPE_MASK: u32 = 7 << 20;
+        DentryFlags::from_bits_truncate(self.bits() & DCACHE_ENTRY_TYPE_MASK)
     }
 }
 
@@ -48,7 +47,7 @@ impl From<OpenFlags> for DentryFlags {
 #[repr(C)]
 pub struct Dentry {
     pub absolute_path: String,
-    pub flags: u32,
+    pub flags: RwLock<DentryFlags>,
     pub inner: SpinNoIrqLock<DentryInner>,
 }
 
@@ -83,26 +82,26 @@ impl Dentry {
     pub fn zero_init() -> Self {
         Self {
             absolute_path: String::new(),
-            flags: 0,
+            flags: RwLock::new(DentryFlags::empty()),
             inner: SpinNoIrqLock::new(DentryInner::negative(None)),
         }
     }
     pub fn new(
         absolute_path: String,
         parent: Option<Arc<Dentry>>,
-        flags: u32,
+        flags: DentryFlags,
         inode: Arc<dyn InodeOp>,
     ) -> Arc<Self> {
         Arc::new(Self {
             absolute_path,
-            flags,
+            flags: RwLock::new(flags),
             inner: SpinNoIrqLock::new(DentryInner::new(parent, inode)),
         })
     }
     pub fn negative(absolute_path: String, parent: Option<Arc<Dentry>>) -> Arc<Self> {
         Arc::new(Self {
             absolute_path,
-            flags: 0,
+            flags: RwLock::new(DentryFlags::DCACHE_MISS_TYPE),
             inner: SpinNoIrqLock::new(DentryInner::negative(parent)),
         })
     }
@@ -115,10 +114,15 @@ impl Dentry {
         self.inner.lock().inode.is_none()
     }
     pub fn is_symlink(&self) -> bool {
-        self.flags & DCACHE_SYMLINK_TYPE != 0
+        self.flags.read().contains(DentryFlags::DCACHE_SYMLINK_TYPE)
+    }
+    pub fn is_regular(&self) -> bool {
+        self.flags.read().contains(DentryFlags::DCACHE_REGULAR_TYPE)
     }
     pub fn is_dir(&self) -> bool {
-        self.get_inode().get_mode() & S_IFDIR != 0
+        self.flags
+            .read()
+            .contains(DentryFlags::DCACHE_DIRECTORY_TYPE)
     }
     pub fn get_last_name(&self) -> &str {
         self.absolute_path
@@ -132,9 +136,6 @@ impl Dentry {
         let target = Arc::as_ptr(self);
         let mut current = child.clone();
         loop {
-            if Arc::as_ptr(&current) == target {
-                return true;
-            }
             let parent_opt = current.inner.lock().parent.as_ref().unwrap().upgrade();
             match parent_opt {
                 Some(parent) => {
@@ -148,6 +149,9 @@ impl Dentry {
                     log::warn!("[is_ancestor] Note: Orphan inode detected");
                     return false;
                 }
+            }
+            if Arc::as_ptr(&current) == target {
+                return true;
             }
         }
     }

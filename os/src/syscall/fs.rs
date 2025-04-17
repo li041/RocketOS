@@ -560,29 +560,30 @@ pub fn sys_chdir(pathname: *const u8) -> isize {
 }
 
 // Todo: 直接往用户地址空间写入, 没有检查
-pub fn sys_pipe2(fdset: *const u8, flags: i32) -> isize {
+pub fn sys_pipe2(fdset_ptr: *mut i32, flags: i32) -> isize {
     log::trace!("[sys_pipe2]");
     let flags = OpenFlags::from_bits(flags).unwrap();
-    log::info!("[sys_pipe2] fdset: {:?}, flags: {:?}", fdset, flags);
     let task = current_task();
     let pipe_pair = make_pipe();
     let fd_table = task.fd_table();
     let fd_flags = FdFlags::from(&flags);
     let fd1 = fd_table.alloc_fd(pipe_pair.0.clone(), fd_flags);
     let fd2 = fd_table.alloc_fd(pipe_pair.1.clone(), fd_flags);
+    log::info!(
+        "[sys_pipe2] fdset: {:?}, flags: {:?}, fds: [{}, {}]",
+        fdset_ptr,
+        flags,
+        fd1,
+        fd2
+    );
     let pipe = [fd1 as i32, fd2 as i32];
-    let fdset_ptr = fdset as *mut [i32; 2];
-    copy_to_user(
-        fdset_ptr as *mut u8,
-        pipe.as_ptr() as *const u8,
-        2 * core::mem::size_of::<i32>(),
-    )
-    .unwrap();
+    copy_to_user(fdset_ptr, pipe.as_ptr(), 2).unwrap();
     0
 }
 
 pub fn sys_close(fd: usize) -> isize {
-    log::info!("[sys_close] fd: {}", fd);
+    // 4.17
+    log::error!("[sys_close] fd: {}", fd);
     let task = current_task();
     let fd_table = task.fd_table();
     if fd_table.close(fd) {
@@ -663,6 +664,15 @@ pub fn sys_renameat2(
                     );
                     return -1;
                 }
+                if old_dentry.is_regular()
+                    && Arc::ptr_eq(&old_dentry.get_inode(), &new_dentry.get_inode())
+                {
+                    // 如果old_dentry和new_dentry是同一个file的两个硬链接, 则直接返回
+                    log::warn!(
+                        "[rename] old_dentry and new_dentry are the hard links of the same file"
+                    );
+                    return 0;
+                }
             }
             // 进行ancestor检查
             if old_dentry.is_ancestor(&new_dentry) {
@@ -675,7 +685,7 @@ pub fn sys_renameat2(
             let old_dir_inode = old_dir_entry.get_inode();
             let new_dir_inode = new_dir_entry.get_parent().get_inode();
             let should_mv = Arc::ptr_eq(&old_dir_inode, &new_dir_inode);
-            // inode层次的操作
+            // inode层次的操作 + dentry层次的操作
             match old_dir_inode.rename(
                 new_dir_inode,
                 old_dentry.clone(),
@@ -684,7 +694,7 @@ pub fn sys_renameat2(
                 should_mv,
             ) {
                 Ok(_) => {
-                    // dentry层次的操作
+                    delete_dentry(old_dentry);
                     return 0;
                 }
                 Err(e) => {
@@ -1043,6 +1053,8 @@ pub fn sys_ioctl(fd: usize, op: usize, _arg_ptr: usize) -> isize {
     );
     let task = current_task();
     let file = task.fd_table().get_file(fd);
+    log::error!("current task: {:?}", task.tid());
+    task.fd_table().list();
     if let Some(file) = file {
         return file.ioctl(op, _arg_ptr);
     }

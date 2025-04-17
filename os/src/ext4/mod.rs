@@ -2,7 +2,7 @@ use crate::{
     arch::timer::TimeSpec,
     drivers::block::block_cache::get_block_cache,
     fs::{
-        dentry::{Dentry, LinuxDirent64, DCACHE_SYMLINK_TYPE},
+        dentry::{Dentry, DentryFlags, LinuxDirent64},
         dev::tty::TtyInode,
         inode::InodeOp,
         kstat::Kstat,
@@ -21,7 +21,7 @@ use dentry::{EXT4_DT_CHR, EXT4_DT_DIR};
 use fs::EXT4_BLOCK_SIZE;
 use inode::{
     load_inode, write_inode, Ext4Inode, EXT4_EXTENTS_FL, EXT4_INLINE_DATA_FL, S_IALLUGO, S_IFCHR,
-    S_IFDIR, S_IFREG,
+    S_IFDIR, S_IFLNK, S_IFREG,
 };
 
 use alloc::vec::Vec;
@@ -62,21 +62,18 @@ impl InodeOp for Ext4Inode {
         // 注意: 这里应该使用绝对路径
         // let mut dentry = Dentry::negative(absolute_path, Some(parent_entry.clone()));
         let mut dentry: Arc<Dentry> = Dentry::negative(
-            format!("{}/{}", parent_entry.get_absolute_path(), name),
+            format!("{}/{}", parent_entry.absolute_path, name),
             Some(parent_entry.clone()),
         );
         if let Some(child) = parent_entry.inner.lock().children.get(name) {
             // 先查找parent_entry的child
-            assert!(
-                child.get_absolute_path()
-                    == format!("{}/{}", parent_entry.get_absolute_path(), name)
-            );
+            assert!(child.absolute_path == format!("{}/{}", parent_entry.absolute_path, name));
             return child.clone();
         } else {
             // 从目录中查找
             if let Some(ext4_dentry) = self.lookup(name) {
                 log::info!("[InodeOp::lookup] ext4_dentry: {:?}", ext4_dentry);
-                let absolute_path = format!("{}/{}", parent_entry.get_absolute_path(), name);
+                let absolute_path = format!("{}/{}", parent_entry.absolute_path, name);
                 let inode_num = ext4_dentry.inode_num as usize;
                 // 1.从磁盘加载inode
                 let inode = load_inode(
@@ -84,11 +81,16 @@ impl InodeOp for Ext4Inode {
                     self.block_device.clone(),
                     self.ext4_fs.upgrade().unwrap().clone(),
                 );
-                let dentry_flags = if inode.is_symlink() {
-                    DCACHE_SYMLINK_TYPE
-                } else {
-                    0
-                };
+
+                let inode_mode = inode.get_mode();
+                let dentry_flags;
+                match inode_mode & 0o170000 {
+                    S_IFREG => dentry_flags = DentryFlags::DCACHE_REGULAR_TYPE,
+                    S_IFDIR => dentry_flags = DentryFlags::DCACHE_DIRECTORY_TYPE,
+                    S_IFCHR => dentry_flags = DentryFlags::DCACHE_SPECIAL_TYPE,
+                    S_IFLNK => dentry_flags = DentryFlags::DCACHE_SYMLINK_TYPE,
+                    _ => panic!("[InodeOp::lookup] unknown inode type"),
+                }
                 // 2. 关联到Dentry
                 dentry = Dentry::new(
                     absolute_path,
@@ -138,6 +140,11 @@ impl InodeOp for Ext4Inode {
         self.add_entry(dentry.clone(), new_inode_num as u32, EXT4_DT_DIR);
         // 关联到dentry
         dentry.inner.lock().inode = Some(new_inode);
+        // 更新dentry flags, 去掉负目录项标志, 添加常规文件标志
+        dentry
+            .flags
+            .write()
+            .update_type_from_negative(DentryFlags::DCACHE_REGULAR_TYPE);
     }
     // ToOptimize: 对于new_dir_entry, 没有通过指针直接操作, 而是内存复制
     fn rename<'a>(
@@ -182,15 +189,15 @@ impl InodeOp for Ext4Inode {
                     old_dir_entry.inode_num as u32,
                     old_dir_entry.file_type,
                 );
+            // 关联到dentry
+            new_dentry.inner.lock().inode = Some(old_dentry.get_inode());
+            // 更新dentry flags, 去掉负目录项标志, 添加对应文件标志
+            new_dentry
+                .flags
+                .write()
+                .update_type_from_negative(old_dentry.flags.read().get_type());
         } else {
             // new_dentry存在
-            if Arc::ptr_eq(&old_dentry.get_inode(), &new_dentry.get_inode()) {
-                // 如果old_dentry和new_dentry是同一个文件的两个硬链接, 则直接返回
-                log::warn!(
-                    "[rename] old_dentry and new_dentry are the hard links of the same file"
-                );
-                return Ok(());
-            }
             let new_dir_entry = match self.lookup(&new_dentry.get_last_name()) {
                 Some(entry) => entry,
                 None => {
@@ -250,6 +257,11 @@ impl InodeOp for Ext4Inode {
         self.add_entry(new_dentry.clone(), old_inode_num as u32, EXT4_DT_DIR);
         // 关联到dentry
         new_dentry.inner.lock().inode = Some(old_inode);
+        // 更新dentry flags, 去掉负目录项标志, 添加文件标志
+        new_dentry
+            .flags
+            .write()
+            .update_type_from_negative(old_dentry.flags.read().get_type());
     }
     fn unlink<'a>(&'a self, dentry: Arc<Dentry>) {
         // 1. 更新inode的硬链接数, ctime
@@ -340,9 +352,14 @@ impl InodeOp for Ext4Inode {
         // 将inode写入block_cache
         write_inode(&new_inode, new_inode_num, self.block_device.clone());
         // 在父目录中添加对应项
-        // 关联到dentry
         self.add_entry(dentry.clone(), new_inode_num as u32, EXT4_DT_DIR);
+        // 关联到dentry
         dentry.inner.lock().inode = Some(new_inode);
+        // 更新dentry flags, 去掉负目录项标志, 添加目录标志
+        dentry
+            .flags
+            .write()
+            .update_type_from_negative(DentryFlags::DCACHE_DIRECTORY_TYPE);
     }
     /// 不同的字符设备类型, 使用Inode不同
     /// 目前仅支持字符设备, 设备号都是静态分配
@@ -362,7 +379,7 @@ impl InodeOp for Ext4Inode {
             (5, 0) => {
                 // /dev/tty
                 // 分配inode_num
-                assert!(dentry.get_absolute_path() == "/dev/tty");
+                assert!(dentry.absolute_path == "/dev/tty");
                 let new_inode_num = self
                     .ext4_fs
                     .upgrade()
@@ -376,6 +393,11 @@ impl InodeOp for Ext4Inode {
             } // /dev/tty
             _ => panic!("Unsupported device: major: {}, minor: {}", major, minor),
         }
+        // 更新dentry flags, 去掉负目录项标志, 添加特殊设备标志
+        dentry
+            .flags
+            .write()
+            .update_type_from_negative(DentryFlags::DCACHE_SPECIAL_TYPE);
     }
     fn getdents(&self, offset: usize) -> (usize, Vec<LinuxDirent64>) {
         let ext4_dirents: Vec<dentry::Ext4DirEntry> = self.getdents(offset);

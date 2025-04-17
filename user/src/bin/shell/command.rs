@@ -1,15 +1,35 @@
 use alloc::{
     ffi::CString,
     string::{String, ToString},
+    vec,
     vec::Vec,
 };
 use user_lib::{execve, exit};
+
+pub struct Pipeline {
+    commands: Vec<Command>,
+}
+
+impl From<&str> for Pipeline {
+    fn from(line: &str) -> Self {
+        let mut commands = Vec::new();
+        for segment in line.split('|') {
+            let cmd = Command::from(segment.trim());
+            commands.push(cmd);
+        }
+        Pipeline { commands }
+    }
+}
 
 pub struct Command {
     tokens: Vec<CString>,
     stdin_redirect: Option<CString>,
     stdout_redirect: Option<CString>,
     append: bool,
+}
+
+pub fn parse_pipeline(line: &str) -> Vec<Command> {
+    line.split('|').map(str::trim).map(Command::from).collect()
 }
 
 /// 辅助函数：从字符迭代器中读取下一个 token（跳过空格）

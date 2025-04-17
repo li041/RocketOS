@@ -89,6 +89,9 @@ pub fn getpid() -> isize {
 pub fn fork() -> isize {
     sys_fork()
 }
+pub fn pipe(pipe: *mut i32, flags: i32) -> isize {
+    sys_pipe2(pipe, flags)
+}
 // pub fn exec(path: &str) -> isize {
 //     sys_exec(path)
 // }
@@ -124,7 +127,7 @@ pub fn wait(exit_code: &mut i32) -> isize {
     }
 }
 
-pub fn waitpid(pid: usize, exit_code: &mut i32) -> isize {
+pub fn waitpid(pid: isize, exit_code: &mut i32) -> isize {
     loop {
         match sys_waitpid(pid as isize, exit_code as *mut _) {
             -2 => {
