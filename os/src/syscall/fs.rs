@@ -498,7 +498,8 @@ pub fn sys_statx(
         }
         Err(e) => {
             log::info!("[sys_statx] fail to statx: {}, {}", path, e);
-            return -1;
+            // Todo: 这里需要设置errno, 如果返回-1, 应用程序检查errno, 会认为Operation not permitted
+            return -2;
         }
     }
 }

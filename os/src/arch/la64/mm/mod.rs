@@ -56,7 +56,6 @@ pub fn copy_to_user<T: Copy>(to: *mut T, from: *const T, n: usize) -> Result<usi
     });
     unsafe {
         let data = from_raw_parts(from as *const u8, n);
-        log::error!("copy data: {:?}, to_pa: {:#x}", data, to_pa);
     }
     // 执行复制
     unsafe {

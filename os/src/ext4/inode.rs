@@ -33,8 +33,7 @@ use super::{
 
 const EXT4_N_BLOCKS: usize = 15;
 
-// File mode
-pub const S_IFMT: u16 = 0xF000; // File type mask
+/// 权限位掩码（低 12 位）
 pub const S_IXOTH: u16 = 0x1; // Others have execute permission
 pub const S_IWOTH: u16 = 0x2; // Others have write permission
 pub const S_IROTH: u16 = 0x4; // Others have read permission
@@ -48,6 +47,8 @@ pub const S_ISVTX: u16 = 0x200; // Sticky bit
 pub const S_ISGID: u16 = 0x400; // Set GID
 pub const S_ISUID: u16 = 0x800; // Set UID
 
+// 文件类型(高4位)
+pub const S_IFMT: u16 = 0xF000; // File type mask
 pub const S_IFCHR: u16 = 0x2000; // Character device
 pub const S_IFDIR: u16 = 0x4000; // Directory
 pub const S_IFREG: u16 = 0x8000; // Regular file
@@ -81,7 +82,7 @@ const STATX_ATTR_APPEND: u64 = 0x00000020; // writes to file may only append
 #[derive(Debug, Clone, Copy)]
 // 注意Ext4Inode字段一共160字节, 但是sb.inode_size是256字节, 在计算偏移量时要注意使用sb的
 pub struct Ext4InodeDisk {
-    mode: u16,              // 文件类型和访问权限
+    mode: u16,              // 文件类型(高4位)和访问权限(低12位)
     uid: u16,               // 文件所有者的用户ID(低16位)
     size_lo: u32,           // 文件大小(字节, 低32位)
     atime: u32,             // 最后访问时间(秒)
@@ -291,6 +292,12 @@ impl Ext4InodeDisk {
     }
     pub fn get_mode(&self) -> u16 {
         self.mode
+    }
+    pub fn get_type(&self) -> u16 {
+        self.mode & S_IFMT
+    }
+    pub fn get_perm(&self) -> u16 {
+        self.mode & S_IALLUGO
     }
     // Todo:
     pub fn set_dtime(&mut self, _dtime: u32) {

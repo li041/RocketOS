@@ -97,9 +97,14 @@ impl File {
 
 impl File {
     pub fn new(path: Arc<Path>, inode: Arc<dyn InodeOp>, flags: OpenFlags) -> Self {
+        let offset = if flags.contains(OpenFlags::O_APPEND) {
+            inode.get_size()
+        } else {
+            0
+        };
         Self {
             inner: SpinNoIrqLock::new(FileInner {
-                offset: 0,
+                offset,
                 path,
                 inode,
                 flags,
@@ -156,7 +161,12 @@ impl FileOp for File {
     }
 
     fn write<'a>(&'a self, buf: &'a [u8]) -> usize {
-        let write_size = self.inner_handler(|inner| inner.inode.write(inner.offset, buf));
+        let write_size = self.inner_handler(|inner| {
+            if inner.flags.contains(OpenFlags::O_APPEND) {
+                inner.offset = inner.inode.get_size();
+            }
+            inner.inode.write(inner.offset, buf)
+        });
         self.add_offset(write_size);
         write_size
     }
@@ -172,9 +182,10 @@ impl FileOp for File {
         // self.inner_handler(|inner| inner.flags & O_RDONLY != 0)
         true
     }
-    // Todo:
     fn writable(&self) -> bool {
-        true
+        let inner_guard = self.inner.lock();
+        inner_guard.flags.contains(OpenFlags::O_WRONLY)
+            || inner_guard.flags.contains(OpenFlags::O_RDWR)
     }
 }
 
@@ -190,6 +201,7 @@ bitflags::bitflags! {
     // File access mode (O_RDONLY, O_WRONLY, O_RDWR).
     // The file creation flags are O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL,
     // O_NOCTTY, O_NOFOLLOW, O_TMPFILE, and O_TRUNC.
+    // O_EXCL在sys_openat中被处理, 文件访问模式在`create_file_from_dentry`中被处理
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct OpenFlags: i32 {
         // reserve 3 bits for the access mode

@@ -10,8 +10,15 @@ use super::{
     Stdin, FS_BLOCK_SIZE,
 };
 use crate::{
-    ext4::inode::{S_IFCHR, S_IFDIR, S_IFMT, S_IFREG},
-    fs::AT_FDCWD,
+    ext4::{
+        dentry,
+        inode::{S_IFCHR, S_IFDIR, S_IFMT, S_IFREG},
+    },
+    fs::{
+        dentry::DentryFlags,
+        fdtable::{FdEntry, FdFlags},
+        AT_FDCWD,
+    },
     task::current_task,
 };
 use alloc::{
@@ -235,6 +242,7 @@ pub fn open_last_lookups(
     }
 }
 
+// 根据类型创建对应类型文件, 同时处理OpenFlags
 fn create_file_from_dentry(
     dentry: Arc<Dentry>,
     mount: Arc<VfsMount>,
