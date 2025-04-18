@@ -12,6 +12,7 @@ use super::{
     dentry::{Dentry, LinuxDirent64},
     inode::InodeOp,
     path::Path,
+    uapi::Whence,
 };
 
 // 普通文件
@@ -54,7 +55,7 @@ pub trait FileOp: Any + Send + Sync {
         unimplemented!();
     }
     // move the file offset
-    fn seek(&self, offset: usize) {
+    fn seek(&self, offset: usize, whence: Whence) -> usize {
         unimplemented!();
     }
     // Get the file offset
@@ -170,8 +171,21 @@ impl FileOp for File {
         self.add_offset(write_size);
         write_size
     }
-    fn seek(&self, offset: usize) {
-        self.inner_handler(|inner| inner.offset = offset);
+    fn seek(&self, offset: usize, whence: Whence) -> usize {
+        self.inner_handler(|inner| {
+            match whence {
+                Whence::SeekSet => inner.offset = offset,
+                Whence::SeekCur => inner.offset += offset,
+                Whence::SeekEnd => {
+                    let size = inner.inode.get_size();
+                    if offset > size {
+                        panic!("seek out of range");
+                    }
+                    inner.offset = size - offset;
+                }
+            }
+            return inner.offset;
+        })
     }
     fn get_offset(&self) -> usize {
         self.inner_handler(|inner| inner.offset)

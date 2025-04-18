@@ -100,6 +100,7 @@ pub fn copy_from_user_mut<'a, T: Copy>(
     from: *mut T,
     n: usize,
 ) -> Result<&'a mut [T], &'static str> {
+    log::trace!("[copy_from_user_mut]");
     if from.is_null() {
         return Err("null pointer");
     }

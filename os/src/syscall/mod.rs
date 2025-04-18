@@ -12,9 +12,9 @@
 
 use fs::{
     sys_chdir, sys_close, sys_dup, sys_dup3, sys_faccessat, sys_fcntl, sys_fstat, sys_fstatat,
-    sys_getcwd, sys_getdents64, sys_ioctl, sys_linkat, sys_mkdirat, sys_mknodat, sys_mount,
-    sys_openat, sys_pipe2, sys_ppoll, sys_read, sys_readv, sys_renameat2, sys_sendfile, sys_statx,
-    sys_umount2, sys_unlinkat, sys_utimensat, sys_write, sys_writev,
+    sys_getcwd, sys_getdents64, sys_ioctl, sys_linkat, sys_lseek, sys_mkdirat, sys_mknodat,
+    sys_mount, sys_openat, sys_pipe2, sys_ppoll, sys_read, sys_readv, sys_renameat2, sys_sendfile,
+    sys_statfs, sys_statx, sys_umount2, sys_unlinkat, sys_utimensat, sys_write, sys_writev,
 };
 use mm::{sys_brk, sys_madvise, sys_mmap, sys_mprotect, sys_munmap};
 use signal::{
@@ -25,13 +25,13 @@ use task::{
     sys_clone, sys_execve, sys_get_time, sys_getpid, sys_getppid, sys_nanosleep, sys_waitpid,
     sys_yield,
 };
-use util::{sys_times, sys_uname};
+use util::{sys_syslog, sys_times, sys_uname};
 
 use crate::{
     arch::timer::TimeSpec,
     fs::{
         kstat::{Stat, Statx},
-        uio::{IoVec, PollFd},
+        uapi::{IoVec, PollFd, StatFs},
     },
 };
 pub use fs::FcntlOp;
@@ -53,12 +53,14 @@ const SYSCALL_UNLINKAT: usize = 35;
 const SYSCALL_LINKAT: usize = 37;
 const SYSCALL_UMOUNT2: usize = 39;
 const SYSCALL_MOUNT: usize = 40;
+const SYSCALL_STATFS: usize = 43;
 const SYSCALL_FACCESSAT: usize = 48;
 const SYSCALL_CHDIR: usize = 49;
 const SYSCALL_OPENAT: usize = 56;
 const SYSCALL_CLOSE: usize = 57;
 const SYSCALL_PIPE2: usize = 59;
 const SYSCALL_GETDENTS64: usize = 61;
+const SYSCALL_LSEEK: usize = 62;
 const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
 const SYSCALL_READV: usize = 65;
@@ -74,6 +76,7 @@ const SYSCALL_SET_TID_ADDRESS: usize = 96;
 const SYSCALL_SET_ROBUST_LIST: usize = 99;
 const SYSCALL_NANOSLEEP: usize = 101;
 const SYSCALL_CLOCK_GETTIME: usize = 113;
+const SYSCALL_SYSLOG: usize = 116;
 const SYSCALL_YIELD: usize = 124;
 const SYSCALL_KILL: usize = 129;
 const SYSCALL_TKILL: usize = 130;
@@ -162,12 +165,14 @@ pub fn syscall(
             a3,
             a4 as *const u8,
         ),
+        SYSCALL_STATFS => sys_statfs(a0 as *const u8, a1 as *mut StatFs),
         SYSCALL_FACCESSAT => sys_faccessat(a0 as usize, a1 as *const u8, a2 as i32, a3 as i32),
         SYSCALL_CHDIR => sys_chdir(a0 as *const u8),
         SYSCALL_OPENAT => sys_openat(a0 as i32, a1 as *const u8, a2 as i32, a3),
         SYSCALL_CLOSE => sys_close(a0),
         SYSCALL_PIPE2 => sys_pipe2(a0 as *mut i32, a1 as i32),
         SYSCALL_GETDENTS64 => sys_getdents64(a0, a1 as *mut u8, a2),
+        SYSCALL_LSEEK => sys_lseek(a0, a1, a2),
         SYSCALL_READ => sys_read(a0, a1 as *mut u8, a2),
         SYSCALL_WRITE => sys_write(a0, a1 as *const u8, a2),
         SYSCALL_READV => sys_readv(a0, a1 as *const IoVec, a2),
@@ -181,6 +186,7 @@ pub fn syscall(
         }
         SYSCALL_EXIT => sys_exit(a0 as i32),
         SYSCALL_NANOSLEEP => sys_nanosleep(a0),
+        SYSCALL_SYSLOG => sys_syslog(a0, a1 as *mut u8, a3),
         SYSCALL_YIELD => sys_yield(),
         SYSCALL_KILL => sys_kill(a0 as isize, a1 as i32),
         SYSCALL_TKILL => sys_tkill(a0 as isize, a1 as i32),

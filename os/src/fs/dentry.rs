@@ -16,7 +16,7 @@ use crate::{
     mutex::SpinNoIrqLock,
 };
 
-use super::{file::OpenFlags, inode::InodeOp, uio::RenameFlags};
+use super::{file::OpenFlags, inode::InodeOp, uapi::RenameFlags};
 
 bitflags::bitflags! {
     /// 目前只支持type

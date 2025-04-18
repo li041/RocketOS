@@ -57,6 +57,9 @@ impl DevT {
     pub fn tty_devt() -> Self {
         Self::makedev(5, 0)
     }
+    pub fn rtc_devt() -> Self {
+        Self::makedev(10, 0)
+    }
 }
 
 impl DevT {
@@ -94,4 +97,44 @@ bitflags::bitflags! {
         /// 仅对 Overlay 或 Union 文件系统实现有意义的操作。
         const WHITEOUT = 1 << 2;
     }
+}
+
+#[repr(usize)]
+pub enum Whence {
+    SeekSet = 0,
+    SeekCur = 1,
+    SeekEnd = 2,
+    // Todo:
+    // SeekData = 3,
+    // SeekHold = 4,
+}
+
+impl TryFrom<usize> for Whence {
+    type Error = &'static str;
+
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Whence::SeekSet),
+            1 => Ok(Whence::SeekCur),
+            2 => Ok(Whence::SeekEnd),
+            _ => Err("invalid whence"),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StatFs {
+    pub f_type: i64,       // 文件系统类型（如 EXT4、TMPFS 等）
+    pub f_bsize: i64,      // 块大小
+    pub f_blocks: u64,     // 总块数
+    pub f_bfree: u64,      // 空闲块数
+    pub f_bavail: u64,     // 非特权用户可用块数
+    pub f_files: u64,      // 总 inode 数
+    pub f_ffree: u64,      // 空闲 inode 数
+    pub f_fsid: [i32; 2],  // 文件系统 ID（通常不用）
+    pub f_namelen: i64,    // 最大文件名长度
+    pub f_frsize: i64,     // 片段大小（Linux 2.6+）
+    pub f_flags: i64,      // 挂载标志（如 ST_RDONLY）
+    pub f_spare: [i64; 4], // 保留字段
 }

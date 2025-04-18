@@ -7,6 +7,10 @@ use super::{
     inode::InodeOp,
     mount::VfsMount,
     path::Path,
+    proc::{
+        meminfo::MEMINFO,
+        mounts::{MountsFile, MOUNTS},
+    },
     Stdin, FS_BLOCK_SIZE,
 };
 use crate::{
@@ -16,6 +20,7 @@ use crate::{
     },
     fs::{
         dentry::DentryFlags,
+        dev::rtc::RTC,
         fdtable::{FdEntry, FdFlags},
         AT_FDCWD,
     },
@@ -253,6 +258,16 @@ fn create_file_from_dentry(
 
     let path = Path::new(mount, dentry.clone());
 
+    if dentry.absolute_path.starts_with("/proc") {
+        // procfs的文件类型
+        if dentry.absolute_path == "/proc/mounts" {
+            return Ok(MOUNTS.get().unwrap().clone());
+        }
+        if dentry.absolute_path == "/proc/meminfo" {
+            return Ok(MEMINFO.get().unwrap().clone());
+        }
+    }
+
     let file: Arc<dyn FileOp> = match file_type {
         S_IFREG => Arc::new(File::new(path, inode, flags)),
         S_IFDIR => Arc::new(File::new(path, inode, flags)),
@@ -267,12 +282,12 @@ fn create_file_from_dentry(
                 } // /dev/zero
                 (5, 0) => {
                     assert!(dentry.absolute_path == "/dev/tty");
-                    TTY.call_once(|| {
-                        let tty_file = TtyFile::new(path.clone(), inode.clone(), flags);
-                        tty_file
-                    })
-                    .clone()
+                    TTY.get().unwrap().clone()
                 } // /dev/tty
+                (10, 0) => {
+                    assert!(dentry.absolute_path == "/dev/rtc");
+                    RTC.get().unwrap().clone()
+                } // /dev/rtc
                 _ => panic!("[create_file_from_dentry]Unsupported device"),
             }
         }

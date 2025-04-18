@@ -8,7 +8,7 @@ use spin::RwLock;
 
 use super::dentry::{Dentry, LinuxDirent64};
 use super::kstat::Kstat;
-use super::uio::{DevT, RenameFlags};
+use super::uapi::{DevT, RenameFlags, StatFs};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;

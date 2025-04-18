@@ -35,7 +35,7 @@ pub mod pipe;
 pub mod proc;
 mod stdio;
 // pub mod tty;
-pub mod uio;
+pub mod uapi;
 
 // 文件系统的锁先使用SpinNoIrqLock, Todo: 改成RwLock
 pub type FSMutex<T> = RwLock<T>;

@@ -1,4 +1,4 @@
-use core::any::Any;
+use core::{any::Any, u8};
 use spin::Once;
 
 use alloc::{sync::Arc, sync::Weak};
@@ -23,7 +23,7 @@ use crate::{
         inode::InodeOp,
         kstat::Kstat,
         path::Path,
-        uio::DevT,
+        uapi::DevT,
     },
     task::{yield_current_task, Tid},
 };
@@ -254,6 +254,7 @@ struct TtyFileInner {
     fg_pgid: Tid,
     win_size: WinSize,
     termios: Termios,
+    last_char: u8,
 }
 
 impl TtyFile {
@@ -266,6 +267,7 @@ impl TtyFile {
                 fg_pgid: 1,
                 win_size: WinSize::new(),
                 termios: Termios::new(),
+                last_char: u8::MAX,
             }),
         })
     }
@@ -276,18 +278,20 @@ impl FileOp for TtyFile {
         self
     }
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> usize {
-        let mut c: usize;
+        // let mut c: usize;
+        let mut inner = self.inner.write();
         loop {
-            c = console_getchar();
+            inner.last_char = console_getchar() as u8;
             // opensbi returns usize::MAX if no char available
-            if c == usize::MAX {
+            if inner.last_char == u8::MAX {
                 yield_current_task();
                 continue;
             } else {
                 break;
             }
         }
-        let ch = c as u8;
+        let ch = inner.last_char as u8;
+        drop(inner);
         unsafe {
             buf.as_mut_ptr().write_volatile(ch);
         }
@@ -377,6 +381,22 @@ impl FileOp for TtyFile {
     }
     fn writable(&self) -> bool {
         // 终端设备总是可写的
+        true
+    }
+    fn hang_up(&self) -> bool {
+        false
+    }
+    fn r_ready(&self) -> bool {
+        let mut inner = self.inner.write();
+        if inner.last_char != u8::MAX {
+            return true;
+        } else {
+            // 尝试读取下一个字符
+            inner.last_char = console_getchar() as u8;
+            inner.last_char != u8::MAX
+        }
+    }
+    fn w_ready(&self) -> bool {
         true
     }
 }

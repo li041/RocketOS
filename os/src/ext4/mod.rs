@@ -3,10 +3,10 @@ use crate::{
     drivers::block::block_cache::get_block_cache,
     fs::{
         dentry::{Dentry, DentryFlags, LinuxDirent64},
-        dev::tty::TtyInode,
+        dev::{rtc::RtcInode, tty::TtyInode},
         inode::InodeOp,
         kstat::Kstat,
-        uio::{DevT, RenameFlags},
+        uapi::{DevT, RenameFlags},
     },
     mm::Page,
 };
@@ -391,6 +391,19 @@ impl InodeOp for Ext4Inode {
                 // 关联到dentry
                 dentry.inner.lock().inode = Some(tty_inode);
             } // /dev/tty
+            (10, 0) => {
+                assert!(dentry.absolute_path == "/dev/rtc");
+                let new_inode_num = self
+                    .ext4_fs
+                    .upgrade()
+                    .unwrap()
+                    .alloc_inode(self.block_device.clone(), true);
+                let rtc_inode = RtcInode::new(new_inode_num, mode, 10, 0);
+                // 在父目录中添加对应项
+                self.add_entry(dentry.clone(), new_inode_num as u32, EXT4_DT_CHR);
+                // 关联到dentry
+                dentry.inner.lock().inode = Some(rtc_inode);
+            }
             _ => panic!("Unsupported device: major: {}, minor: {}", major, minor),
         }
         // 更新dentry flags, 去掉负目录项标志, 添加特殊设备标志

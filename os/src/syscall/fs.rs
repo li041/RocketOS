@@ -10,9 +10,10 @@ use crate::arch::timer::{get_time_ms, TimeSpec};
 use crate::fs::fdtable::FdFlags;
 use crate::fs::file::OpenFlags;
 use crate::fs::kstat::Statx;
+use crate::fs::mount::get_mount_by_dentry;
 use crate::fs::namei::lookup_dentry;
 use crate::fs::pipe::make_pipe;
-use crate::fs::uio::{DevT, PollEvents, PollFd, RenameFlags, UtimenatFlags};
+use crate::fs::uapi::{DevT, PollEvents, PollFd, RenameFlags, StatFs, UtimenatFlags, Whence};
 use crate::signal::SigSet;
 use crate::task::yield_current_task;
 use crate::{
@@ -25,7 +26,7 @@ use crate::{
         namei::{filename_create, filename_lookup, path_openat, Nameidata},
         path::Path,
         pipe::Pipe,
-        uio::IoVec,
+        uapi::IoVec,
         AT_FDCWD,
     },
     task::current_task,
@@ -33,6 +34,25 @@ use crate::{
 };
 
 use crate::arch::mm::{copy_from_user, copy_from_user_mut, copy_to_user};
+
+pub fn sys_lseek(fd: usize, offset: usize, whence: usize) -> isize {
+    log::info!(
+        "[sys_lseek] fd: {}, offset: {}, whence: {}",
+        fd,
+        offset,
+        whence
+    );
+    let task = current_task();
+    let file = task.fd_table().get_file(fd);
+    let whence = Whence::try_from(whence).unwrap_or(Whence::SeekSet);
+    if let Some(file) = file {
+        let file = file.clone();
+        let ret = file.seek(offset, whence);
+        ret as isize
+    } else {
+        -1
+    }
+}
 
 #[cfg(target_arch = "riscv64")]
 pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> isize {
@@ -460,50 +480,6 @@ pub fn sys_fstatat(dirfd: i32, pathname: *const u8, statbuf: *mut Stat, flags: i
     }
 }
 
-// Todo: 使用mask指示内核需要返回哪些信息
-pub fn sys_statx(
-    dirfd: i32,
-    pathname: *const u8,
-    flags: i32,
-    _mask: u32,
-    statxbuf: *mut Statx,
-    // statbuf: *mut Stat,
-) -> isize {
-    log::info!(
-        "[sys_statx] dirfd: {}, pathname: {:?}, flags: {}, mask: {}",
-        dirfd,
-        pathname,
-        flags,
-        _mask
-    );
-    let path = c_str_to_string(pathname);
-    if path.is_empty() {
-        log::error!("[sys_statx] pathname is empty");
-        return -1;
-    }
-    let mut nd = Nameidata::new(&path, dirfd);
-    let fake_lookup_flags = 0;
-    match filename_lookup(&mut nd, fake_lookup_flags) {
-        Ok(dentry) => {
-            let inode = dentry.get_inode();
-            let statx = Statx::from(inode.getattr());
-            log::error!("statx: statx: {:?}", statx);
-            if let Err(e) = copy_to_user(statxbuf, &statx as *const Statx, 1) {
-                // let stat = Stat::from(inode.getattr());
-                // if let Err(e) = copy_to_user(statbuf, &stat as *const Stat, 1) {
-                log::error!("statx: copy_to_user failed: {}", e);
-                return -1;
-            }
-            return 0;
-        }
-        Err(e) => {
-            log::info!("[sys_statx] fail to statx: {}, {}", path, e);
-            // Todo: 这里需要设置errno, 如果返回-1, 应用程序检查errno, 会认为Operation not permitted
-            return -2;
-        }
-    }
-}
-
 pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> isize {
     log::info!(
         "[sys_getdents64] fd: {}, dirp: {:?}, count: {}",
@@ -789,7 +765,7 @@ pub fn sys_fcntl(fd: i32, op: i32, arg: usize) -> isize {
     -1
 }
 
-/// Todo: 目前只支持了Pipe的hang_up, r_ready, w_ready
+#[cfg(target_arch = "riscv64")]
 pub fn sys_ppoll(fds: *mut PollFd, nfds: usize, timeout: *const TimeSpec, sigmask: usize) -> isize {
     log::error!(
         "[sys_ppoll] fds: {:?}, nfds: {}, timeout: {:?}, sigmask: {}",
@@ -826,6 +802,97 @@ pub fn sys_ppoll(fds: *mut PollFd, nfds: usize, timeout: *const TimeSpec, sigmas
         done = 0;
         let task = current_task();
         for poll_fd in poll_fds.iter_mut() {
+            if poll_fd.fd < 0 {
+                continue;
+            } else {
+                if let Some(file) = task.fd_table().get_file(poll_fd.fd as usize) {
+                    let mut trigger = 0;
+                    if file.hang_up() {
+                        poll_fd.revents |= PollEvents::HUP;
+                        trigger = 1;
+                    }
+                    // Todo: 如果文件描述符是pipe写端, 且没有读端打开, 则设置POLLERR
+                    if poll_fd.events.contains(PollEvents::IN) && file.r_ready() {
+                        poll_fd.revents |= PollEvents::IN;
+                        trigger = 1;
+                    }
+                    if poll_fd.events.contains(PollEvents::OUT) && file.w_ready() {
+                        poll_fd.revents |= PollEvents::OUT;
+                        trigger = 1;
+                    }
+                    done += trigger;
+                } else {
+                    // pollfd的fd字段大于0, 但是对应文件描述符并没有打开, 设置pollfd.revents为POLLNVAL
+                    poll_fd.revents |= PollEvents::INVAL;
+                    log::error!("[sys_ppoll] invalid fd: {}", poll_fd.fd);
+                }
+            }
+        }
+        if done > 0 {
+            break;
+        }
+        if timeout == 0 {
+            // timeout为0表示立即返回, 即使没有fd准备好
+            break;
+        } else if timeout > 0 {
+            if get_time_ms() > timeout as usize {
+                // 超时了, 返回
+                break;
+            }
+        }
+        drop(task);
+        yield_current_task();
+    }
+    // 恢复origin sigmask
+    if sigmask != 0 {
+        let task = current_task();
+        task.op_sig_pending_mut(|sig_pending| sig_pending.mask = origin_sigset);
+    }
+    done
+}
+
+/// Todo: 目前只支持了Pipe的hang_up, r_ready, w_ready
+#[cfg(target_arch = "loongarch64")]
+pub fn sys_ppoll(fds: *mut PollFd, nfds: usize, timeout: *const TimeSpec, sigmask: usize) -> isize {
+    log::info!(
+        "[sys_ppoll] fds: {:?}, nfds: {}, timeout: {:?}, sigmask: {}",
+        fds,
+        nfds,
+        timeout,
+        sigmask
+    );
+    let task = current_task();
+    // 处理参数
+    let timeout = if timeout.is_null() {
+        // timeout为负数对于poll来说是无限等待
+        -1
+    } else {
+        let tmo = copy_from_user(timeout, 1).unwrap()[0];
+        (tmo.sec * 1000 + tmo.nsec / 1000000) as isize
+    };
+    // Todo: 设置sigmaskconst
+    // 用于保存原来的sigmask, 后续需要恢复
+    let origin_sigset = task.op_sig_pending_mut(|sig_pending| sig_pending.mask.clone());
+    if sigmask != 0 {
+        let sigset = copy_from_user(sigmask as *const SigSet, 1).unwrap()[0];
+        task.op_sig_pending_mut(|sig_pending| sig_pending.mask = sigset);
+    }
+    drop(task);
+
+    // 内核直接操作用户空间的pollfd
+    let poll_fds = copy_from_user_mut(fds, nfds).unwrap();
+    // 神奇小咒语, 避免编译器优化掉poll_fds
+    // log::trace!("poll_fds: {:?}", poll_fds);
+    core::hint::black_box(&poll_fds);
+    for poll_fd in poll_fds.iter_mut() {
+        poll_fd.revents = PollEvents::empty();
+    }
+    let mut done;
+    loop {
+        done = 0;
+        let task = current_task();
+        for i in 0..nfds {
+            let poll_fd = &mut poll_fds[i];
             if poll_fd.fd < 0 {
                 continue;
             } else {
@@ -1002,9 +1069,9 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset_ptr: *mut usize, count: 
         // offset不为NULL, 则sendfile不会修改`in_fd`的文件偏移量
         let offset = copy_from_user(offset_ptr, 1).unwrap()[0];
         let origin_offset = in_file.get_offset();
-        in_file.seek(offset);
+        in_file.seek(offset, Whence::SeekSet);
         len = in_file.read(&mut buf);
-        in_file.seek(origin_offset);
+        in_file.seek(origin_offset, Whence::SeekSet);
         // 将新的偏移量写回用户空间
         copy_to_user(offset_ptr, &(offset + len + 1), 1).unwrap();
     }
@@ -1012,6 +1079,91 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset_ptr: *mut usize, count: 
     log::info!("[sys_sendfile] ret: {}", ret);
     ret
 }
+
+/* loongarch */
+// Todo: 使用mask指示内核需要返回哪些信息
+pub fn sys_statx(
+    dirfd: i32,
+    pathname: *const u8,
+    flags: i32,
+    _mask: u32,
+    statxbuf: *mut Statx,
+    // statbuf: *mut Stat,
+) -> isize {
+    log::info!(
+        "[sys_statx] dirfd: {}, pathname: {:?}, flags: {}, mask: {}",
+        dirfd,
+        pathname,
+        flags,
+        _mask
+    );
+    let path = c_str_to_string(pathname);
+    if path.is_empty() {
+        log::error!("[sys_statx] pathname is empty");
+        return -1;
+    }
+    let mut nd = Nameidata::new(&path, dirfd);
+    let fake_lookup_flags = 0;
+    match filename_lookup(&mut nd, fake_lookup_flags) {
+        Ok(dentry) => {
+            let inode = dentry.get_inode();
+            let statx = Statx::from(inode.getattr());
+            log::error!("statx: statx: {:?}", statx);
+            if let Err(e) = copy_to_user(statxbuf, &statx as *const Statx, 1) {
+                // let stat = Stat::from(inode.getattr());
+                // if let Err(e) = copy_to_user(statbuf, &stat as *const Stat, 1) {
+                log::error!("statx: copy_to_user failed: {}", e);
+                return -1;
+            }
+            return 0;
+        }
+        Err(e) => {
+            log::info!("[sys_statx] fail to statx: {}, {}", path, e);
+            // Todo: 这里需要设置errno, 如果返回-1, 应用程序检查errno, 会认为Operation not permitted
+            return -2;
+        }
+    }
+}
+
+pub fn sys_statfs(path: *const u8, buf: *mut StatFs) -> isize {
+    let path = c_str_to_string(path);
+    if path.is_empty() {
+        log::error!("[sys_statfs] pathname is empty");
+        return -1;
+    }
+    log::info!("[sys_statfs] path: {:?}, buf: {:?}", path, buf);
+    // 特殊处理根目录, 因为根目录的dentry是空字符串, path传入的是"/"
+    if path == "/" {
+        let root_dentry = current_task().root().dentry.clone();
+        let mount = get_mount_by_dentry(root_dentry).unwrap();
+        match mount.statfs(buf) {
+            Ok(_) => {
+                log::info!("[sys_statfs] success to statfs");
+                return 0;
+            }
+            Err(e) => {
+                log::info!("[sys_statfs] fail to statfs: {}, {}", path, e);
+                return -1;
+            }
+        }
+    } else {
+        let mut nd = Nameidata::new(&path, AT_FDCWD);
+        let target_dentry = lookup_dentry(&mut nd);
+        let mount = get_mount_by_dentry(target_dentry).unwrap();
+        match mount.statfs(buf) {
+            Ok(_) => {
+                log::info!("[sys_statfs] success to statfs");
+                return 0;
+            }
+            Err(e) => {
+                log::info!("[sys_statfs] fail to statfs: {}, {}", path, e);
+                return -1;
+            }
+        }
+    }
+}
+
+/* loongarch end */
 
 /* Todo: fake  */
 pub fn sys_mount(
@@ -1055,7 +1207,6 @@ pub fn sys_ioctl(fd: usize, op: usize, _arg_ptr: usize) -> isize {
     let task = current_task();
     let file = task.fd_table().get_file(fd);
     log::error!("current task: {:?}", task.tid());
-    task.fd_table().list();
     if let Some(file) = file {
         return file.ioctl(op, _arg_ptr);
     }
