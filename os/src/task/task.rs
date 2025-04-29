@@ -132,7 +132,7 @@ impl Task {
 
     /// 初始化地址空间, 将 `TrapContext` 与 `TaskContext` 压入内核栈中
     pub fn initproc(elf_data: &[u8], root_path: Arc<Path>) -> Arc<Self> {
-        let (memory_set, pgdl_ppn, user_sp, entry_point, _aux_vec) =
+        let (memory_set, pgdl_ppn, user_sp, entry_point, _aux_vec, _tls_ptr) =
             MemorySet::from_elf(elf_data.to_vec(), &mut Vec::<String>::new());
         let tid = tid_alloc();
         let tgid = AtomicUsize::new(tid.0);
@@ -361,7 +361,7 @@ impl Task {
     ) {
         log::info!("[kernel_execve] task{} do execve ...", self.tid());
         // 创建地址空间
-        let (mut memory_set, _satp, ustack_top, entry_point, aux_vec) =
+        let (mut memory_set, _satp, ustack_top, entry_point, aux_vec, tls_ptr) =
             MemorySet::from_elf(elf_data.to_vec(), &mut args_vec);
         // 更新页表
         memory_set.activate();
@@ -412,7 +412,10 @@ impl Task {
             envp_base,
             auxv_base,
         );
-        trap_cx.set_tp(Arc::as_ptr(&self) as usize);
+        // 设置tls
+        if let Some(tls_ptr) = tls_ptr {
+            trap_cx.set_tp(tls_ptr);
+        }
         save_trap_context(&self, trap_cx);
         log::trace!("[kernel_execve] task{} trap_cx updated", self.tid());
         // 重建线程组

@@ -118,6 +118,7 @@ bitflags! {
         /// 拒绝对映射区的写入操作
         /// Todo: 未实现
         const MAP_DENYWRITE = 0x800;
+        const MAP_NORESERVE = 0x4000;
         const MAP_POPULATE = 0x8000;
     }
 }
@@ -221,7 +222,8 @@ pub fn sys_mmap(
             } else {
                 memory_set.get_unmapped_area(len)
             };
-            memory_set.insert_framed_area(vpn_range, map_perm);
+            let mmap_area = MapArea::new(vpn_range, MapType::Framed, map_perm, None, 0);
+            memory_set.insert_map_area_lazily(mmap_area);
             return Ok(vpn_range.get_start().0 << PAGE_SIZE_BITS);
         })
     } else {
@@ -243,7 +245,7 @@ pub fn sys_mmap(
                 map_perm.insert(MapPermission::COW);
             }
             let mmap_area = MapArea::new(vpn_range, MapType::Filebe, map_perm, Some(file), offset);
-            memory_set.insert_filebe_area_lazily(mmap_area);
+            memory_set.insert_map_area_lazily(mmap_area);
             log::error!(
                 "[sys_mmap] file return {:#x}",
                 vpn_range.get_start().0 << PAGE_SIZE_BITS

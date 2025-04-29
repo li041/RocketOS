@@ -136,6 +136,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
                 {
                     if let Err(e) = memory_set.handle_recoverable_page_fault(va, casue) {
                         memory_set.page_table.dump_all_user_mapping();
+                        dump_trap_context(&current_task());
                         panic!(
                             "Unrecoverble page fault in application, bad addr = {:#x}, scause = {:?}, sepc = {:#x}",
                             stval,

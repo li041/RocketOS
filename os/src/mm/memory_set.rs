@@ -1,5 +1,5 @@
 //! MemorySet
-use core::{arch::asm, mem, ops::Range, usize};
+use core::{arch::asm, iter::Map, mem, ops::Range, usize};
 
 use super::{address::StepByOne, area::MapArea, shm::ShmSegment, VPNRange};
 use crate::{
@@ -293,16 +293,18 @@ impl MemorySet {
         memory_set
     }
 
-    /// return (user_memory_set, satp, ustack_top, entry_point, aux_vec)
+    /// return (user_memory_set, satp, ustack_top, entry_point, aux_vec, Option<tls>)
     /// Todo: elf_data是完整的, 还要lazy_allocation?
     pub fn from_elf(
         mut elf_data: Vec<u8>,
         argv: &mut Vec<String>,
-    ) -> (Self, usize, usize, usize, Vec<AuxHeader>) {
+    ) -> (Self, usize, usize, usize, Vec<AuxHeader>, Option<usize>) {
         #[cfg(target_arch = "riscv64")]
         let mut memory_set = Self::from_global();
         #[cfg(target_arch = "loongarch64")]
         let mut memory_set = Self::new_bare();
+
+        let mut tls_ptr = None;
 
         // 处理 .sh 文件
         if argv.len() > 0 {
@@ -338,7 +340,8 @@ impl MemorySet {
         for i in 0..ph_count {
             // 程序头部的类型是Load, 代码段或数据段
             let ph = elf.program_header(i).unwrap();
-            if ph.get_type().unwrap() == Type::Load {
+            let ph_type = ph.get_type().unwrap();
+            if ph_type == Type::Load {
                 let start_va: VirtAddr = (ph.virtual_addr() as usize).into();
                 let end_va: VirtAddr = (ph.virtual_addr() as usize + ph.mem_size() as usize).into();
 
@@ -371,8 +374,12 @@ impl MemorySet {
                     map_offset,
                 );
             }
+            if ph_type == Type::Tls {
+                let start_va: VirtAddr = (ph.virtual_addr() as usize).into();
+                tls_ptr = Some(start_va.0);
+            }
             // 判断是否需要动态链接
-            if ph.get_type().unwrap() == Type::Interp {
+            if ph_type == Type::Interp {
                 need_dl = true;
             }
         }
@@ -522,7 +529,14 @@ impl MemorySet {
 
         log::error!("[from_elf] entry_point: {:#x}", entry_point);
 
-        return (memory_set, pgtbl_ppn, ustack_top, entry_point, aux_vec);
+        return (
+            memory_set,
+            pgtbl_ppn,
+            ustack_top,
+            entry_point,
+            aux_vec,
+            tls_ptr,
+        );
     }
     #[allow(unused)]
     pub fn from_existed_user(user_memory_set: &MemorySet) -> Self {
@@ -584,8 +598,8 @@ impl MemorySet {
     pub fn insert_framed_area(&mut self, vpn_range: VPNRange, map_perm: MapPermission) {
         self.push_anoymous_area(MapArea::new(vpn_range, MapType::Framed, map_perm, None, 0));
     }
-    pub fn insert_filebe_area_lazily(&mut self, map_area: MapArea) {
-        // 这里不需要map, 文件映射在缺页时处理
+    pub fn insert_map_area_lazily(&mut self, map_area: MapArea) {
+        // 这里不需要map, 映射在缺页时处理
         self.areas.insert(map_area.vpn_range.get_start(), map_area);
     }
     /// map_offset: the offset in the first page
@@ -913,7 +927,12 @@ impl MemorySet {
         self.areas.iter().for_each(|(vpn, area)| {
             log::error!("[handle_lazy_allocation_area] area: {:#x?}", area.vpn_range,);
         });
-        panic!("empty areas");
+        log::error!(
+            "[handle_lazy_allocation_area] can't find area with vpn {:#x}",
+            vpn.0
+        );
+        log::error!("empty areas");
+        return Err(Errno::EFAULT);
     }
 }
 
@@ -1072,6 +1091,24 @@ impl MemorySet {
             }
             // 页表中有对应的页表项, 但不是COW
             return Err(Errno::EFAULT);
+        }
+        if vpn == VirtPageNum(0) {
+            // weried address, 与tls有关
+            let page = Page::new_framed(None);
+            let mut pte_flags = PTEFlags::from(
+                MapPermission::R
+                    | MapPermission::W
+                    | MapPermission::U
+                    | MapPermission::A
+                    | MapPermission::D,
+            );
+            pte_flags.insert(PTEFlags::V);
+            let pte = page_table.find_pte_create(vpn).unwrap();
+            *pte = PageTableEntry::new(page.ppn(), pte_flags);
+            unsafe {
+                sfence_vma_vaddr(va.0);
+            }
+            return Ok(());
         }
         self.handle_lazy_allocation_area(va, cause)
         // 页表中没有对应的页表项, 也不是lazy allocation, 返回错误
