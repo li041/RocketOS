@@ -20,7 +20,7 @@ use crate::{
     },
     fs::{
         dentry::DentryFlags,
-        dev::{null::NULL, rtc::RTC},
+        dev::{null::NULL, rtc::RTC, zero::ZERO},
         fdtable::{FdEntry, FdFlags},
         AT_FDCWD,
     },
@@ -230,14 +230,9 @@ pub fn open_last_lookups(
                 // 文件不存在
                 if flags.contains(OpenFlags::O_CREAT) && nd.depth == nd.path_segments.len() - 1 {
                     let dir_inode = nd.dentry.get_inode();
-                    let new_dentry = Dentry::negative(
-                        absolute_current_dir + "/" + &nd.path_segments[nd.depth],
-                        Some(nd.dentry.clone()),
-                    );
-                    dir_inode.create(new_dentry.clone(), mode as u16);
-                    insert_dentry(new_dentry.clone());
-                    assert!(!new_dentry.is_negative());
-                    new_dentry
+                    dir_inode.create(dentry.clone(), mode as u16);
+                    assert!(!dentry.is_negative());
+                    dentry
                 } else {
                     return Err(Errno::ENOENT);
                 }
@@ -280,7 +275,8 @@ fn create_file_from_dentry(
                     NULL.get().unwrap().clone()
                 } // /dev/null
                 (1, 5) => {
-                    unimplemented!();
+                    assert!(dentry.absolute_path == "/dev/zero");
+                    ZERO.get().unwrap().clone()
                 } // /dev/zero
                 (5, 0) => {
                     assert!(dentry.absolute_path == "/dev/tty");
@@ -290,7 +286,10 @@ fn create_file_from_dentry(
                     assert!(dentry.absolute_path == "/dev/rtc");
                     RTC.get().unwrap().clone()
                 } // /dev/rtc
-                _ => panic!("[create_file_from_dentry]Unsupported device"),
+                _ => panic!(
+                    "[create_file_from_dentry]Unsupported device, devt: {:?}",
+                    inode.get_devt()
+                ),
             }
         }
         _ => {
@@ -442,8 +441,10 @@ pub fn lookup_dentry(nd: &mut Nameidata) -> Arc<Dentry> {
     let mut dentry = lookup_dcache_with_absolute_path(&absolute_current_dir);
     if dentry.is_none() {
         let current_dir_inode = nd.dentry.get_inode();
+        // 在目录中查找目录项
         dentry = Some(current_dir_inode.lookup(&nd.path_segments[nd.depth], nd.dentry.clone()));
         // 注意这里插入的dentry可能是负目录项
+        log::warn!("[lookup_dentry] try to lookup in dir_inode");
     }
     let dentry = dentry.unwrap();
     insert_dentry(dentry.clone());

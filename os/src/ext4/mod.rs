@@ -1,6 +1,7 @@
 use crate::{
     arch::timer::TimeSpec,
     drivers::block::block_cache::get_block_cache,
+    ext4,
     fs::{
         dentry::{Dentry, DentryFlags, LinuxDirent64},
         dev::{null::NullInode, rtc::RtcInode, tty::TtyInode},
@@ -17,7 +18,7 @@ use alloc::{
     string::{String, ToString},
     sync::Arc,
 };
-use block_op::Ext4DirContentWE;
+use block_op::{Ext4DirContentRO, Ext4DirContentWE};
 use dentry::{EXT4_DT_CHR, EXT4_DT_DIR};
 use fs::EXT4_BLOCK_SIZE;
 use inode::{
@@ -53,6 +54,9 @@ impl InodeOp for Ext4Inode {
 
     fn write<'a>(&'a self, page_offset: usize, buf: &'a [u8]) -> usize {
         self.write(page_offset, buf)
+    }
+    fn truncate<'a>(&'a self, size: usize) {
+        self.truncate(size as u64)
     }
     // 上层调用者应先查找DentryCache, 如果没有才调用该函数
     // 先查找parent_entry的child(child是惰性加载的), 如果还没有则从目录中查找
@@ -369,7 +373,7 @@ impl InodeOp for Ext4Inode {
         assert!(mode & S_IFCHR != 0);
         // 提取主,次设备号
         let (major, minor) = dev.unpack();
-        /// 主设备号1表示mem
+        // 主设备号1表示mem
         match (major, minor) {
             (1, 3) => {
                 assert!(dentry.absolute_path == "/dev/null");
@@ -385,7 +389,17 @@ impl InodeOp for Ext4Inode {
                 dentry.inner.lock().inode = Some(null_inode);
             } // /dev/null
             (1, 5) => {
-                unimplemented!();
+                assert!(dentry.absolute_path == "/dev/zero");
+                let new_inode_num = self
+                    .ext4_fs
+                    .upgrade()
+                    .unwrap()
+                    .alloc_inode(self.block_device.clone(), true);
+                let zero_inode = NullInode::new(new_inode_num, mode, 1, 5);
+                // 在父目录中添加对应项
+                self.add_entry(dentry.clone(), new_inode_num as u32, EXT4_DT_CHR);
+                // 关联到dentry
+                dentry.inner.lock().inode = Some(zero_inode);
             } // /dev/zero
             (5, 0) => {
                 // /dev/tty
@@ -423,34 +437,9 @@ impl InodeOp for Ext4Inode {
             .write()
             .update_type_from_negative(DentryFlags::DCACHE_SPECIAL_TYPE);
     }
-    fn getdents(&self, offset: usize) -> (usize, Vec<LinuxDirent64>) {
-        let ext4_dirents: Vec<dentry::Ext4DirEntry> = self.getdents(offset);
-
-        let mut offset = 0;
-        const NAME_OFFSET: usize = 19;
-        let linux_dirents = ext4_dirents
-            .iter()
-            .filter_map(|entry| {
-                // 跳过无效的目录项(inode_num为0)
-                if entry.inode_num == 0 {
-                    offset += entry.rec_len as usize;
-                    return None;
-                }
-                let null_term_name_len = entry.name.len() + 1;
-                // reclen需要对齐到8字节
-                let d_reclen = (NAME_OFFSET + null_term_name_len + 7) & !0x7;
-                let dirent = LinuxDirent64 {
-                    d_ino: entry.inode_num as u64,
-                    d_off: offset as u64,
-                    d_reclen: d_reclen as u16,
-                    d_type: entry.file_type,
-                    d_name: entry.name.clone(),
-                };
-                offset += entry.rec_len as usize;
-                Some(dirent)
-            })
-            .collect();
-        (offset, linux_dirents)
+    // 返回(file_offset, linux_dirents)
+    fn getdents(&self, buf: &mut [u8], offset: usize) -> (usize, usize) {
+        self.getdents(buf, offset)
     }
     fn getattr(&self) -> Kstat {
         self.getattr()

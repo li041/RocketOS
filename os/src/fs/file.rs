@@ -3,11 +3,10 @@ use core::any::Any;
 
 use alloc::{sync::Arc, vec::Vec};
 use log::info;
-use spin::RwLock;
 use virtio_drivers::PAGE_SIZE;
 
 use crate::{
-    arch::config::PAGE_SIZE_BITS,
+    arch::{config::PAGE_SIZE_BITS, mm::copy_from_user_mut},
     mm::Page,
     mutex::SpinNoIrqLock,
     syscall::errno::{Errno, SyscallRet},
@@ -46,6 +45,15 @@ pub trait FileOp: Any + Send + Sync {
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> usize {
         unimplemented!();
     }
+    // 从文件偏移量为offset处读取数据到buf中, 返回读取的字节数, 不会更新文件偏移量
+    fn pread<'a>(&'a self, buf: &'a mut [u8], offset: usize) -> usize {
+        unimplemented!();
+    }
+    // 从文件偏移量为offset处写数据到buf中, 返回写的字节数, 不会更新文件偏移量
+    fn pwrite<'a>(&'a self, buf: &'a [u8], offset: usize) -> usize {
+        unimplemented!();
+    }
+
     fn read_all(&self) -> Vec<u8> {
         unimplemented!();
     }
@@ -60,7 +68,11 @@ pub trait FileOp: Any + Send + Sync {
         unimplemented!();
     }
     // move the file offset
-    fn seek(&self, offset: isize, whence: Whence) -> usize {
+    fn seek(&self, offset: isize, whence: Whence) -> SyscallRet {
+        unimplemented!();
+    }
+    // truncate the file to a given length
+    fn truncate(&self, length: usize) -> SyscallRet {
         unimplemented!();
     }
     // Get the file offset
@@ -86,6 +98,13 @@ pub trait FileOp: Any + Send + Sync {
     }
     fn ioctl(&self, _op: usize, _arg_ptr: usize) -> SyscallRet {
         Err(Errno::ENOTTY)
+    }
+    // 获取文件的OpenFlags(在openat初始化)
+    fn get_flags(&self) -> OpenFlags {
+        unimplemented!()
+    }
+    fn set_flags(&self, _flags: OpenFlags) {
+        unimplemented!()
     }
 }
 
@@ -133,12 +152,15 @@ impl File {
         self.inner_handler(|inner| inner.inode.can_lookup())
     }
 
-    pub fn readdir(&self) -> Result<Vec<LinuxDirent64>, Errno> {
+    /// dirp是用户空间的指针
+    pub fn readdir(&self, dirp: usize, count: usize) -> SyscallRet {
         if self.is_dir() {
-            let (offset, linux_dirents) =
-                self.inner_handler(|inner| inner.inode.getdents(inner.offset));
-            self.add_offset(offset);
-            return Ok(linux_dirents);
+            // let mut buf = vec![0u8; count];
+            let buf = copy_from_user_mut(dirp as *mut u8, count)?;
+            let (file_offset, buf_offset) =
+                self.inner_handler(|inner| inner.inode.getdents(buf, inner.offset));
+            self.add_offset(file_offset);
+            return Ok(buf_offset);
         }
         return Err(Errno::ENOTDIR);
     }
@@ -152,6 +174,14 @@ impl FileOp for File {
         let read_size = self.inner_handler(|inner| inner.inode.read(inner.offset, buf));
         self.add_offset(read_size);
         read_size
+    }
+    fn pread<'a>(&'a self, buf: &'a mut [u8], offset: usize) -> usize {
+        let read_size = self.inner_handler(|inner| inner.inode.read(offset, buf));
+        read_size
+    }
+    fn pwrite<'a>(&'a self, buf: &'a [u8], offset: usize) -> usize {
+        let write_size = self.inner_handler(|inner| inner.inode.write(offset, buf));
+        write_size
     }
     fn read_all(&self) -> Vec<u8> {
         self.read_all()
@@ -176,7 +206,7 @@ impl FileOp for File {
         self.add_offset(write_size);
         write_size
     }
-    fn seek(&self, offset: isize, whence: Whence) -> usize {
+    fn seek(&self, offset: isize, whence: Whence) -> SyscallRet {
         self.inner_handler(|inner| {
             match whence {
                 Whence::SeekSet => {
@@ -185,14 +215,26 @@ impl FileOp for File {
                     }
                     inner.offset = offset as usize;
                 }
-                Whence::SeekCur => inner.offset = inner.offset.checked_add_signed(offset).unwrap(),
+                Whence::SeekCur => {
+                    inner.offset = inner
+                        .offset
+                        .checked_add_signed(offset)
+                        .ok_or(Errno::EINVAL)?;
+                }
                 Whence::SeekEnd => {
                     let size = inner.inode.get_size();
-                    inner.offset = size.checked_add_signed(offset).unwrap();
+                    inner.offset = size.checked_add_signed(offset).ok_or(Errno::EINVAL)?;
                 }
             }
-            return inner.offset;
+            return Ok(inner.offset);
         })
+    }
+    fn truncate(&self, length: usize) -> SyscallRet {
+        if self.get_flags().contains(OpenFlags::O_APPEND) {
+            return Err(Errno::EPERM);
+        }
+        self.inner_handler(|inner| inner.inode.truncate(length));
+        Ok(0)
     }
     fn get_offset(&self) -> usize {
         self.inner_handler(|inner| inner.offset)
@@ -207,6 +249,22 @@ impl FileOp for File {
         let inner_guard = self.inner.lock();
         inner_guard.flags.contains(OpenFlags::O_WRONLY)
             || inner_guard.flags.contains(OpenFlags::O_RDWR)
+    }
+    fn r_ready(&self) -> bool {
+        true
+    }
+    fn w_ready(&self) -> bool {
+        true
+    }
+    fn get_flags(&self) -> OpenFlags {
+        self.inner_handler(|inner| inner.flags)
+    }
+    // 保留本身的CREATION_FLAGS, AccessMode, 其余位使用flags设置
+    // flags由上层调用者处理, 不设置access mode及creation flags
+    fn set_flags(&self, flags: OpenFlags) {
+        self.inner_handler(|inner| {
+            inner.flags = inner.flags & (OpenFlags::CREATION_FLAGS | OpenFlags::O_ACCMODE) | flags;
+        });
     }
 }
 
@@ -252,4 +310,15 @@ bitflags::bitflags! {
         const O_PATH        = 0o10000000;
         const O_TMPFILE     = 0o20200000;
     }
+}
+
+impl OpenFlags {
+    pub const CREATION_FLAGS: OpenFlags = OpenFlags::O_CREAT
+        .union(OpenFlags::O_EXCL)
+        .union(OpenFlags::O_TMPFILE)
+        .union(OpenFlags::O_NOCTTY)
+        .union(OpenFlags::O_NOFOLLOW)
+        .union(OpenFlags::O_DIRECTORY)
+        .union(OpenFlags::O_CLOEXEC)
+        .union(OpenFlags::O_TRUNC);
 }

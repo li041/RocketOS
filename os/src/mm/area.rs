@@ -1,5 +1,5 @@
 use crate::arch::mm::sfence_vma_vaddr;
-use core::ops::Range;
+use core::{fmt::Debug, ops::Range};
 
 use alloc::{collections::btree_map::BTreeMap, sync::Arc};
 use bitflags::bitflags;
@@ -13,7 +13,7 @@ use crate::{
     mm::address::StepByOne,
 };
 
-use super::{Page, PhysPageNum, VPNRange, VirtAddr, VirtPageNum};
+use super::{shm::ShmAtFlags, Page, PhysPageNum, VPNRange, VirtAddr, VirtPageNum};
 
 bitflags! {
     #[derive(Clone, Copy, Debug, PartialEq)]
@@ -26,7 +26,23 @@ bitflags! {
         const G = 1 << 5;
         const A = 1 << 6;
         const D = 1 << 7;
+        const COW = 1 << 8;
         const S = 1 << 9;
+    }
+}
+
+impl From<&ShmAtFlags> for MapPermission {
+    fn from(shm_at_flags: &ShmAtFlags) -> Self {
+        let mut map_perm = MapPermission::U | MapPermission::S;
+        if shm_at_flags.contains(ShmAtFlags::SHM_RDONLY) {
+            map_perm.insert(MapPermission::R);
+        } else {
+            map_perm.insert(MapPermission::R | MapPermission::W);
+        }
+        if shm_at_flags.contains(ShmAtFlags::SHM_EXEC) {
+            map_perm.insert(MapPermission::X);
+        }
+        map_perm
     }
 }
 
@@ -56,6 +72,16 @@ pub struct MapArea {
     /// 文件映射
     pub backend_file: Option<Arc<dyn FileOp>>,
     pub offset: usize,
+}
+
+impl Debug for MapArea {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("MapArea")
+            .field("vpn_range", &self.vpn_range)
+            .field("map_perm", &self.map_perm)
+            .field("map_type", &self.map_type)
+            .finish()
+    }
 }
 
 impl PartialEq for MapArea {
@@ -119,7 +145,7 @@ impl MapArea {
             }
             MapType::Framed => {
                 for vpn in self.vpn_range {
-                    let page = Page::new_private(None);
+                    let page = Page::new_framed(None);
                     ppn = page.ppn();
                     self.pages.insert(vpn, Arc::new(page));
                     page_table.map(vpn, ppn, pte_flags.clone());
@@ -148,7 +174,7 @@ impl MapArea {
     /// 在原有的MapArea上增加一个页, 并添加相关映射
     /// used by `sys_brk`
     pub fn alloc_one_page_framed_private(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
-        let page = Page::new_private(None);
+        let page = Page::new_framed(None);
         let ppn = page.ppn();
         let pte_flags = PTEFlags::from(self.map_perm);
         page_table.map(vpn, ppn, pte_flags);

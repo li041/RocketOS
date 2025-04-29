@@ -94,7 +94,7 @@ pub const EMFILE: isize = -24;
 
 impl FdTable {
     pub fn new() -> Arc<Self> {
-        let mut vec = vec![None; MAX_FDS];
+        let mut vec = vec![None; 3];
         // vec[0] = Some(FdEntry::new(Arc::new(Stdin), FdFlags::empty()));
         // vec[1] = Some(FdEntry::new(Arc::new(Stdout), FdFlags::empty()));
         // vec[2] = Some(FdEntry::new(Arc::new(Stdout), FdFlags::empty()));
@@ -109,7 +109,7 @@ impl FdTable {
     }
 
     pub fn from_existed_user(parent_table: &FdTable) -> Arc<Self> {
-        let mut vec = Vec::with_capacity(MAX_FDS);
+        let mut vec = Vec::with_capacity(parent_table.table.read().len());
         for i in 0..MAX_FDS {
             if let Some(entry) = parent_table.table.read().get(i) {
                 vec.push(entry.clone());
@@ -177,6 +177,9 @@ impl FdTable {
             // return None;
         }
         let mut table = self.table.write();
+        if new_fd >= table.len() {
+            table.resize(new_fd + 1, None);
+        }
         let old = table[new_fd].replace(FdEntry::new(file, flags));
         old.map(|entry| entry.file)
     }
@@ -218,6 +221,9 @@ impl FdTable {
         let mut rlimit_lock = self.rlimit.write();
         rlimit_lock.rlim_cur = rlimit.rlim_cur;
         rlimit_lock.rlim_max = rlimit.rlim_max;
+        if self.table.read().len() > rlimit.rlim_cur as usize {
+            self.table.write().truncate(rlimit.rlim_cur as usize);
+        }
     }
 
     // 设置某个fd的flag（例如 FD_CLOEXEC）

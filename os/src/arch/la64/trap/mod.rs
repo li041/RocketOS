@@ -82,9 +82,9 @@ pub fn trap_handler(cx: &mut TrapContext) {
                 Ok(ret) => ret as usize,
                 Err(e) => {
                     // 在开发阶段, 发生EFAULT时, 直接panic
-                    if e == Errno::EFAULT {
-                        panic!("EFAULT in syscall");
-                    }
+                    // if e == Errno::EFAULT {
+                    //     panic!("EFAULT in syscall");
+                    // }
                     e as usize
                 }
             };

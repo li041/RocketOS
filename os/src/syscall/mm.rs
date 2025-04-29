@@ -7,7 +7,13 @@ use crate::{
     },
     fs::file::File,
     index_list::{IndexList, ListIndex},
-    mm::{MapArea, MapPermission, VPNRange, VirtAddr, VirtPageNum},
+    mm::{
+        shm::{
+            self, add_shm_segment, attach_shm_segment, check_shm_segment_exist, detach_shm_segment,
+            stat_shm_segment, ShmAtFlags, ShmCtlOp, ShmGetFlags, ShmId, ShmSegment, IPC_PRIVATE,
+        },
+        MapArea, MapPermission, VPNRange, VirtAddr, VirtPageNum,
+    },
     syscall::errno::Errno,
     task::current_task,
     utils::{ceil_to_page_size, floor_to_page_size},
@@ -68,6 +74,7 @@ pub fn sys_brk(brk: usize) -> SyscallRet {
 
 bitflags! {
     /// MMAP memeory protection
+    /// 注意: PROT_WRITE不直接对应MapPermission的W, 因为对于私有文件映射
     pub struct MmapProt: u32 {
         /// Readable
         const PROT_READ = 0x1;
@@ -174,6 +181,9 @@ pub fn sys_mmap(
     }
 
     let mut map_perm: MapPermission = prot.into();
+    if flags.contains(MmapFlags::MAP_DENYWRITE) {
+        log::warn!("[sys_mmap] MAP_DENYWRITE not implemented");
+    }
     // 加上U权限
     map_perm |= MapPermission::U;
     if flags.contains(MmapFlags::MAP_SHARED) {
@@ -212,11 +222,6 @@ pub fn sys_mmap(
                 memory_set.get_unmapped_area(len)
             };
             memory_set.insert_framed_area(vpn_range, map_perm);
-            // Debug
-            log::error!(
-                "[sys_mmap] anonymous return {:#x}",
-                vpn_range.get_start().0 << PAGE_SIZE_BITS
-            );
             return Ok(vpn_range.get_start().0 << PAGE_SIZE_BITS);
         })
     } else {
@@ -232,6 +237,11 @@ pub fn sys_mmap(
             } else {
                 memory_set.get_unmapped_area(len)
             };
+            // 处理map_perm
+            if map_perm.contains(MapPermission::W) && !map_perm.contains(MapPermission::S) {
+                map_perm.remove(MapPermission::W);
+                map_perm.insert(MapPermission::COW);
+            }
             let mmap_area = MapArea::new(vpn_range, MapType::Filebe, map_perm, Some(file), offset);
             memory_set.insert_filebe_area_lazily(mmap_area);
             log::error!(
@@ -265,7 +275,7 @@ pub fn sys_munmap(start: usize, len: usize) -> SyscallRet {
     task.op_memory_set_mut(|memory_set| {
         if !memory_set.remove_area_with_overlap(unmap_vpn_range) {
             log::warn!("[sys_munmap] {:#x} not found", start);
-            memory_set.page_table.dump_all_user_mapping();
+            // memory_set.page_table.dump_all_user_mapping();
         }
     });
     Ok(0)
@@ -496,3 +506,86 @@ pub fn sys_madvise(addr: usize, len: usize, advice: i32) -> SyscallRet {
     // Todo:
     Ok(0)
 }
+
+/* shm start */
+pub fn sys_shmget(key: usize, size: usize, shmflg: i32) -> SyscallRet {
+    let shmflg = ShmGetFlags::from_bits_truncate(shmflg);
+    log::info!(
+        "sys_shmget: key: {:#x}, size: {:#x}, shmflg: {:#x}",
+        key,
+        size,
+        shmflg
+    );
+    let task = current_task();
+    let page_aligned_size = ceil_to_page_size(size);
+    if key == IPC_PRIVATE {
+        // IPC_PRIVATE是一个特殊的key值, 用于创建一个新的共享内存段
+        let shmid = add_shm_segment(page_aligned_size, task.tgid(), None);
+        return Ok(shmid);
+    }
+    // 其他key值, 需要检查是否存在
+    let shmid = check_shm_segment_exist(key, page_aligned_size, &shmflg)?;
+    if shmid == 0 {
+        if shmflg.contains(ShmGetFlags::IPC_CREAT) {
+            // 创建新的共享内存段, 同时指定了key(已检查key不存在)
+            ShmSegment::new(page_aligned_size, task.tgid());
+            let shmid = add_shm_segment(page_aligned_size, task.tgid(), Some(key));
+            debug_assert!(shmid == key);
+            return Ok(shmid);
+        } else {
+            // 不存在, 且不创建
+            return Err(Errno::ENOENT);
+        }
+    }
+    // 存在, 返回shmid
+    Ok(shmid)
+}
+
+pub fn sys_shmat(shmid: usize, shmaddr: usize, shmflg: i32) -> SyscallRet {
+    let shmflg = ShmAtFlags::from_bits_truncate(shmflg);
+    log::info!(
+        "sys_shmat: shmid: {:#x}, shmaddr: {:#x}, shmflg: {:#x}",
+        shmid,
+        shmaddr,
+        shmflg
+    );
+    if shmaddr % PAGE_SIZE != 0 && !shmflg.contains(ShmAtFlags::SHM_RND) {
+        return Err(Errno::EINVAL);
+    }
+    let aligned_shmaddr = floor_to_page_size(shmaddr);
+    attach_shm_segment(shmid, aligned_shmaddr, &shmflg)
+}
+
+pub fn sys_shmdt(shmaddr: usize) -> SyscallRet {
+    log::info!("sys_shmdt: shmaddr: {:#x}", shmaddr);
+    if shmaddr % PAGE_SIZE != 0 {
+        return Err(Errno::EINVAL);
+    }
+    detach_shm_segment(shmaddr)
+}
+
+pub fn sys_shmctl(shmid: usize, op: i32, buf: *mut ShmId) -> SyscallRet {
+    let shmctl_op = ShmCtlOp::from(op);
+    log::info!(
+        "sys_shmctl: shmid: {:#x}, op: {:?}, buf: {:#x}",
+        shmid,
+        shmctl_op,
+        buf as usize
+    );
+    match shmctl_op {
+        ShmCtlOp::IPC_STAT => {
+            // 读取共享内存段信息
+            stat_shm_segment(shmid, buf)
+        }
+        ShmCtlOp::IPC_RMID => {
+            // Todo: 标记删除共享内存段
+            return Ok(0);
+        }
+        _ => {
+            log::warn!("[sys_shmctl] Unimplemented");
+            return Err(Errno::EINVAL);
+        }
+    }
+}
+
+/* shm end */

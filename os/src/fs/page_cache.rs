@@ -36,6 +36,13 @@ impl AddressSpace {
             None
         }
     }
+    pub fn remove_page_cache(self: &Self, page_offset: usize) {
+        // 删除页缓存
+        self.i_pages.write().remove(&page_offset).or_else(|| {
+            log::error!("remove_page_cache: page_offset {} not found", page_offset);
+            None
+        });
+    }
     pub fn new_page_cache(
         self: &Self,
         page_offset: usize,
@@ -47,7 +54,7 @@ impl AddressSpace {
         if fs_block_id == 0 {
             log::error!("new_page_cache: fs_block_id is 0, sparse file");
         }
-        let page = Arc::new(Page::new_shared(fs_block_id, block_device, inode));
+        let page = Arc::new(Page::new_filebe(fs_block_id, block_device, inode));
         self.i_pages.write().insert(page_offset, page.clone());
         page
     }

@@ -16,7 +16,7 @@ use crate::{
     arch::{config::PAGE_SIZE_BITS, mm::copy_from_user, timer::TimeSpec},
     futex::queue::futex_hash,
     syscall::errno::{Errno, SyscallRet},
-    task::{current_task, yield_current_task, Task},
+    task::{current_task, dump_scheduler, yield_current_task, Task},
 };
 use alloc::{sync::Arc, sync::Weak};
 
@@ -161,12 +161,6 @@ pub fn futex_wait(
     }
     // 比较后相等，放入等待队列
     {
-        // Debug 4.20
-        log::warn!(
-            "[futex_wait] futex_key: {:?}, hash_value: {}",
-            key,
-            futex_hash(&key)
-        );
         let mut hash_bucket = FUTEXQUEUES.buckets[futex_hash(&key)].lock();
         let cur_futexq = FutexQ::new(key, current_task().clone(), bitset);
         hash_bucket.push_back(cur_futexq);
@@ -187,9 +181,10 @@ pub fn futex_wait(
 
         // If we were woken (and unqueued), we succeeded, whatever.
         // We doesn't care about the reason of wakeup if we were unqueued.
-        let hash_bucket = FUTEXQUEUES.buckets[futex_hash(&key)].lock();
+        let mut hash_bucket = FUTEXQUEUES.buckets[futex_hash(&key)].lock();
         let cur_id = current_task().tid();
         // 查看自己是否在队列中
+        hash_bucket.retain(|futex_q| futex_q.task.upgrade().is_some());
         if let Some(_idx) = hash_bucket
             .iter()
             .position(|futex_q| futex_q.task.upgrade().unwrap().tid() == cur_id)
@@ -221,8 +216,6 @@ pub fn futex_wake(uaddr: usize, flags: i32, nr_waken: u32) -> SyscallRet {
     let mut ret = 0;
     let key = get_futex_key(uaddr, flags)?;
     {
-        // Debug 4.20
-        log::warn!("futex_key: {:?}, hash_value: {}", key, futex_hash(&key));
         let mut hash_bucket = FUTEXQUEUES.buckets[futex_hash(&key)].lock();
 
         if hash_bucket.is_empty() {

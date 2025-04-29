@@ -21,6 +21,7 @@ pub use old::{FileMeta, FileOld};
 
 pub mod dentry;
 pub mod dev;
+pub mod etc;
 pub mod fdtable;
 pub mod file;
 pub mod inode;
@@ -36,6 +37,7 @@ pub mod proc;
 mod stdio;
 pub mod tmp;
 // pub mod tty;
+pub mod fd_set;
 pub mod uapi;
 
 // 文件系统的锁先使用SpinNoIrqLock, Todo: 改成RwLock

@@ -13,18 +13,13 @@ use crate::{
             context::{dump_trap_context, get_trap_context, save_trap_context},
             TrapContext,
         },
-    },
-    fs::{
+    }, fs::{
         fdtable::FdTable,
         file::FileOp,
         path::Path,
         uapi::{RLimit, Resource},
         FileOld, Stdin, Stdout,
-    },
-    mm::{MapArea, MapPermission, MapType, MemorySet, VPNRange, VirtAddr},
-    mutex::{Spin, SpinNoIrq, SpinNoIrqLock},
-    signal::{SiField, Sig, SigHandler, SigInfo, SigPending, SigSet, SignalStack, UContext},
-    task::{
+    }, futex::{do_futex, flags::{FUTEX_PRIVATE_FLAG, FUTEX_WAIT, FUTEX_WAKE}}, mm::{MapArea, MapPermission, MapType, MemorySet, VPNRange, VirtAddr}, mutex::{Spin, SpinNoIrq, SpinNoIrqLock}, signal::{SiField, Sig, SigHandler, SigInfo, SigPending, SigSet, SignalStack, UContext}, task::{
         aux,
         context::write_task_cx,
         kstack,
@@ -33,7 +28,7 @@ use crate::{
         },
         scheduler::{add_task, dump_scheduler},
         wakeup, INITPROC,
-    },
+    }
 };
 use alloc::{
     collections::btree_map::BTreeMap,
@@ -84,9 +79,9 @@ pub struct Task {
     root: Arc<SpinNoIrqLock<Arc<Path>>>,
     pwd: Arc<SpinNoIrqLock<Arc<Path>>>,
     // ToDo: 信号处理
-    sig_pending: SpinNoIrqLock<SigPending>,      // 待处理信号
-    sig_handler: Arc<SpinNoIrqLock<SigHandler>>, // 信号处理函数
-    sig_stack: SpinNoIrqLock<Option<SignalStack>>, // 额外信号栈
+    sig_pending: SpinNoIrqLock<SigPending>,                 // 待处理信号
+    sig_handler: Arc<SpinNoIrqLock<SigHandler>>,            // 信号处理函数
+    sig_stack: SpinNoIrqLock<Option<SignalStack>>,          // 额外信号栈
                                                  // Todo: 进程组
                                                  // ToDo：运行时间(调度相关)
                                                  // ToDo: 多核启动
@@ -412,7 +407,7 @@ impl Task {
             envp_base,
             auxv_base,
         );
-        trap_cx.set_tp(Arc::as_ptr(&self) as usize);
+        // trap_cx.set_tp(Arc::as_ptr(&self) as usize);
         save_trap_context(&self, trap_cx);
         log::trace!("[kernel_execve] task{} trap_cx updated", self.tid());
         // 重建线程组
@@ -560,6 +555,10 @@ impl Task {
         match resource {
             Resource::NOFILE => {
                 self.fd_table().set_rlimit(&rlim);
+                Ok(())
+            }
+            Resource::STACK => {
+                log::error!("[set_rlimit] Fake stack");
                 Ok(())
             }
             _ => Err("not supported"),
@@ -722,7 +721,12 @@ pub fn kernel_exit(task: Arc<Task>, exit_code: i32) {
             if let Err(_) = copy_to_user(tidptr as *mut u8, &content as *const u8, 8) {
                 panic!();
             }
-            // Todo: futex 相关
+            // 当 clear_child_tid 不为 NULL 的线程终止时，如果该线程与其他线程共享内存，
+            // 则将 0 写入 clear_child_tid 指定的地址，并且内核将执行以下操作：
+            //      futex(clear_child_tid, FUTEX_WAKE, 1, NULL, NULL, 0);
+            if let Err(_) = do_futex(tidptr, FUTEX_WAKE | FUTEX_PRIVATE_FLAG, 1, 0, 0, 0) {
+                panic!();
+            }
         }
     }
 
@@ -796,7 +800,7 @@ pub fn kernel_exit(task: Arc<Task>, exit_code: i32) {
                     SigInfo {
                         signo: Sig::SIGCHLD.raw(),
                         code: SigInfo::CLD_EXITED,
-                        fields: SiField::kill { tid: task.tid() },
+                        fields: SiField::None,
                     },
                     false,
                 );

@@ -2,7 +2,7 @@ use bitflags::bitflags;
 
 use super::{Sig, SigSet, MAX_SIGNUM};
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone)]
 // 信号处理器
 pub struct SigHandler {
     actions: [SigAction; MAX_SIGNUM],
@@ -41,7 +41,7 @@ pub const SIG_DFL: usize = 0;
 pub const SIG_IGN: usize = 1;
 
 // 处理操作
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone)]
 #[repr(C)]
 pub struct SigAction {
     pub sa_handler: usize,      // 信号处理函数指针
@@ -67,12 +67,12 @@ impl SigAction {
 
     pub fn is_user(&self) -> bool{
         let handler = self.sa_handler;
-        (handler != 0) && (handler != 1)
+        (handler != SIG_IGN) && (handler != SIG_DFL)
     }
 }
 
 // 信号处理类型
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ActionType {
     Ignore,
     Term,
@@ -97,7 +97,7 @@ impl ActionType {
 }
 
 bitflags! {
-    #[derive(Default, Copy, Clone, Debug)]
+    #[derive(Default, Copy, Clone)]
     pub struct SigActionFlag : u32 {
         const SA_NOCLDSTOP = 1;
         const SA_NOCLDWAIT = 2;
