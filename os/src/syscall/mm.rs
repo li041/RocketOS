@@ -75,6 +75,7 @@ pub fn sys_brk(brk: usize) -> SyscallRet {
 bitflags! {
     /// MMAP memeory protection
     /// 注意: PROT_WRITE不直接对应MapPermission的W, 因为对于私有文件映射
+    #[derive(Debug)]
     pub struct MmapProt: u32 {
         /// Readable
         const PROT_READ = 0x1;
@@ -168,6 +169,7 @@ pub fn sys_mmap(
     );
     //处理参数
     let prot = MmapProt::from_bits(prot as u32).unwrap();
+    log::error!("[sys_mmap] prot is {:?}",prot);
     let flags = MmapFlags::from_bits(flags as u32).unwrap();
     let task = current_task();
     // 判断参数合法性, 包括
@@ -246,6 +248,10 @@ pub fn sys_mmap(
             let mmap_area = MapArea::new(vpn_range, MapType::Filebe, map_perm, Some(file), offset);
             memory_set.insert_map_area_lazily(mmap_area);
             // memory_set.insert_framed_area(vpn_range, map_perm);
+            log::error!(
+                "[sys_mmap] filebe return {:#x}",
+                vpn_range.get_start().0
+            );
             log::error!(
                 "[sys_mmap] file return {:#x}",
                 vpn_range.get_start().0 << PAGE_SIZE_BITS

@@ -20,7 +20,7 @@ use crate::{
     },
     fs::{
         dentry::DentryFlags,
-        dev::{null::NULL, rtc::RTC, zero::ZERO},
+        dev::{null::NULL, rtc::RTC, urandom::URANDOM, zero::ZERO},
         fdtable::{FdEntry, FdFlags},
         AT_FDCWD,
     },
@@ -286,6 +286,10 @@ fn create_file_from_dentry(
                     assert!(dentry.absolute_path == "/dev/rtc");
                     RTC.get().unwrap().clone()
                 } // /dev/rtc
+                (1,9)=> {
+                    assert!(dentry.absolute_path == "/dev/urandom");
+                    URANDOM.get().unwrap().clone()
+                } // /dev/urandom
                 _ => panic!(
                     "[create_file_from_dentry]Unsupported device, devt: {:?}",
                     inode.get_devt()
@@ -444,7 +448,7 @@ pub fn lookup_dentry(nd: &mut Nameidata) -> Arc<Dentry> {
         // 在目录中查找目录项
         dentry = Some(current_dir_inode.lookup(&nd.path_segments[nd.depth], nd.dentry.clone()));
         // 注意这里插入的dentry可能是负目录项
-        // log::warn!("[lookup_dentry] try to lookup in dir_inode");
+        log::warn!("[lookup_dentry] try to lookup in dir_inode");
     }
     let dentry = dentry.unwrap();
     insert_dentry(dentry.clone());

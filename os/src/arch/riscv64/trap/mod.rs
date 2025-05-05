@@ -122,6 +122,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
             // recoverable page fault:
             // 1. fork COW area
             // 2. lazy allocation
+            log::error!("stval addr is {:#x}",stval);
             let va = VirtAddr::from(stval);
             let casue = PageFaultCause::from(scause.cause());
             log::error!("page fault cause {:?}", scause.cause());

@@ -58,6 +58,9 @@ pub const INIT_PROC_PID: usize = 0;
 extern "C" {
     fn strampoline();
     fn etrampoline();
+    fn _stdata();
+    fn _etdata();
+    fn _etbss();
 }
 
 /// tp寄存器指向Task结构体
@@ -98,6 +101,9 @@ pub struct Task {
                                                  // Todo: 进程组
                                                  // ToDo：运行时间(调度相关)
                                                  // ToDo: 多核启动
+    // errno:SpinNoIrqLock<SysErrno>, // 错误码
+    //tls
+    // tlsarea:TlsArea,
 }
 
 impl core::fmt::Debug for Task {
@@ -107,6 +113,10 @@ impl core::fmt::Debug for Task {
             .field("tgid", &self.tgid())
             .finish()
     }
+}
+unsafe impl Send for Task {
+}
+unsafe impl Sync for Task {
 }
 
 impl Drop for Task {
@@ -155,6 +165,11 @@ impl Task {
         // Task_context
         kstack -= core::mem::size_of::<TaskContext>();
         let task_cx_ptr = kstack as *mut TaskContext;
+        // let tlsarea=TlsArea::alloc();
+        // let tls_page=VirtAddr::from(tlsarea.tls_ptr() as usize);s
+        //获得tlsarea
+        //initproc不获得的tp,主要设置后面user的tp
+        // let tlsarea=TlsArea::init();
         // 创建进程实体
         let task = Arc::new(Task {
             kstack: KernelStack(kstack),
@@ -187,7 +202,9 @@ impl Task {
         let task_ptr = Arc::as_ptr(&task) as usize;
         trap_context.set_tp(task_ptr);
         trap_context.set_kernel_tp(task_ptr);
+
         log::info!("[Initproc] Init-tp:\t{:x}", task_ptr);
+        //访问tls需要偏移
         let task_context = TaskContext::app_init_task_context(task_ptr, pgdl_ppn);
         // 将TrapContext和TaskContext压入内核栈
         unsafe {
@@ -218,6 +235,9 @@ impl Task {
         let sig_handler;
         let sig_pending;
         let sig_stack;
+        // let errno=SpinNoIrqLock::new(SysErrno::ERAW);
+        //线程的tls独立
+        // let tlsarea=TlsArea::alloc();
         log::info!("[kernel_clone] task{} ready to clone ...", self.tid());
 
         // 是否与父进程共享信号处理器
@@ -229,7 +249,8 @@ impl Task {
                 self.op_sig_handler_mut(|handler| handler.clone()),
             ))
         }
-
+        //需要说明当创建新进程时，子进程应当保留父进程的tls area除非用户有mmap
+        // tlsarea=self.tlsarea.clone();
         // 创建线程
         if flags.contains(CloneFlags::CLONE_THREAD) {
             log::warn!("[kernel_clone] child task{} is a thread", tid);
@@ -338,6 +359,9 @@ impl Task {
 
         // 更新子进程的trap_cx
         let mut trap_cx = get_trap_context(&task);
+        // if flags.contains(CloneFlags::CLONE_SETTLS) {
+        //     trap_cx.set_tp(t);
+        // }
         if ustack_ptr != 0 {
             // ToDo: 检验用户栈指针
             trap_cx.set_sp(ustack_ptr);
@@ -346,6 +370,7 @@ impl Task {
         // 设定子任务返回值为0，令kernel_tp保存该任务结构
         trap_cx.set_kernel_tp(Arc::as_ptr(&task) as usize);
         trap_cx.set_a0(0);
+
         save_trap_context(&task, trap_cx);
 
         // 在内核栈中加入task_cx
@@ -381,111 +406,6 @@ impl Task {
         // 创建地址空间
         let (mut memory_set, _satp, ustack_top, entry_point, aux_vec, tls_ptr) =
             MemorySet::from_elf(elf_data.to_vec(), &mut args_vec);
-        // 更新页表
-        memory_set.activate();
-
-        #[cfg(target_arch = "loongarch64")]
-        memory_set.push_with_offset(
-            MapArea::new(
-                VPNRange::new(
-                    VirtAddr::from(strampoline as usize).floor(),
-                    VirtAddr::from(etrampoline as usize).ceil(),
-                ),
-                MapType::Linear,
-                MapPermission::R | MapPermission::X | MapPermission::U,
-                None,
-                0,
-            ),
-            None,
-            0,
-        );
-
-        // 初始化用户栈, 压入args和envs
-        let argc = args_vec.len();
-        let (argv_base, envp_base, auxv_base, ustack_top) =
-            init_user_stack(&memory_set, &args_vec, &envs_vec, aux_vec, ustack_top);
-        log::info!(
-            "[kernel_execve] entry_point: {:x}, user_sp: {:x}, page_table: {:x}",
-            entry_point,
-            ustack_top,
-            memory_set.token()
-        );
-
-        if !self.is_process() {
-            self.exchange_tid();
-        }
-
-        // 关闭线程组中除当前线程外的所有线程
-        self.close_thread();
-        log::trace!("[kernel_execve] task{} close thread_group", self.tid());
-
-        // 更新地址空间
-        self.op_memory_set_mut(|m| *m = memory_set);
-        // 更新trap_cx
-        let mut trap_cx = TrapContext::app_init_trap_context(
-            entry_point,
-            ustack_top,
-            argc,
-            argv_base,
-            envp_base,
-            auxv_base,
-        );
-        // 设置tls
-        if let Some(tls_ptr) = tls_ptr {
-            log::error!("[kernel_execve] task{} tls_ptr: {:x}", self.tid(), tls_ptr);
-            trap_cx.set_tp(tls_ptr);
-        }
-        save_trap_context(&self, trap_cx);
-        log::trace!("[kernel_execve] task{} trap_cx updated", self.tid());
-        // 重建线程组
-        self.op_thread_group_mut(|tg| {
-            *tg = ThreadGroup::new();
-            tg.add(self.tid(), Arc::downgrade(&self));
-        });
-        log::trace!("[kernel_execve] task{} thread_group rebuild", self.tid());
-        self.fd_table().do_close_on_exec();
-        log::trace!("[kernel_execve] task{} fd_table reset", self.tid());
-        // 重置信号处理器
-        self.op_sig_handler_mut(|handler| handler.reset());
-        log::trace!("[kernel_execve] task{} handler reset", self.tid());
-
-        log::info!(
-            "[kernel_execve] task{}-tgid:\t{:x}",
-            self.tid(),
-            self.tgid()
-        );
-        log::info!(
-            "[kernel_execve] task{}-tp:\t{:x}",
-            self.tid(),
-            Arc::as_ptr(&self) as usize
-        );
-        log::info!(
-            "[kernel_execve] task{}-sp:\t{:x}",
-            self.tid(),
-            self.kstack()
-        );
-
-        let strong_count = Arc::strong_count(&self);
-        if strong_count == 3 {
-            log::info!("[kernel_execve] strong_count:\t{}", strong_count);
-        } else
-        // 理论为3(sys_exec一个，children一个， processor一个)
-        {
-            log::error!("[kernel_execve] strong_count:\t{}", strong_count)
-        }
-    }
-
-    pub fn kernel_execve_lazily(
-        self: &Arc<Self>,
-        elf_file: Arc<dyn FileOp>,
-        elf_data: &[u8],
-        mut args_vec: Vec<String>,
-        envs_vec: Vec<String>,
-    ) {
-        log::info!("[kernel_execve] task{} do execve ...", self.tid());
-        // 创建地址空间
-        let (mut memory_set, _satp, ustack_top, entry_point, aux_vec, tls_ptr) =
-            MemorySet::from_elf_lazily(elf_file, elf_data.to_vec(), &mut args_vec);
         // 更新页表
         memory_set.activate();
 
@@ -837,6 +757,12 @@ impl Task {
     pub fn set_zombie(&self) {
         *self.status.lock() = TaskStatus::Zombie;
     }
+    // pub fn set_errno(&self,errno:SysErrno){
+    //     *self.errno.lock()=errno;
+    // }
+    // pub fn get_errno(&self)->SysErrno{
+    //     *self.errno.lock()
+    // }
 }
 
 /****************************** 辅助函数 ****************************************/

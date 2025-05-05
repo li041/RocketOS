@@ -208,11 +208,12 @@ pub const CLOCK_MONOTONIC_RAW: usize = 4;
 pub const CLOCK_REALTIME_COARSE: usize = 5;
 pub fn sys_clock_gettime(clock_id: usize, timespec: *mut TimeSpec) -> SyscallRet {
     //如果tp是NULL, 函数不会存储时间值, 但仍然会执行其他检查（如 `clockid` 是否有效）。
+    log::error!("[sys_clock_gettime] begin clock_gettime");
     if timespec.is_null() {
         return Ok(0);
     }
     match clock_id {
-        CLOCK_REALTIME | CLOCK_REALTIME_COARSE => {
+        SUPPORT_CLOCK|CLOCK_REALTIME | CLOCK_REALTIME_COARSE => {
             let time = TimeSpec::new_wall_time();
             log::info!("[sys_clock_gettime] CLOCK_REALTIME: {:?}", time);
             copy_to_user(timespec, &time as *const TimeSpec, 1)?;

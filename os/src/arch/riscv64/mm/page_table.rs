@@ -387,7 +387,8 @@ impl PageTable {
                             if entry.is_valid() && entry.is_user() {
                                 va = va | index << 12;
                                 // log::error!("--- va: {:#x}: {:?}", va, entry);
-                                log::error!("--- va: {:#x}: {:?}", va, entry);
+                                // log::error!("{:?}",entry);
+                                // log::error!("--- va: {:#x}: {:?}", va, entry);
                                 va = va & !(index << 12);
                             }
                         }

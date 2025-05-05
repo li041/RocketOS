@@ -1,3 +1,13 @@
+/*
+ * @Author: Peter/peterluck2021@163.com
+ * @Date: 2025-04-16 21:36:51
+ * @LastEditors: Peter/peterluck2021@163.com
+ * @LastEditTime: 2025-04-16 21:49:04
+ * @FilePath: /RocketOS /os/src/fs/pipe.rs
+ * @Description: 
+ * 
+ * Copyright (c) 2025 by peterluck2021@163.com, All Rights Reserved. 
+ */
 use alloc::boxed::Box;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;

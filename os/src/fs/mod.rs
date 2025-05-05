@@ -1,3 +1,13 @@
+/*
+ * @Author: Peter/peterluck2021@163.com
+ * @Date: 2025-04-16 21:36:51
+ * @LastEditors: Peter/peterluck2021@163.com
+ * @LastEditTime: 2025-04-29 15:26:55
+ * @FilePath: /RocketOS/os/src/fs/mod.rs
+ * @Description: 
+ * 
+ * Copyright (c) 2025 by peterluck2021@163.com, All Rights Reserved. 
+ */
 //! File system in os
 use core::cell::OnceCell;
 
@@ -34,6 +44,7 @@ pub mod page_cache;
 pub mod path;
 pub mod pipe;
 pub mod proc;
+pub mod fd_set;
 mod stdio;
 pub mod tmp;
 // pub mod tty;

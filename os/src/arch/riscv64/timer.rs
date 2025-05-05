@@ -9,6 +9,7 @@ use crate::{
     mm::{VirtAddr, KERNEL_SPACE},
     timer::{StatxTimeStamp, TimeSpec, MSEC_PER_SEC, TICKS_PER_SEC},
 };
+use num_enum::TryFromPrimitive;
 use riscv::register::time;
 
 use super::config::KERNEL_BASE;

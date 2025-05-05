@@ -7,11 +7,11 @@ use alloc::vec::Vec;
 use spin::RwLock;
 
 use crate::arch::config::EXT4_MAX_INLINE_DATA;
+use crate::timer::TimeSpec;
 use crate::fat32::inode;
 use crate::fs::inode::InodeOp;
 use crate::fs::kstat::Kstat;
 use crate::syscall::errno::SyscallRet;
-use crate::timer::TimeSpec;
 // use crate::fs::inode::InodeMeta;
 use crate::{
     arch::config::{PAGE_SIZE, PAGE_SIZE_BITS},
@@ -722,7 +722,6 @@ impl Ext4Inode {
         if offset >= inode_size {
             return Ok(0);
         }
-
         let mut current_read = 0;
         let mut page_offset = offset >> PAGE_SIZE_BITS;
         let mut page_offset_in_page = offset & (PAGE_SIZE - 1);
@@ -840,6 +839,7 @@ impl Ext4Inode {
                 // 页缓存未命中, 先查看是否是inline_data, 再看是否在查到的PhysicalBlockRange中
                 log::warn!("[Ext4Inode::read] has inline data",);
                 let inline_data_len = self.inner.read().inode_on_disk.size_lo as usize;
+                log::error!("[get_page_cache] inline data_len: {:?}", inline_data_len);
                 // 创建inline page cache
                 let page = self.address_space.new_inline_page_cache(
                     offset,
@@ -1253,6 +1253,68 @@ impl Ext4Inode {
     }
     // 目前仅设置大小
     // Todo:
+    // fn truncate_extend(&self, current_size: u64, new_size: u64) {
+    //     let mut inner_guard = self.inner.write();
+    //     let inode_on_disk = &mut inner_guard.inode_on_disk;
+    //     if inode_on_disk.has_inline_data() {
+    //         assert!(current_size <= EXT4_MAX_INLINE_DATA as u64);
+    //         // 将inline data转换为extent tree
+    //         let new_block = self.alloc_block();
+    //         if current_size > 0 {
+    //             let page = self.get_page_cache(0).unwrap();
+    //             // 复制原来的inline_data, 同时写入新的block
+    //             page.modify(0, |data: &mut [u8; PAGE_SIZE]| {
+    //                 data[0..EXT4_MAX_INLINE_DATA].copy_from_slice(
+    //                     &self.inner.read().inode_on_disk.block[..EXT4_MAX_INLINE_DATA],
+    //                 );
+    //             });
+    //             inode_on_disk.flags &= !EXT4_INLINE_DATA_FL;
+    //             inode_on_disk.flags |= EXT4_EXTENTS_FL;
+    //             // 创建新的extent
+    //             let new_extent = Ext4Extent::new(0, 1, new_block);
+    //             let header_ptr = inode_on_disk.block.as_mut_ptr() as *mut Ext4ExtentHeader;
+    //             unsafe {
+    //                 let mut extent_header = Ext4ExtentHeader::default();
+    //                 extent_header.entries = 1;
+    //                 header_ptr.write_volatile(extent_header);
+    //                 let extent_ptr = inode_on_disk.block.as_mut_ptr().add(12) as *mut Ext4Extent;
+    //                 extent_ptr.write_volatile(new_extent);
+    //             }
+    //         }
+    //     }
+    //     inode_on_disk.set_size(new_size);
+    // }
+    // fn truncate_extend(&self, current_size: u64, new_size: u64) {
+    //     let mut inner_guard = self.inner.write();
+    //     let inode_on_disk = &mut inner_guard.inode_on_disk;
+    //     if inode_on_disk.has_inline_data() {
+    //     assert!(current_size <= EXT4_MAX_INLINE_DATA as u64);
+    //     // 将inline data转换为extent tree
+    //     let new_block = self.alloc_block();
+    //     if current_size > 0 {
+    //     let page = self.get_page_cache(0).unwrap();
+    //     // 复制原来的inline_data, 同时写入新的block
+    //     page.modify(0, |data: &mut [u8; PAGE_SIZE]| {
+    //     data[0..EXT4_MAX_INLINE_DATA].copy_from_slice(
+    //     &self.inner.read().inode_on_disk.block[..EXT4_MAX_INLINE_DATA],
+    //     );
+    //     });
+    //     }
+    //     inode_on_disk.flags &= !EXT4_INLINE_DATA_FL;
+    //     inode_on_disk.flags |= EXT4_EXTENTS_FL;
+    //     // 创建新的extent
+    //     let new_extent = Ext4Extent::new(0, 1, new_block);
+    //     let header_ptr = inode_on_disk.block.as_mut_ptr() as *mut Ext4ExtentHeader;
+    //     unsafe {
+    //     let mut extent_header = Ext4ExtentHeader::default();
+    //     extent_header.entries = 1;
+    //     header_ptr.write_volatile(extent_header);
+    //     let extent_ptr = inode_on_disk.block.as_mut_ptr().add(12) as *mut Ext4Extent;
+    //     extent_ptr.write_volatile(new_extent);
+    //     }
+    //     }
+    //     inode_on_disk.set_size(new_size);
+    // }
     fn truncate_extend(&self, current_size: u64, new_size: u64) {
         let mut inner_guard = self.inner.write();
         let inode_on_disk = &mut inner_guard.inode_on_disk;

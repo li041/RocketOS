@@ -1,10 +1,20 @@
+/*
+ * @Author: Peter/peterluck2021@163.com
+ * @Date: 2025-04-16 21:36:51
+ * @LastEditors: Peter/peterluck2021@163.com
+ * @LastEditTime: 2025-04-16 22:43:11
+ * @FilePath: /RocketOS/os/build.rs
+ * @Description: 
+ * 
+ * Copyright (c) 2025 by peterluck2021@163.com, All Rights Reserved. 
+ */
 use std::env;
 use std::fs::{read_dir, File};
 use std::io::{Result, Write};
 
 fn main() {
     let target_path = env::var("USER_TARGET_PATH")
-        .unwrap_or_else(|_| "../user/target/loongarch64-unknown-none/release/".to_string());
+        .unwrap_or_else(|_| "../user/target/riscv64gc-unknown-none-elf/release/".to_string());
     println!("cargo:rerun-if-changed=../user/src/");
     println!("cargo:rerun-if-changed={}", target_path);
     insert_app_data(&target_path).unwrap();

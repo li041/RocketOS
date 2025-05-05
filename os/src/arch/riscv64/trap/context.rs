@@ -67,7 +67,9 @@ impl TrapContext {
     pub fn restore_a0(&mut self) {
         self.x[10] = self.last_a0;
     }
-
+    pub fn get_tp(&self)->usize {
+        self.x[4]
+    }
     /// init app context
     /// argc, argv_base, envp_base, auxv_base分别放在x[10], x[11], x[12], x[13]
     pub fn app_init_trap_context(

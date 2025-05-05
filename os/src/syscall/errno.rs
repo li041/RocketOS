@@ -93,6 +93,8 @@ pub enum Errno {
     ENOTSOCK = -88,
     /// 操作不支持（如对普通文件调用套接字操作）
     EOPNOTSUPP = -95,
+    // address family 不支持
+    EAFNOSUPPORT= -97,
     /// 套接字地址已在使用中（如端口被占用）
     EADDRINUSE = -98,
     /// 地址不可用（如绑定到不存在的 IP）
@@ -110,4 +112,5 @@ pub enum Errno {
     /// 套接字为非阻塞模式且连接无法立即完成
     /// （通常需要配合 select/poll 检查可写性）
     EINPROGRESS = -115,
+
 }

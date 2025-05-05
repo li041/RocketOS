@@ -13,12 +13,14 @@ use alloc::sync::Arc;
 use null::{NullFile, NULL};
 use rtc::{RtcFile, RTC};
 use tty::{TtyFile, TTY};
+use urandom::{UrandomFile, URANDOM};
 use zero::{ZeroFile, ZERO};
 
 pub mod null;
 pub mod rtc;
 pub mod tty;
 pub mod zero;
+pub mod urandom;
 
 // Todo: /dev/zero, /dev/null
 pub fn init_devfs(root_path: Arc<Path>) {
@@ -150,6 +152,7 @@ pub fn init_devfs(root_path: Arc<Path>) {
         Ok(dentry) => {
             let parent_inode = nd.dentry.get_inode();
             parent_inode.mknod(dentry.clone(), zero_mode, zero_devt);
+            //todo
             let zero_file = ZeroFile::new(
                 Path::new(root_path.mnt.clone(), dentry.clone()),
                 dentry.get_inode().clone(),
@@ -159,6 +162,33 @@ pub fn init_devfs(root_path: Arc<Path>) {
         }
         Err(e) => {
             panic!("create {} failed: {:?}", zero_path, e);
+        }
+    }
+    //dev/urandom
+    let urandom_path = "/dev/urandom";
+    let urandom_node = S_IFCHR as u16 | 0o666;
+    let urandom_devt = DevT::urandom_devt();
+    nd=Nameidata {
+        path_segments: parse_path(urandom_path),
+        dentry: root_path.dentry.clone(),
+        mnt: root_path.mnt.clone(),
+        depth: 0,
+    };
+    match filename_create(&mut nd, 0) {
+        Ok(dentry) => {
+            let parent_inode = nd.dentry.get_inode();
+            parent_inode.mknod(dentry.clone(), urandom_node, urandom_devt);
+            // 现在dentry的inode指向/dev/null
+            let urandom_file = UrandomFile::new(
+                Path::new(root_path.mnt.clone(), dentry.clone()), 
+                dentry.get_inode().clone(),
+                 OpenFlags::O_RDWR);
+            //todo
+            // NULL.call_once(|| urandom_file.clone());
+            URANDOM.call_once(|| urandom_file.clone());
+        }
+        Err(e) => {
+            panic!("create {} failed: {:?}", urandom_path, e);
         }
     }
 }

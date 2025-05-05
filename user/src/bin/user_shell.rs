@@ -1,8 +1,23 @@
+/*
+ * @Author: Peter/peterluck2021@163.com
+ * @Date: 2025-04-16 16:44:29
+ * @LastEditors: Peter/peterluck2021@163.com
+ * @LastEditTime: 2025-04-22 21:55:42
+ * @FilePath: /RocketOS/user/src/bin/user_shell.rs
+ * @Description: 
+ * 
+ * Copyright (c) 2025 by peterluck2021@163.com, All Rights Reserved. 
+ */
 #![no_std]
 #![no_main]
 #![allow(clippy::println_empty_string)]
-
+// #![feature(thread_local)]
 extern crate alloc;
+
+// #[thread_local]
+// #[warn(non_upper_case_globals)]
+// static mut error: isize=0;
+
 
 #[macro_use]
 extern crate user_lib;
@@ -30,6 +45,9 @@ fn print_prompt() {
 
 #[no_mangle]
 pub fn main() -> i32 {
+    // unsafe {
+    //     println!("{}", error);
+    // }
     let mut line: String = String::new();
     let mut history: Vec<String> = Vec::new(); // 存储历史命令
     let mut history_index: usize = 0; // 当前显示的历史命令索引
