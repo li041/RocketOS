@@ -124,6 +124,8 @@ pub fn rust_main(_hart_id: usize, dtb_address: usize) -> ! {
     let seconds = read_rtc() / NANOS_PER_SEC;
     println!("rtc time: {:?}", seconds);
     println!("data time: {:?}", seconds_to_beijing_datetime(seconds));
+    //fjos
+    log::error!("begin net inital");
     drivers::net::init_net_device(dtb_address);
     // 允许S mode访问U mode的页面
     //  S mode下会访问User的堆
