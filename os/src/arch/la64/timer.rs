@@ -6,7 +6,7 @@ use core::{
 };
 
 use crate::{
-    timer::{StatxTimeStamp, TimeSpec, MSEC_PER_SEC},
+    timer::{StatxTimeStamp, TimeSpec, TimeVal, MSEC_PER_SEC},
     utils::{seconds_to_beijing_datetime, DateTime},
 };
 
@@ -27,17 +27,40 @@ impl TimeSpec {
         // let rtc_ticks = unsafe { read_volatile(base.byte_add(SYS_RTCREAD0) as *const u32) as u64 };
         // let sec = rtc_ticks / LS7A_RTC_FREQ; // 转换为秒
         // let nsec = (rtc_ticks % LS7A_RTC_FREQ) * 1000000000 / LS7A_RTC_FREQ; // 转换为纳秒
-        // let date_time = unsafe { read_rtc() };
-        let mut time_spec = TimeSpec::default();
+        let mut date_time = TimeSpec::from(&unsafe { read_rtc() });
+        // let mut time_spec = TimeSpec::default();
         let current_time = get_time_ms();
-        time_spec.sec = current_time / 1000;
-        time_spec.nsec = (current_time % 1000) * 1000000;
-        time_spec
+        date_time.nsec += (current_time % 1000) * 1000000;
+        if date_time.nsec >= 1_000_000_000 {
+            date_time.sec += 1;
+            date_time.nsec -= 1_000_000_000;
+        }
+        date_time.sec += current_time / 1000;
+        date_time
     }
     pub fn from_nanos(nanos: usize) -> Self {
         let sec = nanos / 1_000_000_000;
         let nsec = nanos % 1_000_000_000;
         TimeSpec { sec, nsec }
+    }
+}
+
+impl TimeVal {
+    pub fn new_machine_time() -> Self {
+        log::trace!("new machine time");
+        // new a time spec with machine time
+        let current_time = get_time_ms();
+        Self {
+            sec: current_time / 1000,
+            usec: (current_time % 1000),
+        }
+    }
+    pub fn new_wall_time() -> Self {
+        let mut time_val = TimeVal::default();
+        let current_time = get_time_ms();
+        time_val.sec = current_time / 1000;
+        time_val.usec = current_time % 1000;
+        time_val
     }
 }
 

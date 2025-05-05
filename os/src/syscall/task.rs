@@ -8,7 +8,7 @@ use crate::futex::do_futex;
 use crate::syscall::errno::Errno;
 use crate::syscall::util::{CLOCK_MONOTONIC, CLOCK_REALTIME};
 use crate::task::{get_scheduler_len, get_task, wait, wait_timeout, CloneFlags, Task};
-use crate::timer::TimeSpec;
+use crate::timer::{TimeSpec, TimeVal};
 use crate::{
     arch::mm::copy_to_user,
     arch::timer::get_time_ms,
@@ -21,6 +21,7 @@ use crate::{
     },
     utils::{c_str_to_string, extract_cstrings},
 };
+use alloc::borrow::ToOwned;
 use alloc::{sync::Arc, vec};
 use bitflags::bitflags;
 
@@ -77,6 +78,15 @@ pub fn sys_clone(
     // yield_current_task();
     Ok(new_task_tid)
 }
+
+pub fn sys_setsid()->SyscallRet {
+    let task=current_task();
+    Ok(task.tgid())
+}
+
+
+
+
 
 #[cfg(target_arch = "loongarch64")]
 pub fn sys_clone(
@@ -146,12 +156,12 @@ pub fn sys_execve(path: *const u8, args: *const usize, envs: *const usize) -> Sy
     // OpenFlags::empty() = RDONLY = 0, 以只读方式打开文件
     if let Ok(file) = path_openat(&path, OpenFlags::empty(), AT_FDCWD, 0) {
         let all_data = file.read_all();
-        task.kernel_execve_lazily(file, all_data.as_slice(), args_vec, envs_vec);
+        task.kernel_execve_lazily(path.to_owned(), file, all_data.as_slice(), args_vec, envs_vec);
         Ok(0)
     } else if !path.starts_with("/") {
         // 从内核中加载的应用程序
         if let Some(elf_data) = get_app_data_by_name(&path) {
-            args_vec.insert(0, path);
+            args_vec.insert(0, path.to_owned());
             task.kernel_execve(elf_data, args_vec, envs_vec);
             Ok(0)
         } else {
@@ -178,6 +188,12 @@ pub fn sys_getpid() -> SyscallRet {
 pub fn sys_setpgid(pid: usize, pgid: usize) -> SyscallRet {
     log::info!("[sys_setpgid] pid: {}, pgid: {}", pid, pgid);
     log::warn!("[sys_setpgid] Uimplemented");
+    Ok(0)
+}
+
+pub fn sys_getpgid(pid: usize) -> SyscallRet {
+    log::info!("[sys_getpgid] pid: {}", pid);
+    log::warn!("[sys_getpgid] Uimplemented");
     Ok(0)
 }
 
@@ -249,6 +265,7 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: usize, option: i32) -> SyscallRet 
         exit_code_ptr,
         option,
     );
+    log::error!("current_task: {}", current_task().tid());
     let cur_task = current_task();
     loop {
         let mut first = true;
@@ -278,7 +295,11 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: usize, option: i32) -> SyscallRet 
             }
         });
         if let Some(wait_task) = target_task {
-            log::error!("wait_task: {}", wait_task.tid());
+            log::error!(
+                "cur_task: {}, wait_task: {}",
+                cur_task.tid(),
+                wait_task.tid()
+            );
             // 目标子进程已死
             if wait_task.is_zombie() {
                 cur_task.remove_child_task(wait_task.tid());
@@ -309,7 +330,10 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: usize, option: i32) -> SyscallRet 
                 if option.contains(WaitOption::WNOHANG) {
                     return Ok(0);
                 } else {
-                    wait();
+                    if wait() == -1 {
+                        log::error!("[sys_waitpid] wait interrupted");
+                        return Err(Errno::EINTR);
+                    };
                 }
             }
         }
@@ -357,16 +381,6 @@ pub fn sys_get_robust_list(_pid: i32, _robust_list: usize, _len: usize) -> Sysca
     Ok(0)
 }
 
-/// sys_gettimeofday, current time = sec + usec
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct TimeVal {
-    /// seconds
-    pub sec: usize,
-    /// microseconds
-    pub usec: usize,
-}
-
 pub fn sys_get_time(time_val_ptr: usize) -> SyscallRet {
     let time_val_ptr = time_val_ptr as *mut TimeVal;
     let current_time_ms = get_time_ms();
@@ -403,19 +417,25 @@ pub fn sys_nanosleep(time_val_ptr: usize) -> SyscallRet {
         current_task().tid(),
         time_val
     );
+    // Todo: 为防止无任务的情况，超时阻塞先用yield代替
     loop {
         if current_task().check_interrupt() {
             log::error!(
                 "[sys_nanosleep] task{} wakeup by signal",
                 current_task().tid()
             );
+            let remained_time = TimeSpec::new_machine_time() - start_time;
+            copy_to_user(time_val_ptr as *mut TimeSpec, &remained_time, 1)?;
             return Err(Errno::EINTR);
         }
         let current_time = TimeSpec::new_machine_time();
         if current_time >= time_val + start_time {
             break;
         }
-        yield_current_task();
+        yield_current_task();   // 返回时状态会变成running
+        // 在yield回来之后设置成interruptable可以有效的避免任务状态被覆盖
+        // 并且可以有效的保证收到信号的时候不会触发信号中断
+        current_task().set_interruptable();
     }
     Ok(0)
 }

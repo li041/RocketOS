@@ -23,6 +23,7 @@ use bitflags::bitflags;
 
 use super::errno::SyscallRet;
 
+/// 失败返回的是当前brk, 成功返回新的brk
 pub fn sys_brk(brk: usize) -> SyscallRet {
     log::info!("sys_brk: brk: {:#x}", brk);
     let task = current_task();
@@ -39,7 +40,7 @@ pub fn sys_brk(brk: usize) -> SyscallRet {
         if brk < heap_bottom {
             // brk小于堆底, 不合法
             log::error!("[sys_brk] brk {:#x} < heap_bottom {:#x}", brk, heap_bottom);
-            return Err(Errno::EINVAL);
+            return Ok(memory_set.brk);
         } else if brk > ceil_to_page_size(current_brk) {
             // 需要分配页
             if current_brk == heap_bottom {
@@ -58,6 +59,8 @@ pub fn sys_brk(brk: usize) -> SyscallRet {
                     MapPermission::R | MapPermission::W | MapPermission::U,
                 );
             } else {
+                // 扩展堆空间
+                // 懒分配?
                 memory_set.remap_area_with_start_vpn(start_vpn, new_end_vpn);
             }
         } else if brk < floor_to_page_size(current_brk) {
@@ -75,6 +78,7 @@ pub fn sys_brk(brk: usize) -> SyscallRet {
 bitflags! {
     /// MMAP memeory protection
     /// 注意: PROT_WRITE不直接对应MapPermission的W, 因为对于私有文件映射
+    #[derive(Debug)]
     pub struct MmapProt: u32 {
         /// Readable
         const PROT_READ = 0x1;
@@ -119,6 +123,7 @@ bitflags! {
         const MAP_DENYWRITE = 0x800;
         const MAP_NORESERVE = 0x4000;
         const MAP_POPULATE = 0x8000;
+        const MAP_STACK = 0x20000;
     }
 }
 impl Debug for MmapFlags {
@@ -145,8 +150,7 @@ impl Debug for MmapFlags {
         write!(f, "{:?}", flags)
     }
 }
-
-// Todo: 别用unwarp
+#[no_mangle]
 pub fn sys_mmap(
     hint: usize,
     len: usize,
@@ -168,6 +172,7 @@ pub fn sys_mmap(
     );
     //处理参数
     let prot = MmapProt::from_bits(prot as u32).unwrap();
+    log::error!("[sys_mmap] prot is {:?}",prot);
     let flags = MmapFlags::from_bits(flags as u32).unwrap();
     let task = current_task();
     // 判断参数合法性, 包括
@@ -246,6 +251,10 @@ pub fn sys_mmap(
             let mmap_area = MapArea::new(vpn_range, MapType::Filebe, map_perm, Some(file), offset);
             memory_set.insert_map_area_lazily(mmap_area);
             // memory_set.insert_framed_area(vpn_range, map_perm);
+            log::error!(
+                "[sys_mmap] filebe return {:#x}",
+                vpn_range.get_start().0
+            );
             log::error!(
                 "[sys_mmap] file return {:#x}",
                 vpn_range.get_start().0 << PAGE_SIZE_BITS

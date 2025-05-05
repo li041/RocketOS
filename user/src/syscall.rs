@@ -14,6 +14,24 @@ const SYSCALL_GETPID: usize = 172;
 const SYSCALL_FORK: usize = 220;
 const SYSCALL_EXECVE: usize = 221;
 const SYSCALL_WAITPID: usize = 260;
+const SYSCALL_SOCKET: usize = 198;
+const SYSCALL_SOCKETPAIR: usize = 199;
+const SYSCALL_BIND: usize = 200;
+const SYSCALL_LISTEN: usize = 201;
+const SYSCALL_ACCEPT: usize = 202;
+const SYSCALL_ACCEPT4: usize = 288;
+const SYSCALL_CONNECT: usize = 203;
+const SYSCALL_GETSOCKNAME: usize = 204;
+const SYSCALL_GETPEERNAME: usize = 205;
+const SYSCALL_SENDTO: usize = 206;
+const SYSCALL_RECVFROM: usize = 207;
+const SYSCALL_SETSOCKOPT: usize = 208;
+const SYSCALL_GETSOCKOPT: usize = 209;
+const SYSCALL_SHUTDOWN: usize = 210;
+const SYSCALL_STRERROR:usize=300;
+const SYSCALL_PERROR:usize=301;
+const SYSCALL_MMAP: usize = 222;
+const SYSCALL_PSELECT: usize = 270;
 const SYSCALL_PIPE2: usize = 59;
 const SYSCALL_CHDIR: usize = 49;
 const SYSCALL_GETCWD: usize = 17;
@@ -33,6 +51,7 @@ fn syscall(id: usize, args: [usize; 6]) -> isize {
             in("x17") id
         );
     }
+    // e(ret)
     ret
 }
 #[cfg(target_arch = "loongarch64")]
@@ -144,4 +163,52 @@ pub fn sys_waitpid(pid: isize, exit_code: *mut i32) -> isize {
         SYSCALL_WAITPID,
         [pid as usize, exit_code as usize, 0, 0, 0, 0],
     )
+}
+
+pub fn sys_socket(domain:usize,flag:usize,protocol:usize)->isize {
+    syscall(SYSCALL_SOCKET, [domain,flag,protocol,0,0,0])
+}
+pub fn sys_bind(sockfd:usize,sockaddr:usize,socklen:usize)->isize {
+    syscall(SYSCALL_BIND, [sockfd,sockaddr,socklen,0,0,0])
+}
+pub fn sys_accept(sockfd:usize,sockaddr:usize,socklen:usize)->isize {
+    syscall(SYSCALL_ACCEPT, [sockfd,sockaddr,socklen,0,0,0])
+}
+pub fn sys_accept4(sockfd:usize,sockaddr:usize,socklen:usize)->isize {
+    syscall(SYSCALL_ACCEPT4, [sockfd,sockaddr,socklen,0,0,0])
+}
+pub fn sys_listen(sockfd:usize,backlog:usize)->isize {
+    syscall(SYSCALL_LISTEN, [sockfd,backlog,0,0,0,0])
+}
+pub fn sys_connect(sockfd:usize,sockaddr:usize,socklen:usize)->isize {
+    syscall(SYSCALL_CONNECT, [sockfd,sockaddr,socklen,0,0,0])
+}
+//sys_send
+pub fn sys_sendto(sockfd:usize,buffer: &[u8],len:usize,sockaddr:usize,socklen:usize,flag:usize)->isize {
+    syscall(SYSCALL_SENDTO, [sockfd,buffer.as_ptr() as usize,len,sockaddr,socklen,flag])
+}
+pub fn sys_recvfrom(sockfd:usize,buffer: &mut [u8],len:usize,flag:usize,sockaddr:usize,socklen:usize)->isize {
+    syscall(SYSCALL_RECVFROM, [sockfd,buffer.as_mut_ptr() as usize,len,flag,sockaddr,socklen])
+}
+//sys_recv
+pub fn sys_shutdown(sockfd:usize)->isize {
+    syscall(SYSCALL_SHUTDOWN, [sockfd,0,0,0,0,0])
+}
+pub fn sys_getsockname(sockfd:usize,sockaddr:usize,socklen:usize)->isize {
+    syscall(SYSCALL_GETSOCKNAME, [sockfd,sockaddr,socklen,0,0,0])
+}
+pub fn sys_getpeername(sockfd:usize,sockaddr:usize,socklen:usize)->isize {
+    syscall(SYSCALL_GETPEERNAME, [sockfd,sockaddr,socklen,0,0,0])
+}
+pub fn sys_clock_gettime(clocktype:usize,ts:usize)->isize {
+    syscall(SYSCALL_GET_TIME, [clocktype,ts,0,0,0,0])
+}
+// pub fn sys_shutdown(sockfd:usize)->isize {
+//     syscall(, args)
+// }
+pub fn sys_mmap(addr:usize,len:usize,prot:usize,flags:usize,fd:usize,off:usize)->isize {
+    syscall(SYSCALL_MMAP,[addr,len,prot,flags,fd,off])
+}
+pub fn sys_pselect(nfds:usize,readfds:usize,writefds:usize,exceptfds:usize,timeout:usize,sigmask:usize)->isize {
+    syscall(SYSCALL_PSELECT,[nfds,readfds,writefds,exceptfds,timeout,sigmask])
 }

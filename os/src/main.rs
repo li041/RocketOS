@@ -3,6 +3,8 @@
 #![feature(map_try_insert)]
 #![feature(alloc_error_handler)]
 #![feature(negative_impls)]
+#![feature(ip_from)]
+#![feature(sync_unsafe_cell)]
 
 extern crate alloc;
 
@@ -17,6 +19,29 @@ pub mod mutex;
 pub mod timer;
 // mod sched;
 mod arch;
+mod net;
+// mod errno;
+
+// #[cfg(target_arch = "riscv64")]
+// mod drivers;
+
+// #[cfg(target_arch = "riscv64")]
+// mod ext4;
+
+// #[cfg(target_arch = "riscv64")]
+// mod fat32;
+
+// #[cfg(target_arch = "riscv64")]
+// mod fs;
+
+// #[cfg(target_arch = "riscv64")]
+// // 目前只支持riscv64
+// mod syscall;
+
+// #[cfg(target_arch = "riscv64")]
+// mod task;
+
+pub mod config;
 mod signal;
 
 mod drivers;
@@ -92,7 +117,6 @@ pub fn rust_main(_hart_id: usize, dtb_address: usize) -> ! {
             core::mem::size_of::<TaskContext>()
         )
     }
-
     clear_bss();
     println!("hello world!");
     logging::init();
@@ -101,7 +125,7 @@ pub fn rust_main(_hart_id: usize, dtb_address: usize) -> ! {
     let seconds = read_rtc() / NANOS_PER_SEC;
     println!("rtc time: {:?}", seconds);
     println!("data time: {:?}", seconds_to_beijing_datetime(seconds));
-
+    drivers::net::init_net_device(dtb_address);
     // 允许S mode访问U mode的页面
     //  S mode下会访问User的堆
     #[cfg(target_arch = "riscv64")]

@@ -5,7 +5,9 @@ use super::{
     id::{tid_alloc, TidAddress, TidHandle},
     kstack::{get_stack_top_by_sp, kstack_alloc, KernelStack},
     manager::unregister_task,
-    remove_task, String, Tid,
+    remove_task,
+    rusage::TimeStat,
+    String, Tid,
 };
 use crate::{
     arch::{
@@ -34,11 +36,11 @@ use crate::{
     task::{
         self, add_task,
         context::write_task_cx,
-        dump_scheduler, dump_task_queue,
+        dump_scheduler, dump_wait_queue,
         manager::{cancel_wait_alarm, delete_wait, register_task},
         wakeup, INITPROC,
     },
-    timer::ITimerVal,
+    timer::{ITimerVal, TimeVal},
 };
 use alloc::{
     collections::btree_map::BTreeMap,
@@ -48,16 +50,22 @@ use alloc::{
 };
 use bitflags::bitflags;
 use core::{
-    assert_ne, mem,
+    assert_ne,
+    cell::{SyncUnsafeCell, UnsafeCell},
+    mem,
     sync::atomic::{AtomicI32, AtomicUsize},
 };
 use spin::{Mutex, RwLock};
 
 pub const INIT_PROC_PID: usize = 0;
+pub const RLIM_NLIMITS: usize = 16;
 
 extern "C" {
     fn strampoline();
     fn etrampoline();
+    fn _stdata();
+    fn _etdata();
+    fn _etbss();
 }
 
 /// tp寄存器指向Task结构体
@@ -74,10 +82,12 @@ pub struct Task {
     tgid: AtomicUsize,                                      // 线程组id
     tid_address: SpinNoIrqLock<TidAddress>,                 // 线程id地址
     status: SpinNoIrqLock<TaskStatus>,                      // 任务状态
+    time_stat: SyncUnsafeCell<TimeStat>,                    // 任务时间统计
     parent: Arc<SpinNoIrqLock<Option<Weak<Task>>>>,         // 父任务
     children: Arc<SpinNoIrqLock<BTreeMap<Tid, Arc<Task>>>>, // 子任务
     thread_group: Arc<SpinNoIrqLock<ThreadGroup>>,          // 线程组
     exit_code: AtomicI32,                                   // 退出码
+    exe_path: Arc<RwLock<String>>,                          // 执行路径
 
     // 内存管理
     // 包括System V shm管理
@@ -95,9 +105,13 @@ pub struct Task {
     sig_handler: Arc<SpinNoIrqLock<SigHandler>>, // 信号处理函数
     sig_stack: SpinNoIrqLock<Option<SignalStack>>, // 额外信号栈
     itimerval: Arc<RwLock<[ITimerVal; 3]>>,      // 定时器
+    rlimit: Arc<RwLock<[RLimit; 16]>>,           // 资源限制
                                                  // Todo: 进程组
                                                  // ToDo：运行时间(调度相关)
                                                  // ToDo: 多核启动
+    // errno:SpinNoIrqLock<SysErrno>, // 错误码
+    //tls
+    // tlsarea:TlsArea,
 }
 
 impl core::fmt::Debug for Task {
@@ -107,6 +121,10 @@ impl core::fmt::Debug for Task {
             .field("tgid", &self.tgid())
             .finish()
     }
+}
+unsafe impl Send for Task {
+}
+unsafe impl Sync for Task {
 }
 
 impl Drop for Task {
@@ -124,10 +142,12 @@ impl Task {
             tgid: AtomicUsize::new(0),
             tid_address: SpinNoIrqLock::new(TidAddress::new()),
             status: SpinNoIrqLock::new(TaskStatus::Ready),
+            time_stat: SyncUnsafeCell::new(TimeStat::default()),
             parent: Arc::new(SpinNoIrqLock::new(None)),
             children: Arc::new(SpinNoIrqLock::new(BTreeMap::new())),
             thread_group: Arc::new(SpinNoIrqLock::new(ThreadGroup::new())),
             exit_code: AtomicI32::new(0),
+            exe_path: Arc::new(RwLock::new(String::new())),
             memory_set: Arc::new(RwLock::new(MemorySet::new_bare())),
             robust_list_head: AtomicUsize::new(0),
             fd_table: FdTable::new(),
@@ -137,6 +157,7 @@ impl Task {
             sig_handler: Arc::new(SpinNoIrqLock::new(SigHandler::new())),
             sig_stack: SpinNoIrqLock::new(None),
             itimerval: Arc::new(RwLock::new([ITimerVal::default(); 3])),
+            rlimit: Arc::new(RwLock::new([RLimit::default(); RLIM_NLIMITS])),
         }
     }
 
@@ -155,6 +176,11 @@ impl Task {
         // Task_context
         kstack -= core::mem::size_of::<TaskContext>();
         let task_cx_ptr = kstack as *mut TaskContext;
+        // let tlsarea=TlsArea::alloc();
+        // let tls_page=VirtAddr::from(tlsarea.tls_ptr() as usize);s
+        //获得tlsarea
+        //initproc不获得的tp,主要设置后面user的tp
+        // let tlsarea=TlsArea::init();
         // 创建进程实体
         let task = Arc::new(Task {
             kstack: KernelStack(kstack),
@@ -162,11 +188,13 @@ impl Task {
             tgid,
             tid_address: SpinNoIrqLock::new(TidAddress::new()),
             status: SpinNoIrqLock::new(TaskStatus::Ready),
+            time_stat: SyncUnsafeCell::new(TimeStat::default()),
             parent: Arc::new(SpinNoIrqLock::new(None)),
             // 注：children结构中保留了对任务的Arc引用
             children: Arc::new(SpinNoIrqLock::new(BTreeMap::new())),
             thread_group: Arc::new(SpinNoIrqLock::new(ThreadGroup::new())),
             exit_code: AtomicI32::new(0),
+            exe_path: Arc::new(RwLock::new(String::from("/initproc"))),
             memory_set: Arc::new(RwLock::new(memory_set)),
             robust_list_head: AtomicUsize::new(0),
             fd_table: FdTable::new(),
@@ -176,6 +204,7 @@ impl Task {
             sig_handler: Arc::new(SpinNoIrqLock::new(SigHandler::new())),
             sig_stack: SpinNoIrqLock::new(None),
             itimerval: Arc::new(RwLock::new([ITimerVal::default(); 3])),
+            rlimit: Arc::new(RwLock::new([RLimit::default(); RLIM_NLIMITS])),
         });
         // 向线程组中添加该进程
         task.thread_group
@@ -187,7 +216,9 @@ impl Task {
         let task_ptr = Arc::as_ptr(&task) as usize;
         trap_context.set_tp(task_ptr);
         trap_context.set_kernel_tp(task_ptr);
+
         log::info!("[Initproc] Init-tp:\t{:x}", task_ptr);
+        //访问tls需要偏移
         let task_context = TaskContext::app_init_task_context(task_ptr, pgdl_ppn);
         // 将TrapContext和TaskContext压入内核栈
         unsafe {
@@ -204,6 +235,7 @@ impl Task {
         let tid = tid_alloc();
         let tid_address = SpinNoIrqLock::new(TidAddress::new());
         let exit_code = AtomicI32::new(0);
+        let exe_path;
         let status = SpinNoIrqLock::new(TaskStatus::Ready);
         let tgid;
         let mut kstack;
@@ -218,6 +250,7 @@ impl Task {
         let sig_handler;
         let sig_pending;
         let sig_stack;
+        let rlimit;
         log::info!("[kernel_clone] task{} ready to clone ...", self.tid());
 
         // 是否与父进程共享信号处理器
@@ -229,7 +262,8 @@ impl Task {
                 self.op_sig_handler_mut(|handler| handler.clone()),
             ))
         }
-
+        //需要说明当创建新进程时，子进程应当保留父进程的tls area除非用户有mmap
+        // tlsarea=self.tlsarea.clone();
         // 创建线程
         if flags.contains(CloneFlags::CLONE_THREAD) {
             log::warn!("[kernel_clone] child task{} is a thread", tid);
@@ -249,6 +283,8 @@ impl Task {
             children = self.children.clone();
             thread_group = self.thread_group.clone();
             itimerval = self.itimerval.clone();
+            exe_path = self.exe_path.clone();
+            rlimit = self.rlimit.clone();
         }
         // 创建进程
         else {
@@ -258,6 +294,8 @@ impl Task {
             children = Arc::new(SpinNoIrqLock::new(BTreeMap::new()));
             thread_group = Arc::new(SpinNoIrqLock::new(ThreadGroup::new()));
             itimerval = Arc::new(RwLock::new([ITimerVal::default(); 3]));
+            exe_path = Arc::new(RwLock::new(String::new()));
+            rlimit = Arc::new(RwLock::new([RLimit::default(); RLIM_NLIMITS]));
         }
 
         if flags.contains(CloneFlags::CLONE_VM) {
@@ -297,6 +335,7 @@ impl Task {
         sig_stack = SpinNoIrqLock::new(None);
         let tid = RwLock::new(tid);
         let robust_list_head = AtomicUsize::new(0);
+        let time_stat = SyncUnsafeCell::new(TimeStat::default());
         // 创建新任务
         let task = Arc::new(Self {
             kstack,
@@ -304,9 +343,11 @@ impl Task {
             tgid,
             tid_address,
             status,
+            time_stat,
             parent,
             children,
             exit_code,
+            exe_path,
             thread_group,
             memory_set,
             robust_list_head,
@@ -317,6 +358,7 @@ impl Task {
             sig_pending,
             sig_stack,
             itimerval,
+            rlimit,
         });
         log::trace!("[kernel_clone] child task{} created", task.tid());
 
@@ -338,6 +380,7 @@ impl Task {
 
         // 更新子进程的trap_cx
         let mut trap_cx = get_trap_context(&task);
+        log::error!("[kernel_clone] user_sp: {:#x}", trap_cx.get_sp());
         if ustack_ptr != 0 {
             // ToDo: 检验用户栈指针
             trap_cx.set_sp(ustack_ptr);
@@ -346,6 +389,7 @@ impl Task {
         // 设定子任务返回值为0，令kernel_tp保存该任务结构
         trap_cx.set_kernel_tp(Arc::as_ptr(&task) as usize);
         trap_cx.set_a0(0);
+
         save_trap_context(&task, trap_cx);
 
         // 在内核栈中加入task_cx
@@ -383,23 +427,8 @@ impl Task {
             MemorySet::from_elf(elf_data.to_vec(), &mut args_vec);
         // 更新页表
         memory_set.activate();
-
-        #[cfg(target_arch = "loongarch64")]
-        memory_set.push_with_offset(
-            MapArea::new(
-                VPNRange::new(
-                    VirtAddr::from(strampoline as usize).floor(),
-                    VirtAddr::from(etrampoline as usize).ceil(),
-                ),
-                MapType::Linear,
-                MapPermission::R | MapPermission::X | MapPermission::U,
-                None,
-                0,
-            ),
-            None,
-            0,
-        );
-
+        // let pos = 0x30_0000_0000 as usize;
+        // unsafe { if need_dl {log::error!("[sys_mmap] pos : {:?}", core::slice::from_raw_parts_mut(pos as *mut u8, 64));} }
         // 初始化用户栈, 压入args和envs
         let argc = args_vec.len();
         let (argv_base, envp_base, auxv_base, ustack_top) =
@@ -477,6 +506,7 @@ impl Task {
 
     pub fn kernel_execve_lazily(
         self: &Arc<Self>,
+        exe_path: String,
         elf_file: Arc<dyn FileOp>,
         elf_data: &[u8],
         mut args_vec: Vec<String>,
@@ -484,10 +514,12 @@ impl Task {
     ) {
         log::info!("[kernel_execve] task{} do execve ...", self.tid());
         // 创建地址空间
-        let (mut memory_set, _satp, ustack_top, entry_point, aux_vec, tls_ptr) =
+        let (mut memory_set, _satp, ustack_top, entry_point, aux_vec) =
             MemorySet::from_elf_lazily(elf_file, elf_data.to_vec(), &mut args_vec);
         // 更新页表
         memory_set.activate();
+        // 更新exe_path
+        *self.exe_path.write() = exe_path;
 
         #[cfg(target_arch = "loongarch64")]
         memory_set.push_with_offset(
@@ -535,11 +567,6 @@ impl Task {
             envp_base,
             auxv_base,
         );
-        // 设置tls
-        if let Some(tls_ptr) = tls_ptr {
-            log::error!("[kernel_execve] task{} tls_ptr: {:x}", self.tid(), tls_ptr);
-            trap_cx.set_tp(tls_ptr);
-        }
         save_trap_context(&self, trap_cx);
         log::trace!("[kernel_execve] task{} trap_cx updated", self.tid());
         // 重建线程组
@@ -666,6 +693,18 @@ impl Task {
         }
         dst_trap_cx_ptr as usize
     }
+
+    pub fn process_us_time(&self) -> (TimeVal, TimeVal) {
+        self.op_thread_group(|tg| {
+            tg.iter()
+                .map(|thread| thread.time_stat().thread_us_time())
+                .reduce(|(acc_utime, acc_stime), (utime, stime)| {
+                    (acc_utime + utime, acc_stime + stime)
+                })
+                .unwrap()
+        })
+    }
+
     pub fn get_rlimit(&self, resource: Resource) -> Result<RLimit, &'static str> {
         match resource {
             Resource::STACK => {
@@ -680,7 +719,10 @@ impl Task {
                 let rlim = self.fd_table().get_rlimit();
                 Ok(rlim)
             }
-            _ => Err("not supported"),
+            _ => {
+                let rlim = self.op_rlimit(|rlimit| rlimit[resource as usize]);
+                Ok(rlim)
+            }
         }
     }
     pub fn set_rlimit(&self, resource: Resource, rlim: &RLimit) -> Result<(), &'static str> {
@@ -693,7 +735,13 @@ impl Task {
                 log::error!("[set_rlimit] Fake stack");
                 Ok(())
             }
-            _ => Err("not supported"),
+            _ => {
+                self.op_rlimit_mut(|rlimit| {
+                    rlimit[resource as usize].rlim_cur = rlim.rlim_cur;
+                    rlimit[resource as usize].rlim_max = rlim.rlim_max;
+                });
+                Ok(())
+            }
         }
     }
 
@@ -715,6 +763,9 @@ impl Task {
     pub fn status(&self) -> TaskStatus {
         *self.status.lock()
     }
+    pub fn time_stat(&self) -> &mut TimeStat {
+        unsafe { &mut *self.time_stat.get() }
+    }
     pub fn root(&self) -> Arc<Path> {
         self.root.lock().clone()
     }
@@ -723,6 +774,9 @@ impl Task {
     }
     pub fn exit_code(&self) -> i32 {
         self.exit_code.load(core::sync::atomic::Ordering::SeqCst)
+    }
+    pub fn exe_path(&self) -> String {
+        self.exe_path.read().clone()
     }
     pub fn memory_set(&self) -> Arc<RwLock<MemorySet>> {
         self.memory_set.clone()
@@ -809,6 +863,12 @@ impl Task {
     pub fn op_itimerval_mut<T>(&self, f: impl FnOnce(&mut [ITimerVal; 3]) -> T) -> T {
         f(&mut self.itimerval.write())
     }
+    pub fn op_rlimit<T>(&self, f: impl FnOnce(&[RLimit; RLIM_NLIMITS]) -> T) -> T {
+        f(&self.rlimit.read())
+    }
+    pub fn op_rlimit_mut<T>(&self, f: impl FnOnce(&mut [RLimit; RLIM_NLIMITS]) -> T) -> T {
+        f(&mut self.rlimit.write())
+    }
     /******************************** 任务状态判断 **************************************/
     pub fn is_ready(&self) -> bool {
         self.status() == TaskStatus::Ready
@@ -837,6 +897,12 @@ impl Task {
     pub fn set_zombie(&self) {
         *self.status.lock() = TaskStatus::Zombie;
     }
+    // pub fn set_errno(&self,errno:SysErrno){
+    //     *self.errno.lock()=errno;
+    // }
+    // pub fn get_errno(&self)->SysErrno{
+    //     *self.errno.lock()
+    // }
 }
 
 /****************************** 辅助函数 ****************************************/
@@ -876,9 +942,6 @@ pub fn kernel_exit(task: Arc<Task>, exit_code: i32) {
         }
     }
 
-    // 从线程组中移除
-    task.op_thread_group_mut(|tg| tg.remove(task.tid()));
-
     // 从调度队列中移除（包括阻塞队列）
     delete_wait(task.tid());
     remove_task(task.tid());
@@ -898,6 +961,10 @@ pub fn kernel_exit(task: Arc<Task>, exit_code: i32) {
         // 如果是主线程退出，从线程直接全部退出
         task.close_thread();
     }
+
+    // 从线程组中移除当前任务
+    task.op_thread_group_mut(|tg| tg.remove(task.tid()));
+
     // 设置当前任务为僵尸态
     task.set_zombie();
     log::warn!("[kernel_exit] Task{} become zombie", task.tid());

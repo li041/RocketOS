@@ -25,7 +25,6 @@ SECTIONS
         *(.rodata .rodata.*)
         *(.srodata .srodata.*)
     }
-
     . = ALIGN(4K);
     erodata = .;
     sdata = .;
@@ -34,8 +33,22 @@ SECTIONS
         *(.sdata .sdata.*)
     }
 
+    .tdata : ALIGN(0x10) {
+        _stdata = .;
+        *(.tdata .tdata.*)
+        _etdata = .;
+    }
+
+    .tbss : ALIGN(0x10) {
+        _stbss = .;
+        *(.tbss .tbss.*)
+        *(.tcommon)
+        _etbss = .;
+    }
+
     . = ALIGN(4K);
     edata = .;
+    
     sbss_with_stack = .;
     .bss : {
         *(.bss.stack)

@@ -72,11 +72,11 @@ pub fn schedule() {
     if let Some(next_task) = fetch_task() {
         let next_task_kernel_stack = next_task.kstack();
         {
-            log::debug!(
+            log::error!(
             "**********************************  task {} end **********************************",
             current_task().tid()
         );
-            log::debug!(
+            log::error!(
             "**********************************  task {} start **********************************",
             next_task.tid()
         );
@@ -114,28 +114,36 @@ pub fn schedule() {
                 break;
             }
             if !handle_timeout().is_empty() {
-                // 超时任务已唤醒
-                let next_task = fetch_task().unwrap();
-                let next_task_kernel_stack = next_task.kstack();
-                {
-                    log::debug!(
-                    "**********************************  task {} end **********************************",
-                    current_task().tid()
-                );
-                    log::debug!(
-                    "**********************************  task {} start **********************************",
-                    next_task.tid()
-                );
-                    // check_task_context_in_kernel_stack(next_task_kernel_stack);
-                    // 切换Processor的current
-                    crate::task::processor::PROCESSOR
-                        .write()
-                        .switch_to(next_task);
+                // 计时器超时
+                if let Some(next_task) = fetch_task() {
+                    let next_task_kernel_stack = next_task.kstack();
+                    {
+                        log::debug!(
+                            "**********************************  task {} end **********************************",
+                            current_task().tid()
+                        );
+                        log::debug!(
+                            "**********************************  task {} start **********************************",
+                            next_task.tid()
+                        );
+                        if current_task().tid() == next_task.tid() {
+                            // 不能从自己切换到自己
+                            break;
+                        }
+                        // check_task_context_in_kernel_stack(next_task_kernel_stack);
+                        // 切换Processor的current
+                        crate::task::processor::PROCESSOR
+                            .write()
+                            .switch_to(next_task);
+                    }
+                    unsafe {
+                        switch::__switch(next_task_kernel_stack);
+                    }
+                    break;
+                } else {
+                    // 计时器超时, 但是没有就绪任务, 继续执行当前任务
+                    break;
                 }
-                unsafe {
-                    switch::__switch(next_task_kernel_stack);
-                }
-                break;
             }
         }
     }
@@ -152,11 +160,11 @@ pub fn yield_current_task() {
         task.set_ready();
         // 将当前任务加入就绪队列
         add_task(task);
-        log::debug!(
+        log::error!(
             "**********************************  task {} end **********************************",
             current_task().tid()
         );
-        log::debug!(
+        log::error!(
             "**********************************  task {} start **********************************",
             next_task.tid()
         );

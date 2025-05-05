@@ -1,16 +1,16 @@
 use crate::{
-    timer::TimeSpec,
     drivers::block::block_cache::get_block_cache,
     ext4,
     fs::{
         dentry::{Dentry, DentryFlags, LinuxDirent64},
-        dev::{null::NullInode, rtc::RtcInode, tty::TtyInode},
+        dev::{null::NullInode, rtc::RtcInode, tty::TtyInode, urandom::UrandomInode},
         inode::InodeOp,
         kstat::Kstat,
         uapi::{DevT, RenameFlags},
     },
     mm::Page,
     syscall::errno::{Errno, SyscallRet},
+    timer::TimeSpec,
 };
 use alloc::vec;
 use alloc::{
@@ -327,7 +327,7 @@ impl InodeOp for Ext4Inode {
             .ext4_fs
             .upgrade()
             .unwrap()
-            .alloc_block(self.block_device.clone());
+            .alloc_block(self.block_device.clone(), 1);
         // 初始化目录的第一个块, 添加`.`, `..`
         let mut buffer = vec![0u8; ext4_block_size];
         Ext4DirContentWE::new(&mut buffer).init_dot_dotdot(
@@ -428,6 +428,14 @@ impl InodeOp for Ext4Inode {
                 self.add_entry(dentry.clone(), new_inode_num as u32, EXT4_DT_CHR);
                 // 关联到dentry
                 dentry.inner.lock().inode = Some(rtc_inode);
+            }
+            (1,9)=>{
+                log::error!("urandom absolute_path: {:?}", dentry.absolute_path);
+                assert!(dentry.absolute_path=="/dev/urandom");
+                let new_inode_num=self.ext4_fs.upgrade().unwrap().alloc_inode(self.block_device.clone(), true);
+                let urandom_inode=UrandomInode::new(new_inode_num,mode,1,9);
+                self.add_entry(dentry.clone(), new_inode_num as u32, EXT4_DT_CHR);
+                dentry.inner.lock().inode=Some(urandom_inode);
             }
             _ => panic!("Unsupported device: major: {}, minor: {}", major, minor),
         }

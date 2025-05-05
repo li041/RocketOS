@@ -1,3 +1,13 @@
+/*
+ * @Author: Peter/peterluck2021@163.com
+ * @Date: 2025-05-24 16:51:15
+ * @LastEditors: Peter/peterluck2021@163.com
+ * @LastEditTime: 2025-05-24 16:56:46
+ * @FilePath: /RocketOS_netperfright/os/src/arch/riscv64/timer.rs
+ * @Description: 
+ * 
+ * Copyright (c) 2025 by peterluck2021@163.com, All Rights Reserved. 
+ */
 use core::{
     cmp::Ordering,
     fmt::Debug,
@@ -7,8 +17,9 @@ use core::{
 use crate::{
     arch::{boards::qemu::CLOCK_FREQ, sbi::set_timer},
     mm::{VirtAddr, KERNEL_SPACE},
-    timer::{StatxTimeStamp, TimeSpec, MSEC_PER_SEC, TICKS_PER_SEC},
+    timer::{StatxTimeStamp, TimeSpec, TimeVal, MSEC_PER_SEC, TICKS_PER_SEC},
 };
+use num_enum::TryFromPrimitive;
 use riscv::register::time;
 
 use super::config::KERNEL_BASE;
@@ -34,6 +45,25 @@ impl TimeSpec {
         let sec = nanos / 1_000_000_000;
         let nsec = nanos % 1_000_000_000;
         TimeSpec { sec, nsec }
+    }
+}
+
+impl TimeVal {
+    pub fn new_machine_time() -> Self {
+        // new a time spec with machine time
+        let current_time = get_time_ms();
+        Self {
+            sec: (current_time / 1000) as usize,
+            usec: (current_time % 1000) as usize,
+        }
+    }
+    pub fn new_wall_time() -> Self {
+        // new a time spec with machine time
+        let current_time = read_rtc();
+        Self {
+            sec: (current_time / NANOS_PER_SEC) as usize,
+            usec: ((current_time % NANOS_PER_SEC) / 1000) as usize,
+        }
     }
 }
 

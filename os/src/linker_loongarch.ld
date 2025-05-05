@@ -10,9 +10,16 @@ SECTIONS
         *(.text.entry)
         . = ALIGN(4K);
         strampoline = .;
+<<<<<<< HEAD
         KEEP(*(.text.trampoline));
         . = ALIGN(4K);
         etrampoline = .;
+=======
+        *(.text.trampoline);
+        . = ALIGN(4K);
+        ssignaltrampoline = .;
+        KEEP(*(.text.signaltrampoline));
+>>>>>>> 74e48e6 (fix some error)
         . = ALIGN(4K);
         srfill = .;
         KEEP(*(.text.__rfill));

@@ -1,3 +1,13 @@
+/*
+ * @Author: Peter/peterluck2021@163.com
+ * @Date: 2025-04-16 21:36:51
+ * @LastEditors: Peter/peterluck2021@163.com
+ * @LastEditTime: 2025-05-24 17:07:35
+ * @FilePath: /RocketOS_netperfright/os/src/fs/pipe.rs
+ * @Description: 
+ * 
+ * Copyright (c) 2025 by peterluck2021@163.com, All Rights Reserved. 
+ */
 use alloc::boxed::Box;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
@@ -7,11 +17,12 @@ use core::sync::atomic::AtomicUsize;
 use spin::{Mutex, RwLock};
 
 use crate::ext4::inode::{Ext4InodeDisk, S_IFIFO};
+use crate::signal::{Sig, SigInfo};
 use crate::syscall::errno::{Errno, SyscallRet};
 use crate::task::{current_task, wait, wakeup, yield_current_task, Tid};
 use crate::timer::TimeSpec;
 
-use super::file::FileOp;
+use super::file::{FileOp, OpenFlags};
 use super::inode::InodeOp;
 use super::kstat::Kstat;
 
@@ -93,26 +104,29 @@ pub struct Pipe {
     readable: bool,
     writable: bool,
     buffer: Arc<Mutex<PipeRingBuffer>>,
+    flags: OpenFlags,
 }
 
 impl Pipe {
-    pub fn read_end_with_buffer(buffer: Arc<Mutex<PipeRingBuffer>>) -> Self {
+    pub fn read_end_with_buffer(buffer: Arc<Mutex<PipeRingBuffer>>, flags: OpenFlags) -> Self {
         Self {
             readable: true,
             writable: false,
             buffer,
+            flags,
         }
     }
-    pub fn write_end_with_buffer(buffer: Arc<Mutex<PipeRingBuffer>>) -> Self {
+    pub fn write_end_with_buffer(buffer: Arc<Mutex<PipeRingBuffer>>, flags: OpenFlags) -> Self {
         Self {
             readable: false,
             writable: true,
             buffer,
+            flags,
         }
     }
 }
 
-pub const RING_DEFAULT_BUFFER_SIZE: usize = 4096;
+pub const RING_DEFAULT_BUFFER_SIZE: usize = 65536;
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 enum RingBufferStatus {
@@ -230,12 +244,12 @@ impl PipeRingBuffer {
 }
 
 /// Return (read_end, write_end)
-pub fn make_pipe() -> (Arc<Pipe>, Arc<Pipe>) {
+pub fn make_pipe(flags: OpenFlags) -> (Arc<Pipe>, Arc<Pipe>) {
     log::trace!("[make_pipe]");
     let buffer = Arc::new(Mutex::new(PipeRingBuffer::new()));
     // buffer仅剩两个强引用，这样读写端关闭后就会被释放
-    let read_end = Arc::new(Pipe::read_end_with_buffer(buffer.clone()));
-    let write_end = Arc::new(Pipe::write_end_with_buffer(buffer.clone()));
+    let read_end = Arc::new(Pipe::read_end_with_buffer(buffer.clone(), flags));
+    let write_end = Arc::new(Pipe::write_end_with_buffer(buffer.clone(), flags));
     buffer.lock().set_write_end(&write_end);
     buffer.lock().set_read_end(&read_end);
     (read_end, write_end)
@@ -245,7 +259,7 @@ impl FileOp for Pipe {
     fn as_any(&self) -> &dyn core::any::Any {
         self
     }
-    fn read<'a>(&'a self, buf: &'a mut [u8]) -> usize {
+    fn read<'a>(&'a self, buf: &'a mut [u8]) -> SyscallRet {
         debug_assert!(self.readable);
         let mut read_size = 0usize;
         let mut buffer;
@@ -255,13 +269,16 @@ impl FileOp for Pipe {
             if buffer.status == RingBufferStatus::EMPTY {
                 if buffer.all_write_ends_closed() {
                     log::error!("all write ends closed");
-                    return read_size;
+                    return Ok(read_size);
                 }
                 // wait for data, 注意释放锁
                 buffer.set_waiter(current_task().tid());
                 drop(buffer);
                 // log::error!("[Pipe::read] set waiter: {}", current_task().tid());
-                wait();
+                if wait() == -1 {
+                    // log::error!("[Pipe::read] wait failed");
+                    return Err(Errno::ERESTARTSYS);
+                }
                 continue;
             }
             while read_size < buf.len() {
@@ -277,29 +294,42 @@ impl FileOp for Pipe {
                 read_size += read_bytes;
                 if buffer.head == buffer.tail {
                     buffer.status = RingBufferStatus::EMPTY;
-                    return read_size;
+                    return Ok(read_size);
                 }
             }
             buffer.status = RingBufferStatus::NORMAL;
-            return read_size;
+            return Ok(read_size);
         }
     }
-    fn write<'a>(&'a self, buf: &'a [u8]) -> usize {
+    fn write<'a>(&'a self, buf: &'a [u8]) -> SyscallRet {
         assert!(self.writable);
         let mut write_size = 0;
         let mut buffer;
         loop {
             buffer = self.buffer.lock();
             core::hint::black_box(&buffer);
+            // 检查读端是否关闭
+            if buffer.all_read_ends_closed() {
+                log::error!("[Pipe::write] all read ends closed");
+                current_task().receive_siginfo(
+                    SigInfo::new(
+                        Sig::SIGPIPE.raw(),
+                        SigInfo::KERNEL,
+                        crate::signal::SiField::None,
+                    ),
+                    false,
+                );
+                return Err(Errno::EPIPE);
+            }
             if buffer.status == RingBufferStatus::FULL {
-                if buffer.all_read_ends_closed() {
-                    return write_size;
-                }
                 // wait for space, 注意释放锁
                 buffer.set_waiter(current_task().tid());
                 drop(buffer);
                 // yield_current_task();
-                wait();
+                if wait() == -1 {
+                    // log::error!("[Pipe::write] wait failed");
+                    return Err(Errno::ERESTARTSYS);
+                }
                 continue;
             }
             while write_size < buf.len() {
@@ -315,11 +345,11 @@ impl FileOp for Pipe {
                 write_size += write_bytes;
                 if buffer.head == buffer.tail {
                     buffer.status = RingBufferStatus::FULL;
-                    return write_size;
+                    return Ok(write_size);
                 }
             }
             buffer.status = RingBufferStatus::NORMAL;
-            return write_size;
+            return Ok(write_size);
         }
     }
     fn readable(&self) -> bool {
@@ -357,6 +387,9 @@ impl FileOp for Pipe {
     }
     fn get_inode(&self) -> Arc<dyn InodeOp> {
         PIPEINODE.clone()
+    }
+    fn get_flags(&self) -> OpenFlags {
+        self.flags
     }
 }
 

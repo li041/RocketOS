@@ -1,3 +1,13 @@
+/*
+ * @Author: Peter/peterluck2021@163.com
+ * @Date: 2025-04-16 21:36:51
+ * @LastEditors: Peter/peterluck2021@163.com
+ * @LastEditTime: 2025-05-24 17:32:07
+ * @FilePath: /RocketOS_netperfright/os/src/fs/mod.rs
+ * @Description: 
+ * 
+ * Copyright (c) 2025 by peterluck2021@163.com, All Rights Reserved. 
+ */
 //! File system in os
 use core::cell::OnceCell;
 
@@ -22,6 +32,7 @@ pub use old::{FileMeta, FileOld};
 pub mod dentry;
 pub mod dev;
 pub mod etc;
+pub mod fd_set;
 pub mod fdtable;
 pub mod file;
 pub mod inode;

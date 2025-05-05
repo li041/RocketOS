@@ -14,9 +14,10 @@ use errno::{Errno, SyscallRet};
 use fs::{
     sys_chdir, sys_close, sys_dup, sys_dup3, sys_faccessat, sys_fchmodat, sys_fchownat, sys_fcntl,
     sys_fstat, sys_fstatat, sys_fsync, sys_ftruncate, sys_getcwd, sys_getdents64, sys_ioctl,
-    sys_linkat, sys_lseek, sys_mkdirat, sys_mknodat, sys_mount, sys_openat, sys_pipe2, sys_ppoll,
-    sys_pread, sys_pwrite, sys_read, sys_readv, sys_renameat2, sys_sendfile, sys_statfs, sys_statx,
-    sys_sync, sys_umount2, sys_unlinkat, sys_utimensat, sys_write, sys_writev,
+    sys_linkat, sys_lseek, sys_mkdirat, sys_mknodat, sys_mount, sys_msync, sys_openat, sys_pipe2,
+    sys_ppoll, sys_pread, sys_pselect6, sys_pwrite, sys_read, sys_readlinkat, sys_readv,
+    sys_renameat2, sys_sendfile, sys_statfs, sys_statx, sys_sync, sys_umount2, sys_unlinkat,
+    sys_utimensat, sys_write, sys_writev,
 };
 use mm::{
     sys_brk, sys_madvise, sys_mmap, sys_mprotect, sys_munmap, sys_shmat, sys_shmctl, sys_shmdt,
@@ -26,12 +27,13 @@ use signal::{
     sys_kill, sys_rt_sigaction, sys_rt_sigpending, sys_rt_sigprocmask, sys_rt_sigreturn,
     sys_rt_sigsuspend, sys_rt_sigtimedwait, sys_tgkill, sys_tkill,
 };
+use net::{syscall_accept, syscall_bind, syscall_connect, syscall_getpeername, syscall_getsocketopt, syscall_getsockname, syscall_listen, syscall_recv, syscall_send, syscall_setsocketopt, syscall_shutdown, syscall_socket};
 use task::{
-    sys_clock_nansleep, sys_clone, sys_execve, sys_exit_group, sys_futex, sys_get_time,
-    sys_getegid, sys_geteuid, sys_getgid, sys_getpid, sys_getppid, sys_gettid, sys_getuid,
-    sys_nanosleep, sys_set_tid_address, sys_setpgid, sys_waitpid, sys_yield,
+    sys_clock_nansleep, sys_clone, sys_execve, sys_exit_group, sys_futex, sys_get_time, sys_getegid, sys_geteuid, sys_getgid, sys_getpgid, sys_getpid, sys_getppid, sys_gettid, sys_getuid, sys_nanosleep, sys_set_tid_address, sys_setpgid, sys_setsid, sys_waitpid, sys_yield
 };
-use util::{sys_clock_gettime, sys_prlimit64, sys_setitimer, sys_syslog, sys_times, sys_uname};
+use util::{
+    sys_clock_gettime, sys_getrusage, sys_prlimit64, sys_setitimer, sys_syslog, sys_times, sys_uname
+};
 
 use crate::{
     fs::{
@@ -41,6 +43,7 @@ use crate::{
     futex::robust_list::{sys_get_robust_list, sys_set_robust_list},
     mm::shm::ShmId,
     signal::{SigInfo, SigSet},
+    task::rusage::RUsage,
     timer::{ITimerVal, TimeSpec},
 };
 pub use fs::FcntlOp;
@@ -51,6 +54,8 @@ mod mm;
 mod signal;
 mod task;
 mod util;
+mod net;
+// mod time;
 
 const SYSCALL_GETCWD: usize = 17;
 const SYSCALL_DUP: usize = 23;
@@ -83,6 +88,7 @@ const SYSCALL_PWRITE: usize = 68;
 const SYSCALL_SENDFILE: usize = 71;
 const SYSCALL_PSELECT6: usize = 72;
 const SYSCALL_PPOLL: usize = 73;
+const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_SYNC: usize = 81;
@@ -115,6 +121,7 @@ const SYSCALL_SETGID: usize = 144;
 const SYSCALL_SETUID: usize = 146;
 const SYSCALL_TIMES: usize = 153;
 const SYSCALL_SETPGID: usize = 154;
+const SYSCALL_GETPGID: usize = 155;
 const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GETRUSAGE: usize = 165;
 const SYSCALL_GET_TIME: usize = 169;
@@ -134,24 +141,45 @@ const SYSCALL_MUNMAP: usize = 215;
 const SYSCALL_FORK: usize = 220;
 const SYSCALL_EXEC: usize = 221;
 const SYSCALL_MMAP: usize = 222;
+const SYSCALL_WAIT4: usize = 260;
+const SYSCALL_SOCKET: usize = 198;
+const SYSCALL_SOCKETPAIR: usize = 199;
+const SYSCALL_BIND: usize = 200;
+const SYSCALL_LISTEN: usize = 201;
+const SYSCALL_ACCEPT: usize = 202;
+const SYSCALL_CONNECT: usize = 203;
+const SYSCALL_GETSOCKNAME: usize = 204;
+const SYSCALL_GETPEERNAME: usize = 205;
+const SYSCALL_SENDTO: usize = 206;
+const SYSCALL_RECVFROM: usize = 207;
+const SYSCALL_SETSOCKOPT: usize = 208;
+const SYSCALL_GETSOCKOPT: usize = 209;
+const SYSCALL_SHUTDOWN: usize = 210;
+
+const SYSCALL_ACCEPT4:usize=288;
+const SYSCALL_MREMAP: usize = 216;
 const SYSCALL_MADVISE: usize = 233;
 const SYSCALL_MPROTECT: usize = 226;
-const SYSCALL_WAIT4: usize = 260;
+const SYSCALL_MSYNC: usize = 227;
 const SYSCALL_PRLIMIT: usize = 261;
 const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_GETRANDOM: usize = 278;
 const SYSCALL_MEMBARRIER: usize = 283;
 const SYSCALL_STATX: usize = 291;
+const SYSCALL_STRERROR:usize=300;
+const SYSCALL_PERROR:usize=301;
+const SYSCALL_PSELECT:usize=72;
+const SYSCALL_SELECT:usize=23;
+const SYSCALL_SETSID:usize=157;
 
-const CARELESS_SYSCALLS: [usize; 5] = [62, 63, 64, 124, 260];
+const CARELESS_SYSCALLS: [usize; 9] = [62, 63, 64, 72, 113, 124, 129, 165, 260];
 // const SYSCALL_NUM_2_NAME: [(&str, usize); 4] = [
-const SYSCALL_NUM_2_NAME: [(usize, &str); 6] = [
+const SYSCALL_NUM_2_NAME: [(usize, &str); 5] = [
     (SYSCALL_SETGID, "SYS_SETGID"),
     (SYSCALL_SETUID, "SYS_SETUID"),
     (SYSCALL_GETTID, "SYS_GETTID"),
     (SYSCALL_EXIT_GROUP, "SYS_EXIT_GROUP"),
     (SYSCALL_SIGALTSTACK, "SYS_SIGALTSTACK"),
-    (SYSCALL_GETRANDOM, "SYS_GETRANDOM"),
 ];
 
 #[no_mangle]
@@ -168,13 +196,12 @@ pub fn syscall(
     // 神奇小咒语
     log::trace!("[syscall]");
     if !CARELESS_SYSCALLS.contains(&syscall_id) {
-        if syscall_id != 98 {
-            log::warn!("syscall_id: {}", syscall_id);
-        }
+        log::warn!("syscall_id: {}", syscall_id);
     }
     // if syscall_id == SYSCALL_WAIT4 {
     // log::warn!("syscall_id: {}", syscall_id);
     // }
+    // log::error!("syscall_id: {}", syscall_id);
     match syscall_id {
         SYSCALL_GETCWD => sys_getcwd(a0 as *mut u8, a1),
         SYSCALL_DUP => sys_dup(a0),
@@ -199,6 +226,7 @@ pub fn syscall(
             a3,
             a4 as *const u8,
         ),
+        SYSCALL_SETSID=>sys_setsid(),
         SYSCALL_STATFS => sys_statfs(a0 as *const u8, a1 as *mut StatFs),
         SYSCALL_FTRUNCATE => sys_ftruncate(a0, a1),
         SYSCALL_FACCESSAT => sys_faccessat(a0 as usize, a1 as *const u8, a2 as i32, a3 as i32),
@@ -217,8 +245,10 @@ pub fn syscall(
         SYSCALL_PREAD => sys_pread(a0, a1 as *mut u8, a2, a3),
         SYSCALL_PWRITE => sys_pwrite(a0, a1 as *const u8, a2, a3),
         SYSCALL_SENDFILE => sys_sendfile(a0, a1, a2 as *mut usize, a3),
-        // SYSCALL_PSELECT6 => sys_pselect6(a0, a1, a2, a3, a4 as *const TimeSpec, a5),
+        SYSCALL_PSELECT6 => sys_pselect6(a0, a1, a2, a3, a4 as *const TimeSpec, a5),
         SYSCALL_PPOLL => sys_ppoll(a0 as *mut PollFd, a1, a2 as *const TimeSpec, a3),
+        SYSCALL_READLINKAT => sys_readlinkat(a0 as i32, a1 as *const u8, a2 as *mut u8, a3),
+        SYSCALL_READLINKAT => sys_readlinkat(a0 as i32, a1 as *const u8, a2 as *mut u8, a3),
         SYSCALL_FSTATAT => sys_fstatat(a0 as i32, a1 as *const u8, a2 as *mut Stat, a3 as i32),
         SYSCALL_FSTAT => sys_fstat(a0 as i32, a1 as *mut Stat),
         SYSCALL_SYNC => sys_sync(a0),
@@ -229,8 +259,8 @@ pub fn syscall(
         SYSCALL_EXIT => sys_exit(a0 as i32),
         SYSCALL_EXIT_GROUP => sys_exit_group(a0 as i32),
         SYSCALL_SET_TID_ADDRESS => sys_set_tid_address(a0),
-        SYSCALL_FUTEX => sys_futex(a0, a1 as i32, a2 as u32, a3, a4, a5 as u32),
         SYSCALL_SET_ROBUST_LIST => sys_set_robust_list(a0, a1),
+        SYSCALL_FUTEX => sys_futex(a0, a1 as i32, a2 as u32, a3, a4, a5 as u32),
         SYSCALL_GET_ROBUST_LIST => sys_get_robust_list(a0, a1, a2),
         SYSCALL_NANOSLEEP => sys_nanosleep(a0),
         SYSCALL_SETITIMER => sys_setitimer(a0 as i32, a1 as *const ITimerVal, a2 as *mut ITimerVal),
@@ -255,7 +285,9 @@ pub fn syscall(
         SYSCALL_RT_SIGRETURN => sys_rt_sigreturn(),
         SYSCALL_TIMES => sys_times(a0),
         SYSCALL_SETPGID => sys_setpgid(a0, a1),
+        SYSCALL_GETPGID => sys_getpgid(a0),
         SYSCALL_UNAME => sys_uname(a0),
+        SYSCALL_GETRUSAGE => sys_getrusage(a0 as i32, a1 as *mut RUsage),
         SYSCALL_GET_TIME => sys_get_time(a0),
         SYSCALL_GITPID => sys_getpid(),
         SYSCALL_GETPPID => sys_getppid(),
@@ -272,11 +304,24 @@ pub fn syscall(
         SYSCALL_MUNMAP => sys_munmap(a0, a1),
         SYSCALL_MADVISE => sys_madvise(a0, a1, a2 as i32),
         SYSCALL_MPROTECT => sys_mprotect(a0, a1, a2 as i32),
+        SYSCALL_MSYNC => sys_msync(a0, a1, a2 as i32),
         SYSCALL_FORK => sys_clone(a0 as u32, a1, a2, a3, a4),
         SYSCALL_EXEC => sys_execve(a0 as *mut u8, a1 as *const usize, a2 as *const usize),
         SYSCALL_MMAP => sys_mmap(a0, a1, a2, a3, a4 as i32, a5),
         SYSCALL_WAIT4 => sys_waitpid(a0 as isize, a1, a2 as i32),
+        SYSCALL_SOCKET=>syscall_socket(a0, a1, a2),
+        SYSCALL_BIND=>syscall_bind(a0, a1, a2),
+        SYSCALL_LISTEN=>syscall_listen(a0, a1),
+        SYSCALL_CONNECT=>syscall_connect(a0, a1, a2),
+        SYSCALL_ACCEPT=>syscall_accept(a0, a1,a2),
+        SYSCALL_ACCEPT4=>syscall_accept(a0, a1, a2),
+        SYSCALL_SENDTO=>syscall_send(a0, a1 as *const u8, a2, a3,a4, a5),
+        SYSCALL_RECVFROM=>syscall_recv(a0, a1 as *mut u8, a2, a3, a4, a5),
+        SYSCALL_SHUTDOWN=>syscall_shutdown(a0,a1),
         SYSCALL_PRLIMIT => sys_prlimit64(a0, a1 as i32, a2 as *const RLimit, a3 as *mut RLimit),
+        SYSCALL_CLOCK_GETTIME=>sys_clock_gettime(a0, a1 as *mut TimeSpec),
+        SYSCALL_GETSOCKNAME=>syscall_getsockname(a0, a1, a2),
+        SYSCALL_GETPEERNAME=>syscall_getpeername(a0, a1, a2),
         SYSCALL_RENAMEAT2 => sys_renameat2(
             a0 as i32,
             a1 as *const u8,
@@ -284,6 +329,7 @@ pub fn syscall(
             a3 as *const u8,
             a4 as i32,
         ),
+        SYSCALL_GETRANDOM => Ok(0),
         SYSCALL_MEMBARRIER => Ok(0),
         SYSCALL_STATX => sys_statx(
             a0 as i32,
@@ -292,6 +338,11 @@ pub fn syscall(
             a3 as u32,
             a4 as *mut Statx,
         ),
+        SYSCALL_PSELECT=>sys_pselect6(a0 , a1, a2,a3 ,a4 as *const TimeSpec , a5),
+        // SYSCALL_SELECT=>sys_select(a0 , a1, a2,a3 ,a4 as *const TimeSpec , a5),
+        SYSCALL_SETSOCKOPT=>syscall_setsocketopt(a0, a1, a2, a3 as *const u8,a4),
+        SYSCALL_GETSOCKOPT=>syscall_getsocketopt(a0, a1, a2, a3 as *mut u8,a4),
+        
         _ => {
             log::warn!(
                 "Unsupported syscall_id: {}, {}",
@@ -305,4 +356,6 @@ pub fn syscall(
             Err(Errno::ENOSYS)
         }
     }
+    // println!("[syscall_id]:{}",&syscall_id);
+
 }

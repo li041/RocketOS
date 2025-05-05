@@ -1,7 +1,6 @@
 #![no_std]
 #![feature(linkage)]
 #![feature(alloc_error_handler)]
-
 #[macro_use]
 pub mod console;
 mod lang_items;
@@ -20,7 +19,9 @@ use alloc::{
     vec::Vec,
 };
 use buddy_system_allocator::LockedHeap;
+// use error::errno;
 use syscall::*;
+// use tls::TlsArea;
 
 const USER_HEAP_SIZE: usize = 32768;
 
@@ -151,6 +152,64 @@ pub fn sleep(period_ms: usize) {
     while sys_get_time() < start + period_ms as isize {
         sys_yield();
     }
+}
+pub fn socket(domain:usize,flag:usize,protocol:usize)->isize {
+    sys_socket(domain, flag, protocol)
+}
+pub fn bind(sockfd:usize,sockaddr:usize,socklen:usize)->isize {
+    sys_bind(sockfd, sockaddr, socklen)
+}
+pub fn listen(sockfd:usize,backlog:usize)->isize {
+    sys_listen(sockfd, backlog)
+}
+pub fn connect(sockfd:usize,sockaddr:usize,socklen:usize)->isize {
+    sys_connect(sockfd, sockaddr, socklen)
+}
+pub fn accept(sockfd:usize,sockaddr:usize,socklen:usize)->isize {
+    sys_accept(sockfd, sockaddr, socklen)
+}
+pub fn accept4(sockfd:usize,sockaddr:usize,socklen:usize)->isize {
+    sys_accept4(sockfd, sockaddr, socklen)
+}
+pub fn sendto(sockfd:usize,buf: &[u8],len:usize,sockaddr:usize,socklen:usize,flag:usize)->isize {
+    sys_sendto(sockfd, buf, len, sockaddr, socklen,flag)
+}
+pub fn recvfrom(sockfd:usize,buf: &mut [u8],len:usize,flag:usize,sockaddr:usize,socklen:usize)->isize {
+    sys_recvfrom(sockfd, buf, len, flag, sockaddr, socklen)
+}
+// pub fn shutdown(sockfd:usize,flag:usize)->isize {
+//     sys_shutdown(sockfd, flag)
+// }
+pub fn get_sockname(sockfd:usize,sockaddr:usize,socklen:usize)->isize {
+    sys_getsockname(sockfd, sockaddr, socklen)
+}
+pub fn get_peername(sockfd:usize,sockaddr:usize,socklen:usize)->isize {
+    sys_getpeername(sockfd, sockaddr, socklen)
+}
+pub fn clock_gettime(clocktype:usize,ts:usize)->isize {
+    sys_clock_gettime(clocktype, ts)
+}
+pub fn shutdown(sockfd:usize)->isize {
+    sys_shutdown(sockfd)
+}
+// pub fn strerror(errum:isize) -> *mut u8 {
+//     unsafe { error::strerror(errum) }
+// }
+// pub fn strerror() {
+//     unsafe { error::strerror(errno) };
+// }
+
+// pub fn perror(){
+//     error::perror();
+// }
+pub fn mmap(addr:usize,len:usize,prot:usize,flags:usize,fd:usize,offset:usize)->isize {
+    sys_mmap(addr, len, prot, flags, fd, offset)
+}
+// pub fn alloc_tls_area()->*mut u8  {
+//     unsafe {tls::alloc_tls_area()}
+// }
+pub fn pselect(nfds: usize, readfds: usize, writefds: usize, exceptfds: usize, timeout: usize,mask:usize) -> isize {
+    sys_pselect(nfds, readfds, writefds, exceptfds, timeout,mask)
 }
 
 pub fn getcwd() -> String {

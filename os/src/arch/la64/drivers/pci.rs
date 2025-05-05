@@ -19,13 +19,13 @@ use crate::{
         config::DEVICE_TREE_ADDR,
         drivers::mem_allocator::{allocate_bars, dump_bar_contents, PciMemory32Allocator},
         virtio_blk::HalImpl,
-    },
-    mutex::SpinNoIrqLock,
+    }, drivers::net::init_net_dev_la, mutex::SpinNoIrqLock
 };
 
-fn virtio_device(transport: impl Transport) {
+fn virtio_device(transport: impl Transport + 'static) {
     match transport.device_type() {
         DeviceType::Block => virtio_blk(transport),
+        DeviceType::Network=>virtio_net(transport),
         t => log::warn!("Unsupported VirtIO device type {:?}", t),
     }
 }
@@ -34,6 +34,11 @@ fn virtio_device(transport: impl Transport) {
 fn virtio_blk<T: Transport>(transport: T) {
     let blk = VirtIOBlk::<HalImpl, T>::new(transport).expect("failed to create blk driver");
     assert!(!blk.readonly());
+}
+//在enumerate_pci过来初始化网络
+fn virtio_net<T: Transport+'static>(transport: T) {
+    println!("[virtio_net] pci virtio_net device init");
+    init_net_dev_la(transport);
 }
 
 // 读取设备树, 识别VirtIO设备
@@ -123,6 +128,9 @@ fn enumerate_pci(pci_node: FdtNode, cam: Cam) {
                 dump_bar_contents(&mut pci_root, device_function, 4);
                 let mut transport =
                     PciTransport::new::<HalImpl>(&mut pci_root, device_function).unwrap();
+                // if virtio_type==DeviceType::Network {
+                //     init_net_dev_la(transport);
+                // }
                 log::info!(
                     "Detected virtio PCI device with device type {:?}, features {:#018x}",
                     transport.device_type(),

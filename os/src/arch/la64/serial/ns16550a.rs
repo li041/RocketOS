@@ -1,3 +1,13 @@
+/*
+ * @Author: Peter/peterluck2021@163.com
+ * @Date: 2025-04-16 21:36:51
+ * @LastEditors: Peter/peterluck2021@163.com
+ * @LastEditTime: 2025-05-24 16:54:33
+ * @FilePath: /RocketOS_netperfright/os/src/arch/la64/serial/ns16550a.rs
+ * @Description: 
+ * 
+ * Copyright (c) 2025 by peterluck2021@163.com, All Rights Reserved. 
+ */
 /*  In this file, we ported codes from RustSBI.
     Thus we can handle serial in S mode.
 */

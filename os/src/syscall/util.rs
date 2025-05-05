@@ -4,8 +4,10 @@ use crate::{
     arch::mm::{copy_from_user, copy_to_user},
     fs::uapi::{RLimit, Resource},
     syscall::errno::Errno,
-    task::{add_real_timer, current_task, get_task, remove_timer, update_real_timer},
-    timer::{ITimerVal, TimeSpec},
+    task::{
+        add_real_timer, current_task, get_task, remove_timer, rusage::RUsage, update_real_timer,
+    },
+    timer::{ITimerVal, TimeSpec, TimeVal},
 };
 
 use super::errno::SyscallRet;
@@ -208,18 +210,19 @@ pub const CLOCK_MONOTONIC_RAW: usize = 4;
 pub const CLOCK_REALTIME_COARSE: usize = 5;
 pub fn sys_clock_gettime(clock_id: usize, timespec: *mut TimeSpec) -> SyscallRet {
     //如果tp是NULL, 函数不会存储时间值, 但仍然会执行其他检查（如 `clockid` 是否有效）。
+    log::error!("[sys_clock_gettime] begin clock_gettime");
     if timespec.is_null() {
         return Ok(0);
     }
     match clock_id {
-        CLOCK_REALTIME | CLOCK_REALTIME_COARSE => {
+        SUPPORT_CLOCK|CLOCK_REALTIME | CLOCK_REALTIME_COARSE => {
             let time = TimeSpec::new_wall_time();
-            log::info!("[sys_clock_gettime] CLOCK_REALTIME: {:?}", time);
+            // log::info!("[sys_clock_gettime] CLOCK_REALTIME: {:?}", time);
             copy_to_user(timespec, &time as *const TimeSpec, 1)?;
         }
         CLOCK_MONOTONIC => {
             let time = TimeSpec::new_machine_time();
-            log::info!("[sys_clock_gettime] CLOCK_MONOTONIC: {:?}", time);
+            // log::info!("[sys_clock_gettime] CLOCK_MONOTONIC: {:?}", time);
             copy_to_user(timespec, &time as *const TimeSpec, 1)?;
         }
         _ => {
@@ -265,9 +268,9 @@ pub fn sys_setitimer(
                 let should_update =
                     !real_itimeval.it_value.is_zero() || !real_itimeval.it_interval.is_zero();
                 // 计算旧的定时器值(it_value)剩余时间
-                let current_time = TimeSpec::new_wall_time();
+                let current_time = TimeVal::new_wall_time();
                 let old_it_value = if real_itimeval.it_value < current_time {
-                    TimeSpec { sec: 0, nsec: 0 }
+                    TimeVal { sec: 0, usec: 0 }
                 } else {
                     new.it_value - current_time
                 };
@@ -282,9 +285,9 @@ pub fn sys_setitimer(
             });
             // 设置或更新已有定时器
             if should_update {
-                update_real_timer(task.tid(), new.it_value);
+                update_real_timer(task.tid(), new.it_value.into());
             } else {
-                add_real_timer(task.tid(), new.it_value);
+                add_real_timer(task.tid(), new.it_value.into());
             }
             // 将旧的定时器值写入ovalue_ptr
             if !ovalue_ptr.is_null() {
@@ -304,4 +307,37 @@ pub fn sys_setitimer(
             panic!("[sys_setitimer] invalid which: {}", which);
         }
     };
+}
+/// 调用进程的资源使用情况。
+pub const RUSAGE_SELF: i32 = 0;
+/// 已终止并被等待的所有子进程的资源使用情况
+pub const RUSAGE_CHILDREN: i32 = -1;
+/// 调用线程的资源使用情况（需要 Linux 2.6.26 以上版本，并定义了 `_GNU_SOURCE` 宏）
+pub const RUSAGE_THREAD: i32 = 1;
+pub fn sys_getrusage(who: i32, rusage: *mut RUsage) -> SyscallRet {
+    if rusage.is_null() {
+        return Err(Errno::EINVAL);
+    }
+    let task = current_task();
+    let mut usage = RUsage::default();
+    match who {
+        RUSAGE_SELF => {
+            let (utime, stime) = task.process_us_time();
+            usage.utime = utime;
+            usage.stime = stime;
+        }
+        RUSAGE_CHILDREN => {
+            unimplemented!();
+        }
+        RUSAGE_THREAD => {
+            let (utime, stime) = task.time_stat().thread_us_time();
+            usage.utime = utime;
+            usage.stime = stime;
+        }
+        _ => {
+            return Err(Errno::EINVAL);
+        }
+    }
+    copy_to_user(rusage, &usage as *const RUsage, 1).expect("[sys_getrusage] copy_to_user failed");
+    Ok(0)
 }
