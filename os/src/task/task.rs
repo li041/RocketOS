@@ -34,9 +34,11 @@ use crate::{
     task::{
         self, add_task,
         context::write_task_cx,
-        manager::{cancel_alarm, delete_wait, register_task},
+        dump_scheduler, dump_task_queue,
+        manager::{cancel_wait_alarm, delete_wait, register_task},
         wakeup, INITPROC,
     },
+    timer::ITimerVal,
 };
 use alloc::{
     collections::btree_map::BTreeMap,
@@ -76,22 +78,20 @@ pub struct Task {
     children: Arc<SpinNoIrqLock<BTreeMap<Tid, Arc<Task>>>>, // 子任务
     thread_group: Arc<SpinNoIrqLock<ThreadGroup>>,          // 线程组
     exit_code: AtomicI32,                                   // 退出码
-
-    // 内存管理
-    // 包括System V shm管理
+    // 内存管理(包括System V shm管理)
     memory_set: Arc<RwLock<MemorySet>>, // 地址空间
-    // futex管理
+    // futex管理, 线程局部
     robust_list_head: AtomicUsize, // struct robust_list_head* head
-
     // 文件系统
-    // ToDo: 对接ext4
     fd_table: Arc<FdTable>,
     root: Arc<SpinNoIrqLock<Arc<Path>>>,
     pwd: Arc<SpinNoIrqLock<Arc<Path>>>,
-    // ToDo: 信号处理
+    // 信号处理
     sig_pending: SpinNoIrqLock<SigPending>,      // 待处理信号
     sig_handler: Arc<SpinNoIrqLock<SigHandler>>, // 信号处理函数
     sig_stack: SpinNoIrqLock<Option<SignalStack>>, // 额外信号栈
+    itimerval: Arc<RwLock<[ITimerVal; 3]>>,      // 定时器
+    cpu_mask: SpinNoIrqLock<CpuMask>,           // CPU掩码
                                                  // Todo: 进程组
                                                  // ToDo：运行时间(调度相关)
                                                  // ToDo: 多核启动
@@ -133,6 +133,8 @@ impl Task {
             sig_pending: SpinNoIrqLock::new(SigPending::new()),
             sig_handler: Arc::new(SpinNoIrqLock::new(SigHandler::new())),
             sig_stack: SpinNoIrqLock::new(None),
+            itimerval: Arc::new(RwLock::new([ITimerVal::default(); 3])),
+            cpu_mask: SpinNoIrqLock::new(CpuMask::ALL),
         }
     }
 
@@ -171,6 +173,8 @@ impl Task {
             sig_pending: SpinNoIrqLock::new(SigPending::new()),
             sig_handler: Arc::new(SpinNoIrqLock::new(SigHandler::new())),
             sig_stack: SpinNoIrqLock::new(None),
+            itimerval: Arc::new(RwLock::new([ITimerVal::default(); 3])),
+            cpu_mask: SpinNoIrqLock::new(CpuMask::ALL),
         });
         // 向线程组中添加该进程
         task.thread_group
@@ -205,6 +209,7 @@ impl Task {
         let parent;
         let children;
         let thread_group;
+        let itimerval;
         let memory_set;
         let fd_table;
         let root;
@@ -212,6 +217,7 @@ impl Task {
         let sig_handler;
         let sig_pending;
         let sig_stack;
+        let cpu_mask;
         log::info!("[kernel_clone] task{} ready to clone ...", self.tid());
 
         // 是否与父进程共享信号处理器
@@ -242,6 +248,7 @@ impl Task {
             parent = self.parent.clone();
             children = self.children.clone();
             thread_group = self.thread_group.clone();
+            itimerval = self.itimerval.clone();
         }
         // 创建进程
         else {
@@ -250,6 +257,7 @@ impl Task {
             parent = Arc::new(SpinNoIrqLock::new(Some(Arc::downgrade(self))));
             children = Arc::new(SpinNoIrqLock::new(BTreeMap::new()));
             thread_group = Arc::new(SpinNoIrqLock::new(ThreadGroup::new()));
+            itimerval = Arc::new(RwLock::new([ITimerVal::default(); 3]));
         }
 
         if flags.contains(CloneFlags::CLONE_VM) {
@@ -288,6 +296,8 @@ impl Task {
         sig_pending = SpinNoIrqLock::new(SigPending::new());
         sig_stack = SpinNoIrqLock::new(None);
         let tid = RwLock::new(tid);
+        let robust_list_head = AtomicUsize::new(0);
+        cpu_mask = SpinNoIrqLock::new(CpuMask::ALL);
         // 创建新任务
         let task = Arc::new(Self {
             kstack,
@@ -300,13 +310,15 @@ impl Task {
             exit_code,
             thread_group,
             memory_set,
-            robust_list_head: AtomicUsize::new(0),
+            robust_list_head,
             fd_table,
             root,
             pwd,
             sig_handler,
             sig_pending,
             sig_stack,
+            itimerval,
+            cpu_mask,
         });
         log::trace!("[kernel_clone] child task{} created", task.tid());
 
@@ -421,10 +433,115 @@ impl Task {
             auxv_base,
         );
         // 设置tls
-        // if let Some(tls_ptr) = tls_ptr {
-        // log::error!("[kernel_execve] task{} tls_ptr: {:x}", self.tid(), tls_ptr);
-        // trap_cx.set_tp(tls_ptr);
-        // }
+        if let Some(tls_ptr) = tls_ptr {
+            log::error!("[kernel_execve] task{} tls_ptr: {:x}", self.tid(), tls_ptr);
+            trap_cx.set_tp(tls_ptr);
+        }
+        save_trap_context(&self, trap_cx);
+        log::trace!("[kernel_execve] task{} trap_cx updated", self.tid());
+        // 重建线程组
+        self.op_thread_group_mut(|tg| {
+            *tg = ThreadGroup::new();
+            tg.add(self.tid(), Arc::downgrade(&self));
+        });
+        log::trace!("[kernel_execve] task{} thread_group rebuild", self.tid());
+        self.fd_table().do_close_on_exec();
+        log::trace!("[kernel_execve] task{} fd_table reset", self.tid());
+        // 重置信号处理器
+        self.op_sig_handler_mut(|handler| handler.reset());
+        log::trace!("[kernel_execve] task{} handler reset", self.tid());
+
+        log::info!(
+            "[kernel_execve] task{}-tgid:\t{:x}",
+            self.tid(),
+            self.tgid()
+        );
+        log::info!(
+            "[kernel_execve] task{}-tp:\t{:x}",
+            self.tid(),
+            Arc::as_ptr(&self) as usize
+        );
+        log::info!(
+            "[kernel_execve] task{}-sp:\t{:x}",
+            self.tid(),
+            self.kstack()
+        );
+
+        let strong_count = Arc::strong_count(&self);
+        if strong_count == 3 {
+            log::info!("[kernel_execve] strong_count:\t{}", strong_count);
+        } else
+        // 理论为3(sys_exec一个，children一个， processor一个)
+        {
+            log::error!("[kernel_execve] strong_count:\t{}", strong_count)
+        }
+    }
+
+    pub fn kernel_execve_lazily(
+        self: &Arc<Self>,
+        elf_file: Arc<dyn FileOp>,
+        elf_data: &[u8],
+        mut args_vec: Vec<String>,
+        envs_vec: Vec<String>,
+    ) {
+        log::info!("[kernel_execve] task{} do execve ...", self.tid());
+        // 创建地址空间
+        let (mut memory_set, _satp, ustack_top, entry_point, aux_vec, tls_ptr) =
+            MemorySet::from_elf_lazily(elf_file, elf_data.to_vec(), &mut args_vec);
+        // 更新页表
+        memory_set.activate();
+
+        #[cfg(target_arch = "loongarch64")]
+        memory_set.push_with_offset(
+            MapArea::new(
+                VPNRange::new(
+                    VirtAddr::from(strampoline as usize).floor(),
+                    VirtAddr::from(etrampoline as usize).ceil(),
+                ),
+                MapType::Linear,
+                MapPermission::R | MapPermission::X | MapPermission::U,
+                None,
+                0,
+            ),
+            None,
+            0,
+        );
+
+        // 初始化用户栈, 压入args和envs
+        let argc = args_vec.len();
+        let (argv_base, envp_base, auxv_base, ustack_top) =
+            init_user_stack(&memory_set, &args_vec, &envs_vec, aux_vec, ustack_top);
+        log::info!(
+            "[kernel_execve] entry_point: {:x}, user_sp: {:x}, page_table: {:x}",
+            entry_point,
+            ustack_top,
+            memory_set.token()
+        );
+
+        if !self.is_process() {
+            self.exchange_tid();
+        }
+
+        // 关闭线程组中除当前线程外的所有线程
+        self.close_thread();
+        log::trace!("[kernel_execve] task{} close thread_group", self.tid());
+
+        // 更新地址空间
+        self.op_memory_set_mut(|m| *m = memory_set);
+        // 更新trap_cx
+        let mut trap_cx = TrapContext::app_init_trap_context(
+            entry_point,
+            ustack_top,
+            argc,
+            argv_base,
+            envp_base,
+            auxv_base,
+        );
+        // 设置tls
+        if let Some(tls_ptr) = tls_ptr {
+            log::error!("[kernel_execve] task{} tls_ptr: {:x}", self.tid(), tls_ptr);
+            trap_cx.set_tp(tls_ptr);
+        }
         save_trap_context(&self, trap_cx);
         log::trace!("[kernel_execve] task{} trap_cx updated", self.tid());
         // 重建线程组
@@ -625,9 +742,12 @@ impl Task {
     pub fn TAC(&self) -> Option<usize> {
         self.tid_address.lock().clear_child_tid
     }
-    pub fn get_robust_list_head(&self) -> usize {
+    pub fn robust_list_head(&self) -> usize {
         self.robust_list_head
             .load(core::sync::atomic::Ordering::SeqCst)
+    }
+    pub fn cpu_mask(&self) -> CpuMask {
+        *self.cpu_mask.lock()
     }
 
     /*********************************** setter *************************************/
@@ -687,6 +807,12 @@ impl Task {
     }
     pub fn op_sig_handler_mut<T>(&self, f: impl FnOnce(&mut SigHandler) -> T) -> T {
         f(&mut self.sig_handler.lock())
+    }
+    pub fn op_itimerval<T>(&self, f: impl FnOnce(&[ITimerVal; 3]) -> T) -> T {
+        f(&self.itimerval.read())
+    }
+    pub fn op_itimerval_mut<T>(&self, f: impl FnOnce(&mut [ITimerVal; 3]) -> T) -> T {
+        f(&mut self.itimerval.write())
     }
     /******************************** 任务状态判断 **************************************/
     pub fn is_ready(&self) -> bool {
@@ -761,7 +887,7 @@ pub fn kernel_exit(task: Arc<Task>, exit_code: i32) {
     // 从调度队列中移除（包括阻塞队列）
     delete_wait(task.tid());
     remove_task(task.tid());
-    cancel_alarm(task.tid());
+    cancel_wait_alarm(task.tid());
 
     // 由于线程不通过waitpid，因此将线程直接从父进程中移除
     if !task.is_process() {
@@ -1099,5 +1225,21 @@ bitflags! {
         const CLONE_NEWPID = 1 << 29;
         const CLONE_NEWNET = 1 << 30;
         const CLONE_IO = 1 << 31;
+    }
+}
+
+bitflags! {
+    #[derive(Clone, Copy)]
+    #[repr(C)]
+    pub struct CpuMask: usize {
+        const CPU0 = 0b00000001;
+        // const CPU1 = 0b00000010;
+        // const CPU2 = 0b00000100;
+        // const CPU3 = 0b00001000;
+        // const CPU4 = 0b00010000;
+        // const CPU5 = 0b00100000;
+        // const CPU6 = 0b01000000;
+        // const CPU7 = 0b10000000;
+        const ALL = 0b00000001;
     }
 }

@@ -3,7 +3,6 @@ use core::{default, str};
 use spin::{mutex, Once, RwLock};
 
 use crate::{
-    arch::timer::TimeSpec,
     ext4::inode::Ext4InodeDisk,
     fs::{
         file::{FileOp, OpenFlags},
@@ -14,6 +13,7 @@ use crate::{
         FileOld,
     },
     syscall::errno::SyscallRet,
+    timer::TimeSpec,
 };
 
 use alloc::sync::Arc;
@@ -147,5 +147,8 @@ impl FileOp for MountsFile {
     }
     fn readable(&self) -> bool {
         true
+    }
+    fn get_inode(&self) -> Arc<dyn InodeOp> {
+        self.inode.clone()
     }
 }

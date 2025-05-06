@@ -2,13 +2,13 @@ use core::sync::atomic::{compiler_fence, Ordering};
 use core::time;
 
 use crate::arch::mm::copy_from_user;
-use crate::arch::timer::TimeSpec;
 use crate::arch::trap::context::{dump_trap_context, get_trap_context, save_trap_context};
 use crate::fs::file::OpenFlags;
 use crate::futex::do_futex;
 use crate::syscall::errno::Errno;
 use crate::syscall::util::{CLOCK_MONOTONIC, CLOCK_REALTIME};
 use crate::task::{get_scheduler_len, get_task, wait, wait_timeout, CloneFlags, Task};
+use crate::timer::TimeSpec;
 use crate::{
     arch::mm::copy_to_user,
     arch::timer::get_time_ms,
@@ -146,7 +146,7 @@ pub fn sys_execve(path: *const u8, args: *const usize, envs: *const usize) -> Sy
     // OpenFlags::empty() = RDONLY = 0, 以只读方式打开文件
     if let Ok(file) = path_openat(&path, OpenFlags::empty(), AT_FDCWD, 0) {
         let all_data = file.read_all();
-        task.kernel_execve(all_data.as_slice(), args_vec, envs_vec);
+        task.kernel_execve_lazily(file, all_data.as_slice(), args_vec, envs_vec);
         Ok(0)
     } else if !path.starts_with("/") {
         // 从内核中加载的应用程序
@@ -381,24 +381,15 @@ pub fn sys_get_time(time_val_ptr: usize) -> SyscallRet {
     Ok(0)
 }
 
-// 如果调用被信号处理程序中断，nanosleep()将返回 -1，
-// 将 errno 设置为 EINTR，并将剩余时间写入 rem 指向的结构体中，除非 rem 为 NULL。
-// Todo: 将剩余时间写入 rem 指向的结构体中
+// // 如果调用被信号处理程序中断，nanosleep()将返回 -1，
+// // 将 errno 设置为 EINTR，并将剩余时间写入 rem 指向的结构体中，除非 rem 为 NULL。
+// // Todo: 将剩余时间写入 rem 指向的结构体中
 // pub fn sys_nanosleep(time_val_ptr: usize) -> SyscallRet {
+//     log::info!("[sys_nanosleep] time_val_ptr: {:x}", time_val_ptr);
 //     let time_val_ptr = time_val_ptr as *const TimeSpec;
-//     let time_val = copy_from_user(time_val_ptr, 1).unwrap()[0];
-//     // fake: 防止队列中出现没任务的情况，当调度器为空的时候进行忙等
-//     if get_scheduler_len() == 0 {
-//         let start_time = TimeSpec::new_machine_time();
-//         loop {
-//             let current_time = TimeSpec::new_machine_time();
-//             if current_time >= time_val + start_time {
-//                 break;
-//             }
-//         }
-//     } else {
-//         wait_timeout(time_val);
-//     }
+//     let mut time_val: TimeSpec = TimeSpec::default();
+//     copy_from_user(time_val_ptr, &mut time_val as *mut TimeSpec, 1)?;
+//     wait_timeout(time_val);
 //     Ok(0)
 // }
 
@@ -407,10 +398,17 @@ pub fn sys_nanosleep(time_val_ptr: usize) -> SyscallRet {
     let mut time_val: TimeSpec = TimeSpec::default();
     copy_from_user(time_val_ptr, &mut time_val as *mut TimeSpec, 1)?;
     let start_time = TimeSpec::new_machine_time();
-    log::error!("[sys_nanosleep] task{} sleep {:?}", current_task().tid(), time_val);
+    log::error!(
+        "[sys_nanosleep] task{} sleep {:?}",
+        current_task().tid(),
+        time_val
+    );
     loop {
         if current_task().check_interrupt() {
-            log::error!("[sys_nanosleep] task{} wakeup by signal", current_task().tid());
+            log::error!(
+                "[sys_nanosleep] task{} wakeup by signal",
+                current_task().tid()
+            );
             return Err(Errno::EINTR);
         }
         let current_time = TimeSpec::new_machine_time();
@@ -421,6 +419,33 @@ pub fn sys_nanosleep(time_val_ptr: usize) -> SyscallRet {
     }
     Ok(0)
 }
+
+// pub fn sys_nanosleep(time_val_ptr: usize) -> SyscallRet {
+//     let time_val_ptr = time_val_ptr as *const TimeSpec;
+//     let mut time_val: TimeSpec = TimeSpec::default();
+//     copy_from_user(time_val_ptr, &mut time_val as *mut TimeSpec, 1)?;
+//     let start_time = TimeSpec::new_machine_time();
+//     log::error!(
+//         "[sys_nanosleep] task{} sleep {:?}",
+//         current_task().tid(),
+//         time_val
+//     );
+//     loop {
+//         if current_task().check_interrupt() {
+//             log::error!(
+//                 "[sys_nanosleep] task{} wakeup by signal",
+//                 current_task().tid()
+//             );
+//             return Err(Errno::EINTR);
+//         }
+//         let current_time = TimeSpec::new_machine_time();
+//         if current_time >= time_val + start_time {
+//             break;
+//         }
+//         yield_current_task();
+//     }
+//     Ok(0)
+// }
 
 pub const TIMER_ABSTIME: i32 = 0x01;
 pub fn sys_clock_nansleep(clock_id: usize, flags: i32, t: usize, remain: usize) -> SyscallRet {
@@ -493,6 +518,9 @@ pub fn sys_getuid() -> SyscallRet {
     Ok(0)
 }
 pub fn sys_geteuid() -> SyscallRet {
+    Ok(0)
+}
+pub fn sys_getgid() -> SyscallRet {
     Ok(0)
 }
 

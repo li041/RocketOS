@@ -68,7 +68,7 @@ pub fn sys_brk(brk: usize) -> SyscallRet {
             // 页内偏移
         }
         memory_set.brk = brk;
-        Ok(0)
+        Ok(brk)
     })
 }
 
@@ -308,6 +308,7 @@ pub fn sys_mprotect(addr: usize, size: usize, prot: i32) -> SyscallRet {
                 addr,
                 addr + size
             );
+            memory_set.page_table.dump_all_user_mapping();
             return Err(Errno::ENOMEM);
         }
         Ok(0)
@@ -525,3 +526,26 @@ pub fn sys_shmctl(shmid: usize, op: i32, buf: *mut ShmId) -> SyscallRet {
 }
 
 /* shm end */
+pub fn sys_membarrier(_cmd: i32, _flags: i32, _cpu_id: u32) -> SyscallRet {
+    log::error!("Unimplemented sys_membarrier");
+    Ok(0)
+}
+
+pub fn sys_get_mempolicy(
+    _policy: usize,
+    _nodemask: usize,
+    _maxnode: usize,
+    _addr: usize,
+    _flags: usize,
+) -> SyscallRet {
+    log::error!("Unimplemented sys_get_mempolicy");
+    Ok(0)
+}
+
+pub fn sys_mlock(
+    _addr: usize,
+    _len: usize,
+) -> SyscallRet {
+    log::error!("Unimplemented sys_mlock");
+    Ok(0)
+}
