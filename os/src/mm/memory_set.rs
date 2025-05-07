@@ -627,6 +627,7 @@ impl MemorySet {
                         memory_set.page_table.map(vpn, page.ppn(), map_perm.into());
                         map_area.pages.insert(vpn, page);
                     }
+                    memory_set.areas.insert(vpn_range.get_start(), map_area);
                 } else {
                     // 采用Framed + 直接拷贝数据到匿名页
                     let map_area = MapArea::new(vpn_range, MapType::Framed, map_perm, None, 0);
@@ -639,10 +640,6 @@ impl MemorySet {
                         map_offset,
                     );
                 }
-            }
-            if ph_type == Type::Tls {
-                let start_va: VirtAddr = (ph.virtual_addr() as usize).into();
-                tls_ptr = Some(start_va.0);
             }
             // 判断是否需要动态链接
             if ph_type == Type::Interp {
@@ -934,7 +931,7 @@ impl MemorySet {
         let mut split_new_areas: Vec<MapArea> = Vec::new();
         let remap_vpn_end = remap_vpn_range.get_end();
         // 只检查可能与rnmap_vpn_range重叠的区域
-        for (_vpn, area) in self.areas.range_mut(..=remap_vpn_end).rev() {
+        for (_vpn, area) in self.areas.range_mut(..remap_vpn_end).rev() {
             if area.vpn_range.is_intersect_with(&remap_vpn_range) {
                 let old_vpn_start = area.vpn_range.get_start();
                 let old_vpn_end = area.vpn_range.get_end();
@@ -994,7 +991,7 @@ impl MemorySet {
         let unmap_vpn_end = unmap_vpn_range.get_end();
         // 只检查可能与unmap_vpn_range重叠的区域
         // self.areas.range_mut(..=unmap_vpn_end).rev().for_each(|(vpn, area)| {
-        for (vpn, area) in self.areas.range_mut(..=unmap_vpn_end).rev() {
+        for (vpn, area) in self.areas.range_mut(..unmap_vpn_end).rev() {
             if area.vpn_range.is_intersect_with(&unmap_vpn_range) {
                 let old_vpn_start = area.vpn_range.get_start();
                 let old_vpn_end = area.vpn_range.get_end();
@@ -1411,6 +1408,15 @@ impl MemorySet {
         log::trace!("[handle_recoverable_page_fault]");
         let vpn = va.floor();
         let page_table = &mut self.page_table;
+        // #[cfg(target_arch = "loongarch64")]
+        // if vpn == VirtPageNum(0) {
+        //     // tls相关的缺页
+        //     let page = Page::new_framed(None);
+        //     let pte_flags = PTEFlags::from(MapPermission::R | MapPermission::W | MapPermission::U);
+        //     let ppn = page.ppn();
+        //     page_table.map(vpn, ppn, pte_flags);
+        //     return Ok(());
+        // }
         if let Some(pte) = page_table.find_pte(vpn) {
             if pte.is_cow() {
                 log::error!(

@@ -774,7 +774,8 @@ impl Ext4Inode {
                                 - extent.logical_block as usize;
                             current_extent = Some(extent);
                         } else {
-                            fs_block_id = 0;
+                            fs_block_id = usize::MAX;
+                            // fs_block_id = 0;
                             current_extent = None;
                         }
                     }
@@ -792,7 +793,8 @@ impl Ext4Inode {
                             - extent.logical_block as usize;
                         current_extent = Some(extent);
                     } else {
-                        fs_block_id = 0;
+                        fs_block_id = usize::MAX;
+                        // fs_block_id = 0;
                         current_extent = None;
                     }
                 }
