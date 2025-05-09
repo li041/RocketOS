@@ -61,21 +61,24 @@ pub fn handle_signal() {
 
         // Todo: 中断处理，测试
         #[cfg(target_arch = "riscv64")]
-        if action.flags.contains(SigActionFlag::SA_RESTART) {
+        if action.flags.contains(SigActionFlag::SA_RESTART) && task.is_interrupted() {
             // 回到用户调用ecall的指令
-            // trap_cx.set_pc(trap_cx.sepc - 4);
-            // trap_cx.restore_a0(); // 从last_a0中恢复a0
-            // log::warn!("[handle_signal] handle SA_RESTART");
+            log::warn!("[handle_signal] handle SA_RESTART");
+            trap_cx.set_pc(trap_cx.sepc - 4);
+            trap_cx.restore_a0(); // 从last_a0中恢复a0
         }
 
+        // 回到用户调用ecall的指令
         #[cfg(target_arch = "loongarch64")]
-        if action.flags.contains(SigActionFlag::SA_RESTART) {
-            // 回到用户调用ecall的指令
-            // trap_cx.set_pc(trap_cx.era - 4);
-            // trap_cx.restore_a0();   // 从last_a0中恢复a0
-            // log::warn!("[handle_signal] handle SA_RESTART");
+        if action.flags.contains(SigActionFlag::SA_RESTART) && task.is_interrupted() {
+            log::warn!("[handle_signal] handle SA_RESTART");
+            trap_cx.set_pc(trap_cx.era - 4);
+            trap_cx.restore_a0();   // 从last_a0中恢复a0
         }
 
+        if task.is_interrupted() {
+            task.set_uninterrupted();
+        }
         //log::info!("[handle_signal] kstack_top: {:x}", kstack);
         // 非用户定义
         if !action.is_user() {
@@ -183,7 +186,6 @@ pub fn handle_signal() {
 }
 
 fn terminate(task: Arc<Task>, sig: Sig) {
-    task.close_thread();
     // 将信号放入低7位 (第8位是core dump标志,在gdb调试崩溃程序中用到)
     kernel_exit(task, sig.raw() as i32 & 0x7F);
     schedule();

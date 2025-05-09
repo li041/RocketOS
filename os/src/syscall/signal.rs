@@ -14,8 +14,7 @@ use crate::{
     },
     syscall::errno::Errno,
     task::{
-        current_task, for_each_task, get_stack_top_by_sp, get_task, yield_current_task, INITPROC,
-        INIT_PROC_PID,
+        current_task, dump_scheduler, dump_wait_queue, for_each_task, get_stack_top_by_sp, get_task, yield_current_task, INITPROC, INIT_PROC_PID
     },
     timer::TimeSpec,
 };
@@ -128,6 +127,32 @@ pub fn sys_tkill(tid: isize, sig: i32) -> SyscallRet {
 /// ESRCH 不存在具有指定线程 ID（和线程组 ID）的进程。
 /// ToDo: 进程组
 pub fn sys_tgkill(tgid: isize, tid: isize, sig: i32) -> SyscallRet {
+    log::info!(
+        "[sys_tgkill] tgid: {}, tid: {}, signal: {:?}",
+        tgid,
+        tid,
+        sig
+    );
+    let sig = Sig::from(sig);
+    if !sig.is_valid() || tid < 0 {
+        return Err(Errno::EINVAL);
+    }
+    
+    if let Some(task) = get_task(tid as usize) {
+        if task.tgid() != tgid as usize {
+            return Err(Errno::EINVAL);
+        }
+        task.receive_siginfo(
+            SigInfo {
+                signo: sig.raw(),
+                code: SigInfo::TKILL,
+                fields: SiField::Kill { tid: tid as usize },
+            },
+            true,
+        );
+    } else {
+        return Err(Errno::ESRCH);
+    }
     Ok(0)
 }
 
@@ -226,6 +251,7 @@ pub fn sys_rt_sigprocmask(how: usize, set: usize, oldset: usize) -> SyscallRet {
         copy_from_user(set_ptr, &mut new_mask as *mut SigSet, 1)?;
         // log::info!("[sys_rt_sigprocmask] current mask {:?}", new_mask);
         new_mask.remove(SigSet::SIGKILL | SigSet::SIGCONT);
+        log::info!("[sys_rt_sigprocmask] new mask {:?}", new_mask);
         let mut change_mask = SigSet::empty();
         match how {
             SIG_BLOCK => {
@@ -322,6 +348,7 @@ pub fn sys_rt_sigtimedwait(
     let mut wanted_set = SigSet::empty();
     copy_from_user(set, &mut wanted_set as *mut SigSet, 1)?;
     wanted_set.remove(SigSet::SIGKILL | SigSet::SIGSTOP);
+    log::info!("[sys_rt_sigtimedwait] wanted_set: {:?}", wanted_set);
     if timeout_ptr.is_null() {
         // timeout是空指针, 行为未定义
         // panic!("[sys_rt_sigtimedwait] timeout is null");
@@ -334,7 +361,14 @@ pub fn sys_rt_sigtimedwait(
     let wait_until = TimeSpec::new_machine_time() + timeout;
     loop {
         log::trace!("[sys_rt_sigtimedwait] loop");
-        let sig = current_task().op_sig_pending_mut(|pending| pending.fetch_signal(wanted_set));
+        let sig = current_task().op_sig_pending_mut(|pending| {
+            // ToOptimize: 这里的mask会被多次修改
+            let old = pending.mask;
+            pending.mask = wanted_set.revert();
+            let sig = pending.fetch_signal(wanted_set);
+            pending.mask = old;
+            sig
+        });
         if let Some((sig, siginfo)) = sig {
             // log::info!("[sys_rt_sigtimedwait] sig: {:?}", sig);
             if !info.is_null() {

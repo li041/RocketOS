@@ -576,13 +576,18 @@ impl MemorySet {
         let ph_entsize = elf_header.pt2.ph_entry_size() as usize;
         let mut entry_point = elf_header.pt2.entry_point() as usize;
         let mut aux_vec: Vec<AuxHeader> = Vec::with_capacity(64);
-        let ph_va = elf.program_header(0).unwrap().virtual_addr() as usize;
+        let mut ph_va = 0;
+        // #[cfg(target_arch = "riscv64")]
+        // let ph_va = elf.program_header(0).unwrap().virtual_addr() as usize;
+        // #[cfg(target_arch = "loongarch64")]
+        // let ph_va = elf.program_header(0).unwrap().virtual_addr() as usize + elf_header.pt2.ph_offset() as usize;
 
         /* 映射程序头 */
         // 程序头表在内存中的起始虚拟地址
         // 程序头表一般是从LOAD段(且是代码段)开始
         let mut max_end_vpn = VirtPageNum(0);
         let mut need_dl: bool = false;
+        let mut first_load: bool = true;
 
         for i in 0..ph_count {
             // 程序头部的类型是Load, 代码段或数据段
@@ -591,6 +596,12 @@ impl MemorySet {
             if ph_type == Type::Load {
                 let start_va: VirtAddr = (ph.virtual_addr() as usize).into();
                 let end_va: VirtAddr = (ph.virtual_addr() as usize + ph.mem_size() as usize).into();
+
+                if first_load {
+                    // 这里是第一个LOAD段, 需要计算phdr的值
+                    ph_va = start_va.0 + elf_header.pt2.ph_offset() as usize;
+                    first_load = false;
+                }
 
                 // 注意用户要带U标志
                 let mut map_perm = MapPermission::U;
@@ -641,6 +652,7 @@ impl MemorySet {
                     );
                 }
             }
+
             // 判断是否需要动态链接
             if ph_type == Type::Interp {
                 need_dl = true;
@@ -1337,6 +1349,13 @@ impl MemorySet {
                     current_vpn.0
                 );
                 // self.page_table.dump_all_user_mapping();
+                self.areas.iter().for_each(|(vpn, area)| {
+                    log::error!(
+                        "[check_valid_user_vpn_range] area: {:#x?}, {:?}",
+                        area.vpn_range,
+                        area.map_perm
+                    );
+                });
                 return Err(Errno::EFAULT);
             }
         }

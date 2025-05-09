@@ -34,7 +34,7 @@ use crate::{
     task::{
         self, add_task,
         context::write_task_cx,
-        dump_scheduler, dump_task_queue,
+        dump_scheduler, dump_wait_queue,
         manager::{cancel_wait_alarm, delete_wait, register_task},
         wakeup, INITPROC,
     },
@@ -78,7 +78,10 @@ pub struct Task {
     children: Arc<SpinNoIrqLock<BTreeMap<Tid, Arc<Task>>>>, // 子任务
     thread_group: Arc<SpinNoIrqLock<ThreadGroup>>,          // 线程组
     exit_code: AtomicI32,                                   // 退出码
-    // 内存管理(包括System V shm管理)
+    exe_path: Arc<RwLock<String>>,                          // 执行路径
+
+    // 内存管理
+    // 包括System V shm管理
     memory_set: Arc<RwLock<MemorySet>>, // 地址空间
     // futex管理, 线程局部
     robust_list_head: AtomicUsize, // struct robust_list_head* head
@@ -91,7 +94,7 @@ pub struct Task {
     sig_handler: Arc<SpinNoIrqLock<SigHandler>>, // 信号处理函数
     sig_stack: SpinNoIrqLock<Option<SignalStack>>, // 额外信号栈
     itimerval: Arc<RwLock<[ITimerVal; 3]>>,      // 定时器
-    cpu_mask: SpinNoIrqLock<CpuMask>,           // CPU掩码
+    cpu_mask: SpinNoIrqLock<CpuMask>,            // CPU掩码
                                                  // Todo: 进程组
                                                  // ToDo：运行时间(调度相关)
                                                  // ToDo: 多核启动
@@ -125,6 +128,7 @@ impl Task {
             children: Arc::new(SpinNoIrqLock::new(BTreeMap::new())),
             thread_group: Arc::new(SpinNoIrqLock::new(ThreadGroup::new())),
             exit_code: AtomicI32::new(0),
+            exe_path: Arc::new(RwLock::new(String::new())),
             memory_set: Arc::new(RwLock::new(MemorySet::new_bare())),
             robust_list_head: AtomicUsize::new(0),
             fd_table: FdTable::new(),
@@ -165,6 +169,7 @@ impl Task {
             children: Arc::new(SpinNoIrqLock::new(BTreeMap::new())),
             thread_group: Arc::new(SpinNoIrqLock::new(ThreadGroup::new())),
             exit_code: AtomicI32::new(0),
+            exe_path: Arc::new(RwLock::new(String::from("/initproc"))),
             memory_set: Arc::new(RwLock::new(memory_set)),
             robust_list_head: AtomicUsize::new(0),
             fd_table: FdTable::new(),
@@ -203,6 +208,7 @@ impl Task {
         let tid = tid_alloc();
         let tid_address = SpinNoIrqLock::new(TidAddress::new());
         let exit_code = AtomicI32::new(0);
+        let exe_path;
         let status = SpinNoIrqLock::new(TaskStatus::Ready);
         let tgid;
         let mut kstack;
@@ -249,6 +255,7 @@ impl Task {
             children = self.children.clone();
             thread_group = self.thread_group.clone();
             itimerval = self.itimerval.clone();
+            exe_path = self.exe_path.clone();
         }
         // 创建进程
         else {
@@ -258,6 +265,7 @@ impl Task {
             children = Arc::new(SpinNoIrqLock::new(BTreeMap::new()));
             thread_group = Arc::new(SpinNoIrqLock::new(ThreadGroup::new()));
             itimerval = Arc::new(RwLock::new([ITimerVal::default(); 3]));
+            exe_path = Arc::new(RwLock::new(String::new()));
         }
 
         if flags.contains(CloneFlags::CLONE_VM) {
@@ -308,6 +316,7 @@ impl Task {
             parent,
             children,
             exit_code,
+            exe_path,
             thread_group,
             memory_set,
             robust_list_head,
@@ -479,6 +488,7 @@ impl Task {
 
     pub fn kernel_execve_lazily(
         self: &Arc<Self>,
+        exe_path: String,
         elf_file: Arc<dyn FileOp>,
         elf_data: &[u8],
         mut args_vec: Vec<String>,
@@ -490,6 +500,8 @@ impl Task {
             MemorySet::from_elf_lazily(elf_file, elf_data.to_vec(), &mut args_vec);
         // 更新页表
         memory_set.activate();
+        // 更新exe_path
+        *self.exe_path.write() = exe_path;
 
         #[cfg(target_arch = "loongarch64")]
         memory_set.push_with_offset(
@@ -726,6 +738,9 @@ impl Task {
     pub fn exit_code(&self) -> i32 {
         self.exit_code.load(core::sync::atomic::Ordering::SeqCst)
     }
+    pub fn exe_path(&self) -> String {
+        self.exe_path.read().clone()
+    }
     pub fn memory_set(&self) -> Arc<RwLock<MemorySet>> {
         self.memory_set.clone()
     }
@@ -881,9 +896,6 @@ pub fn kernel_exit(task: Arc<Task>, exit_code: i32) {
         }
     }
 
-    // 从线程组中移除
-    task.op_thread_group_mut(|tg| tg.remove(task.tid()));
-
     // 从调度队列中移除（包括阻塞队列）
     delete_wait(task.tid());
     remove_task(task.tid());
@@ -903,6 +915,10 @@ pub fn kernel_exit(task: Arc<Task>, exit_code: i32) {
         // 如果是主线程退出，从线程直接全部退出
         task.close_thread();
     }
+
+    // 从线程组中移除当前任务
+    task.op_thread_group_mut(|tg| tg.remove(task.tid()));
+
     // 设置当前任务为僵尸态
     task.set_zombie();
     log::warn!("[kernel_exit] Task{} become zombie", task.tid());

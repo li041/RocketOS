@@ -59,7 +59,11 @@ impl Page {
         block_device: Arc<dyn BlockDevice>,
         inode: Weak<dyn InodeOp>,
     ) -> Self {
-        let start_block_id = fs_block_id * (*FS_BLOCK_SIZE / VIRTIO_BLOCK_SIZE);
+        let start_block_id = if fs_block_id == usize::MAX {
+            usize::MAX
+        } else {
+            fs_block_id * (*FS_BLOCK_SIZE / VIRTIO_BLOCK_SIZE)
+        };
         unsafe {
             let ppn = frame_alloc_ppn().unwrap();
             let vaddr = (ppn.0 << PAGE_SIZE_BITS) + KERNEL_BASE;
