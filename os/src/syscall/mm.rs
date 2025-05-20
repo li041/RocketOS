@@ -3,7 +3,7 @@ use core::fmt::Debug;
 use crate::{
     arch::{
         config::{MMAP_MIN_ADDR, PAGE_SIZE, PAGE_SIZE_BITS},
-        mm::copy_to_user,
+        mm::copy_to_user, trap::context::dump_trap_context,
     },
     fs::file::File,
     index_list::{IndexList, ListIndex},
@@ -59,6 +59,8 @@ pub fn sys_brk(brk: usize) -> SyscallRet {
                     MapPermission::R | MapPermission::W | MapPermission::U,
                 );
             } else {
+                // 扩展堆空间
+                // 懒分配?
                 memory_set.remap_area_with_start_vpn(start_vpn, new_end_vpn);
             }
         } else if brk < floor_to_page_size(current_brk) {
@@ -209,9 +211,9 @@ pub fn sys_mmap(
 
     if flags.contains(MmapFlags::MAP_ANONYMOUS) {
         // 匿名映射
-        // 需要fd为-1, offset为0
+        // 需要offset为0
         // Todo: 支持lazy_allocation
-        if fd != -1 || offset != 0 {
+        if offset != 0 {
             return Err(Errno::EINVAL);
         }
         task.op_memory_set_mut(|memory_set| {

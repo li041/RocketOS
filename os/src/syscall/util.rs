@@ -1,7 +1,10 @@
 use core::time;
 
 use crate::{
-    arch::mm::{copy_from_user, copy_to_user},
+    arch::{
+        mm::{copy_from_user, copy_to_user},
+        trap::context::dump_trap_context,
+    },
     fs::uapi::{RLimit, Resource},
     syscall::errno::Errno,
     task::{add_real_timer, current_task, get_task, remove_timer, update_real_timer},
@@ -172,7 +175,12 @@ pub fn sys_prlimit64(
         get_task(pid).expect("[sys_prlimit64]: invalid pid")
     };
     let resource = Resource::try_from(resource).unwrap();
-    log::error!("resource: {:?}", resource);
+    log::error!(
+        "resource: {:?}, new_limit: {:#x}, old_limit: {:#x}",
+        resource,
+        new_limit as usize,
+        old_limit as usize
+    );
     // 如果old_limit不为NULL, 则将当前的rlimit写入old_limit
     if !old_limit.is_null() {
         let old_rlimit = task
@@ -307,10 +315,10 @@ pub fn sys_setitimer(
 }
 
 /*
-    函数 clock_getres() 用于查找指定时钟 clockid 的分辨率（精度）
-    如果 res 非空，则将其存储在 res 指向的 timespec 结构体中。
-    如果 clock_settime() 的参数 tp 指向的时间值不是 res 的倍数，则将其截断为 res 的倍数。（Todo)
- */
+   函数 clock_getres() 用于查找指定时钟 clockid 的分辨率（精度）
+   如果 res 非空，则将其存储在 res 指向的 timespec 结构体中。
+   如果 clock_settime() 的参数 tp 指向的时间值不是 res 的倍数，则将其截断为 res 的倍数。（Todo)
+*/
 pub fn sys_clock_getres(_clockid: usize, res: usize) -> SyscallRet {
     if res == 0 {
         return Ok(0);

@@ -14,10 +14,10 @@ use errno::{Errno, SyscallRet};
 use fs::{
     sys_chdir, sys_close, sys_dup, sys_dup3, sys_faccessat, sys_fchmodat, sys_fchownat, sys_fcntl,
     sys_fstat, sys_fstatat, sys_fsync, sys_ftruncate, sys_getcwd, sys_getdents64, sys_ioctl,
-    sys_linkat, sys_lseek, sys_mkdirat, sys_mknodat, sys_mount, sys_openat, sys_pipe2, sys_ppoll,
-    sys_pread, sys_pwrite, sys_read, sys_readlinkat, sys_readv, sys_renameat2, sys_sendfile,
-    sys_statfs, sys_statx, sys_sync, sys_umount2, sys_unlinkat, sys_utimensat, sys_write,
-    sys_writev,
+    sys_linkat, sys_lseek, sys_mkdirat, sys_mknodat, sys_mount, sys_msync, sys_openat, sys_pipe2,
+    sys_ppoll, sys_pread, sys_pselect6, sys_pwrite, sys_read, sys_readlinkat, sys_readv,
+    sys_renameat2, sys_sendfile, sys_statfs, sys_statx, sys_sync, sys_umount2, sys_unlinkat,
+    sys_utimensat, sys_write, sys_writev,
 };
 use mm::{
     sys_brk, sys_get_mempolicy, sys_madvise, sys_membarrier, sys_mlock, sys_mmap, sys_mprotect, sys_munmap, sys_shmat, sys_shmctl, sys_shmdt, sys_shmget
@@ -28,8 +28,8 @@ use signal::{
 };
 use task::{
     sys_clock_nansleep, sys_clone, sys_execve, sys_exit_group, sys_futex, sys_get_time,
-    sys_getegid, sys_geteuid, sys_getgid, sys_getpid, sys_getppid, sys_gettid, sys_getuid,
-    sys_nanosleep, sys_set_tid_address, sys_setpgid, sys_waitpid, sys_yield,
+    sys_getegid, sys_geteuid, sys_getgid, sys_getpgid, sys_getpid, sys_getppid, sys_gettid,
+    sys_getuid, sys_nanosleep, sys_set_tid_address, sys_setpgid, sys_waitpid, sys_yield,
 };
 use util::{sys_clock_getres, sys_clock_gettime, sys_prlimit64, sys_setitimer, sys_syslog, sys_times, sys_uname};
 use sched::{sys_sched_getaffinity, sys_sched_getparam, sys_sched_getscheduler, sys_sched_setscheduler};
@@ -123,6 +123,7 @@ const SYSCALL_SETGID: usize = 144;
 const SYSCALL_SETUID: usize = 146;
 const SYSCALL_TIMES: usize = 153;
 const SYSCALL_SETPGID: usize = 154;
+const SYSCALL_GETPGID: usize = 155;
 const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GETRUSAGE: usize = 165;
 const SYSCALL_GET_TIME: usize = 169;
@@ -143,6 +144,7 @@ const SYSCALL_FORK: usize = 220;
 const SYSCALL_EXEC: usize = 221;
 const SYSCALL_MMAP: usize = 222;
 const SYSCALL_MPROTECT: usize = 226;
+const SYSCALL_MSYNC: usize = 227;
 const SYSCALL_MLOCK: usize = 228;
 const SYSCALL_MADVISE: usize = 233;
 const SYSCALL_GET_MEMPOLICY: usize = 236;
@@ -153,7 +155,7 @@ const SYSCALL_GETRANDOM: usize = 278;
 const SYSCALL_MEMBARRIER: usize = 283;
 const SYSCALL_STATX: usize = 291;
 
-const CARELESS_SYSCALLS: [usize; 5] = [62, 63, 64, 124, 260];
+const CARELESS_SYSCALLS: [usize; 9] = [62, 63, 64, 72, 113, 124, 129, 165, 260];
 // const SYSCALL_NUM_2_NAME: [(&str, usize); 4] = [
 const SYSCALL_NUM_2_NAME: [(usize, &str); 5] = [
     (SYSCALL_SETGID, "SYS_SETGID"),
@@ -224,8 +226,9 @@ pub fn syscall(
         SYSCALL_PREAD => sys_pread(a0, a1 as *mut u8, a2, a3),
         SYSCALL_PWRITE => sys_pwrite(a0, a1 as *const u8, a2, a3),
         SYSCALL_SENDFILE => sys_sendfile(a0, a1, a2 as *mut usize, a3),
-        // SYSCALL_PSELECT6 => sys_pselect6(a0, a1, a2, a3, a4 as *const TimeSpec, a5),
+        SYSCALL_PSELECT6 => sys_pselect6(a0, a1, a2, a3, a4 as *const TimeSpec, a5),
         SYSCALL_PPOLL => sys_ppoll(a0 as *mut PollFd, a1, a2 as *const TimeSpec, a3),
+        SYSCALL_READLINKAT => sys_readlinkat(a0 as i32, a1 as *const u8, a2 as *mut u8, a3),
         SYSCALL_READLINKAT => sys_readlinkat(a0 as i32, a1 as *const u8, a2 as *mut u8, a3),
         SYSCALL_FSTATAT => sys_fstatat(a0 as i32, a1 as *const u8, a2 as *mut Stat, a3 as i32),
         SYSCALL_FSTAT => sys_fstat(a0 as i32, a1 as *mut Stat),
@@ -268,6 +271,7 @@ pub fn syscall(
         SYSCALL_RT_SIGRETURN => sys_rt_sigreturn(),
         SYSCALL_TIMES => sys_times(a0),
         SYSCALL_SETPGID => sys_setpgid(a0, a1),
+        SYSCALL_GETPGID => sys_getpgid(a0),
         SYSCALL_UNAME => sys_uname(a0),
         SYSCALL_GET_TIME => sys_get_time(a0),
         SYSCALL_GITPID => sys_getpid(),
@@ -287,6 +291,7 @@ pub fn syscall(
         SYSCALL_MPROTECT => sys_mprotect(a0, a1, a2 as i32),
         SYSCALL_MLOCK => sys_mlock(a0, a1),
         SYSCALL_GET_MEMPOLICY => sys_get_mempolicy(a0, a1, a2, a3, a4),
+        SYSCALL_MSYNC => sys_msync(a0, a1, a2 as i32),
         SYSCALL_FORK => sys_clone(a0 as u32, a1, a2, a3, a4),
         SYSCALL_EXEC => sys_execve(a0 as *mut u8, a1 as *const usize, a2 as *const usize),
         SYSCALL_MMAP => sys_mmap(a0, a1, a2, a3, a4 as i32, a5),

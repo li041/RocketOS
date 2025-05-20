@@ -1,7 +1,9 @@
 use crate::{
-    arch::trap::context::dump_trap_context, signal::{SiField, Sig, SigInfo}, task::{add_task, current_task, schedule, scheduler::dump_scheduler}, timer::{self, ITimerVal, TimeSpec}
+    arch::trap::context::dump_trap_context,
+    signal::{SiField, Sig, SigInfo},
+    task::{add_task, current_task, schedule, scheduler::dump_scheduler},
+    timer::{self, ITimerVal, TimeSpec},
 };
-use alloc::{task, vec};
 use alloc::{
     boxed::Box,
     collections::btree_map::BTreeMap,
@@ -9,6 +11,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
+use alloc::{task, vec};
 use hashbrown::HashMap;
 use lazy_static::lazy_static;
 use spin::Mutex;
@@ -86,7 +89,7 @@ impl TaskManager {
 
 // 将当前任务加入到basic队列并阻塞
 // 返回值：0：正常被唤醒； -1：被中断唤醒
-pub fn wait() -> isize{
+pub fn wait() -> isize {
     log::trace!("[wait]");
     let task = current_task();
     task.set_interruptable();

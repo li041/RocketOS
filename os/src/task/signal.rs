@@ -59,7 +59,6 @@ impl Task {
     pub fn set_uninterrupted(&self) {
         self.op_sig_pending_mut(|sig_pending| sig_pending.set_uninterrupted());
     }
-
     pub fn have_signals(&self) -> bool {
         !self.op_sig_pending_mut(|sig_pending| sig_pending.pending.is_empty())
     }

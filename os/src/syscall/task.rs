@@ -181,6 +181,12 @@ pub fn sys_setpgid(pid: usize, pgid: usize) -> SyscallRet {
     Ok(0)
 }
 
+pub fn sys_getpgid(pid: usize) -> SyscallRet {
+    log::info!("[sys_getpgid] pid: {}", pid);
+    log::warn!("[sys_getpgid] Uimplemented");
+    Ok(0)
+}
+
 pub fn sys_set_tid_address(tidptr: usize) -> SyscallRet {
     let task = current_task();
     log::info!("[sys_set_tid_address] tidptr:{:#x}", tidptr);
@@ -279,7 +285,11 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: usize, option: i32) -> SyscallRet 
             }
         });
         if let Some(wait_task) = target_task {
-            log::error!("wait_task: {}", wait_task.tid());
+            log::error!(
+                "cur_task: {}, wait_task: {}",
+                cur_task.tid(),
+                wait_task.tid()
+            );
             // 目标子进程已死
             if wait_task.is_zombie() {
                 cur_task.remove_child_task(wait_task.tid());

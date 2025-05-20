@@ -74,6 +74,83 @@ impl TimeSpec {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+pub struct TimeVal {
+    /// 绝对时间, 表示从UNIX time以来的秒数
+    pub sec: usize,
+    /// 毫秒数, 表示秒数后剩余的部分
+    pub usec: usize,
+}
+
+impl From<TimeSpec> for TimeVal {
+    fn from(ts: TimeSpec) -> Self {
+        Self {
+            sec: ts.sec,
+            usec: ts.nsec / 1000,
+        }
+    }
+}
+
+impl From<TimeVal> for TimeSpec {
+    fn from(tv: TimeVal) -> Self {
+        Self {
+            sec: tv.sec,
+            nsec: tv.usec * 1000,
+        }
+    }
+}
+
+impl TimeVal {
+    pub fn is_zero(&self) -> bool {
+        self.sec == 0 && self.usec == 0
+    }
+}
+
+impl PartialEq for TimeVal {
+    fn eq(&self, other: &Self) -> bool {
+        self.sec == other.sec && self.usec == other.usec
+    }
+}
+
+impl PartialOrd for TimeVal {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        if self.sec == other.sec {
+            Some(self.usec.cmp(&other.usec))
+        } else {
+            Some(self.sec.cmp(&other.sec))
+        }
+    }
+}
+
+impl Sub for TimeVal {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self::Output {
+        let mut sec = self.sec - rhs.sec;
+        let mut usec = self.usec as isize - rhs.usec as isize;
+        if usec < 0 {
+            sec -= 1;
+            usec += 1_000;
+        }
+        Self {
+            sec,
+            usec: usec as usize,
+        }
+    }
+}
+
+impl Add for TimeVal {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self::Output {
+        let mut sec = self.sec + rhs.sec;
+        let mut usec = self.usec + rhs.usec;
+        if usec >= 1_000_000 {
+            sec += 1;
+            usec -= 1_000_000;
+        }
+        Self { sec, usec }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
 #[repr(C)]
 pub struct ITimerVal {
     /// 每次定时器触发之后, 重新设置的时间间隔

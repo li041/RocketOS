@@ -54,6 +54,7 @@ use core::{
 use spin::{Mutex, RwLock};
 
 pub const INIT_PROC_PID: usize = 0;
+pub const RLIM_NLIMITS: usize = 16;
 
 extern "C" {
     fn strampoline();
@@ -94,6 +95,7 @@ pub struct Task {
     sig_handler: Arc<SpinNoIrqLock<SigHandler>>, // 信号处理函数
     sig_stack: SpinNoIrqLock<Option<SignalStack>>, // 额外信号栈
     itimerval: Arc<RwLock<[ITimerVal; 3]>>,      // 定时器
+    rlimit: Arc<RwLock<[RLimit; 16]>>,           // 资源限制
     cpu_mask: SpinNoIrqLock<CpuMask>,            // CPU掩码
                                                  // Todo: 进程组
                                                  // ToDo：运行时间(调度相关)
@@ -138,6 +140,7 @@ impl Task {
             sig_handler: Arc::new(SpinNoIrqLock::new(SigHandler::new())),
             sig_stack: SpinNoIrqLock::new(None),
             itimerval: Arc::new(RwLock::new([ITimerVal::default(); 3])),
+            rlimit: Arc::new(RwLock::new([RLimit::default(); RLIM_NLIMITS])),
             cpu_mask: SpinNoIrqLock::new(CpuMask::ALL),
         }
     }
@@ -179,6 +182,7 @@ impl Task {
             sig_handler: Arc::new(SpinNoIrqLock::new(SigHandler::new())),
             sig_stack: SpinNoIrqLock::new(None),
             itimerval: Arc::new(RwLock::new([ITimerVal::default(); 3])),
+            rlimit: Arc::new(RwLock::new([RLimit::default(); RLIM_NLIMITS])),
             cpu_mask: SpinNoIrqLock::new(CpuMask::ALL),
         });
         // 向线程组中添加该进程
@@ -223,6 +227,7 @@ impl Task {
         let sig_handler;
         let sig_pending;
         let sig_stack;
+        let rlimit;
         let cpu_mask;
         log::info!("[kernel_clone] task{} ready to clone ...", self.tid());
 
@@ -256,6 +261,7 @@ impl Task {
             thread_group = self.thread_group.clone();
             itimerval = self.itimerval.clone();
             exe_path = self.exe_path.clone();
+            rlimit = self.rlimit.clone();
         }
         // 创建进程
         else {
@@ -266,6 +272,7 @@ impl Task {
             thread_group = Arc::new(SpinNoIrqLock::new(ThreadGroup::new()));
             itimerval = Arc::new(RwLock::new([ITimerVal::default(); 3]));
             exe_path = Arc::new(RwLock::new(String::new()));
+            rlimit = Arc::new(RwLock::new([RLimit::default(); RLIM_NLIMITS]));
         }
 
         if flags.contains(CloneFlags::CLONE_VM) {
@@ -327,6 +334,7 @@ impl Task {
             sig_pending,
             sig_stack,
             itimerval,
+            rlimit,
             cpu_mask,
         });
         log::trace!("[kernel_clone] child task{} created", task.tid());
@@ -349,6 +357,7 @@ impl Task {
 
         // 更新子进程的trap_cx
         let mut trap_cx = get_trap_context(&task);
+        log::error!("[kernel_clone] user_sp: {:#x}", trap_cx.get_sp());
         if ustack_ptr != 0 {
             // ToDo: 检验用户栈指针
             trap_cx.set_sp(ustack_ptr);
@@ -496,7 +505,7 @@ impl Task {
     ) {
         log::info!("[kernel_execve] task{} do execve ...", self.tid());
         // 创建地址空间
-        let (mut memory_set, _satp, ustack_top, entry_point, aux_vec, tls_ptr) =
+        let (mut memory_set, _satp, ustack_top, entry_point, aux_vec) =
             MemorySet::from_elf_lazily(elf_file, elf_data.to_vec(), &mut args_vec);
         // 更新页表
         memory_set.activate();
@@ -549,11 +558,6 @@ impl Task {
             envp_base,
             auxv_base,
         );
-        // 设置tls
-        if let Some(tls_ptr) = tls_ptr {
-            log::error!("[kernel_execve] task{} tls_ptr: {:x}", self.tid(), tls_ptr);
-            trap_cx.set_tp(tls_ptr);
-        }
         save_trap_context(&self, trap_cx);
         log::trace!("[kernel_execve] task{} trap_cx updated", self.tid());
         // 重建线程组
@@ -694,7 +698,10 @@ impl Task {
                 let rlim = self.fd_table().get_rlimit();
                 Ok(rlim)
             }
-            _ => Err("not supported"),
+            _ => {
+                let rlim = self.op_rlimit(|rlimit| rlimit[resource as usize]);
+                Ok(rlim)
+            }
         }
     }
     pub fn set_rlimit(&self, resource: Resource, rlim: &RLimit) -> Result<(), &'static str> {
@@ -707,7 +714,13 @@ impl Task {
                 log::error!("[set_rlimit] Fake stack");
                 Ok(())
             }
-            _ => Err("not supported"),
+            _ => {
+                self.op_rlimit_mut(|rlimit| {
+                    rlimit[resource as usize].rlim_cur = rlim.rlim_cur;
+                    rlimit[resource as usize].rlim_max = rlim.rlim_max;
+                });
+                Ok(())
+            }
         }
     }
 
@@ -828,6 +841,12 @@ impl Task {
     }
     pub fn op_itimerval_mut<T>(&self, f: impl FnOnce(&mut [ITimerVal; 3]) -> T) -> T {
         f(&mut self.itimerval.write())
+    }
+    pub fn op_rlimit<T>(&self, f: impl FnOnce(&[RLimit; RLIM_NLIMITS]) -> T) -> T {
+        f(&self.rlimit.read())
+    }
+    pub fn op_rlimit_mut<T>(&self, f: impl FnOnce(&mut [RLimit; RLIM_NLIMITS]) -> T) -> T {
+        f(&mut self.rlimit.write())
     }
     /******************************** 任务状态判断 **************************************/
     pub fn is_ready(&self) -> bool {
