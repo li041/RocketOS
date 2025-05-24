@@ -832,6 +832,126 @@ pub fn sys_select(
 /// 1.根据nfds和readfds构造对应的掩码数组，read,write,except3中
 /// 2.一个loop来不断判断file[i]的状态，并更新read,write,except的掩码
 /// 3.处理timeout和signal结果
+// pub fn sys_pselect6(
+//     nfds: usize,
+//     readfds: usize,
+//     writefds: usize,
+//     exceptfds: usize,
+//     timeout: *const TimeSpec,
+//     sigmask: usize,
+// ) -> SyscallRet {
+//     //log::error!("[sys_pselecct6] nfds: {}, readfds: {:?}, writefds: {:?}, exceptfds: {:?}, timeout: {:?}, mask: {}",nfds,readfds,writefds,exceptfds,timeout,mask);
+//     // log::error!("[sys_pselect6]:begin pselect6");
+//     let task=current_task();
+//     log::error!("[sys_pselect6]:begin pselect6");
+//     log::error!(
+//         "nfds: {}, readfds: {:#x}, writefds: {:#x}, exceptfds: {:#x}, timeout: {:?}, sigmask: {:#x}",
+//         nfds,
+//         readfds,
+//         writefds,
+//         exceptfds,
+//         timeout,
+//         sigmask
+//     );
+//     let mut readfditer = match init_fdset(readfds, nfds) {
+//         Ok(rfditer) => rfditer,
+//         Err(e) => return Err(e),
+//     };
+//     let mut writeiter = match init_fdset(writefds, nfds) {
+//         Ok(wfditer) => wfditer,
+//         Err(e) => return Err(e),
+//     };
+//     let timeout = if timeout.is_null() {
+//         // timeout为负数对于poll来说是无限等待
+//         -1
+//     } else {
+//         let mut tmo: TimeSpec = TimeSpec::default();
+//         copy_from_user(timeout, &mut tmo as *mut TimeSpec, 1).unwrap();
+//         (tmo.sec * 1000 + tmo.nsec / 1000000) as isize
+//     };
+//     let origin_sigset = task.op_sig_pending_mut(|sig_pending| sig_pending.mask.clone());
+//     if sigmask != 0 {
+//         let mut sigset: SigSet = SigSet::default();
+//         copy_from_user(sigmask as *const SigSet, &mut sigset as *mut SigSet, 1)?;
+//         task.op_sig_pending_mut(|sig_pending| sig_pending.mask = sigset);
+//     }
+//     drop(task);
+//     loop {
+//         //这里必须要yield否则会死机
+//         yield_current_task();
+//         let mut set: usize = 0;
+//         if readfditer.fdset.valid() {
+//             for fd in 0..readfditer.fds.len() {
+     
+//                 log::error!("[sys_pselect6] read fd: {}", readfditer.fds[fd]);
+//                 if readfditer.files[fd].r_ready() {
+//                     //e内核会根据嗅探的结果设置fdset的对应位为1
+//                     readfditer.fdset.set(readfditer.fds[fd]);
+//                     set += 1;
+//                 }
+//             }
+//         }
+//         log::error!("[sys_pselect6] after read set is: {}",set);
+//         if writeiter.fdset.valid() {
+//             for i in 0..writeiter.fds.len() {
+//                 if writeiter.files[i].w_ready() {
+//                     writeiter.fdset.set(writeiter.fds[i]);
+//                     set += 1;
+//                 }
+//             }
+//         }
+//         log::error!("[sys_pselect6] after write set is: {}",set);
+//         //todo exception condition
+//         // if exceptiter.fdset.valid(){
+//         //     for i in 0..exceptiter.fds.len() {
+//         //         if exceptiter.files[i].{
+//         //             set+=1;
+//         //         }
+//         //     }
+//         // }
+//         if set > 0 {
+//             log::error!("[sys_pselect6]: set is {:?}", set);
+//             //将设置好的返回给用户
+//             if readfds != 0 {
+//                 // log::error!("[sys_pselect6] readfds fdset addr is {:?}",readfditer.fdset.get_addr());
+//                 copy_to_user(
+//                     readfds as *mut usize,
+//                     readfditer.fdset.get_addr() as *const usize,
+//                     readfditer.fdset.get_len(),
+//                 )?;
+//             }
+//             if writefds != 0 {
+//                 copy_to_user(
+//                     writefds as *mut usize,
+//                     writeiter.fdset.get_addr() as *const usize,
+//                     nfds,
+//                 )?;
+//             }
+//             return Ok(set);
+//         }
+//         if timeout == 0 {
+//             // timeout为0表示立即返回, 即使没有fd准备好
+//             break;
+//         } else if timeout > 0 {
+//             if get_time_ms() > timeout as usize {
+//                 // 超时了, 返回
+//                 log::error!("[sys_pselect]:timeout");
+//                 break;
+//             }
+//         }
+//         let task = current_task();
+//         if task.op_sig_pending_mut(|sig_pending| sig_pending.pending.contain_signal(Sig::SIGKILL)) {
+//             return Err(Errno::EINTR);
+//         }
+//         drop(task);
+//     }
+//     if sigmask != 0 {
+//         let task = current_task();
+//         task.op_sig_pending_mut(|sig_pending| sig_pending.mask = origin_sigset);
+        
+//     }
+//     return Ok(0);
+// }
 pub fn sys_pselect6(
     nfds: usize,
     readfds: usize,
@@ -842,25 +962,6 @@ pub fn sys_pselect6(
 ) -> SyscallRet {
     //log::error!("[sys_pselecct6] nfds: {}, readfds: {:?}, writefds: {:?}, exceptfds: {:?}, timeout: {:?}, mask: {}",nfds,readfds,writefds,exceptfds,timeout,mask);
     // log::error!("[sys_pselect6]:begin pselect6");
-    let task=current_task();
-    log::error!("[sys_pselect6]:begin pselect6");
-    log::error!(
-        "nfds: {}, readfds: {:#x}, writefds: {:#x}, exceptfds: {:#x}, timeout: {:?}, sigmask: {:#x}",
-        nfds,
-        readfds,
-        writefds,
-        exceptfds,
-        timeout,
-        sigmask
-    );
-    let mut readfditer = match init_fdset(readfds, nfds) {
-        Ok(rfditer) => rfditer,
-        Err(e) => return Err(e),
-    };
-    let mut writeiter = match init_fdset(writefds, nfds) {
-        Ok(wfditer) => wfditer,
-        Err(e) => return Err(e),
-    };
     let timeout = if timeout.is_null() {
         // timeout为负数对于poll来说是无限等待
         -1
@@ -869,6 +970,28 @@ pub fn sys_pselect6(
         copy_from_user(timeout, &mut tmo as *mut TimeSpec, 1).unwrap();
         (tmo.sec * 1000 + tmo.nsec / 1000000) as isize
     };
+    // log::error!(
+    //     "nfds: {}, readfds: {}, writefds: {}, exceptfds: {}, timeout: {}, sigmask: {}",
+    //     nfds,
+    //     readfds,
+    //     writefds,
+    //     exceptfds,
+    //     timeout,
+    //     sigmask
+    // );
+    let mut readfditer = match init_fdset(readfds, nfds) {
+        Ok(rfditer) => rfditer,
+        Err(e) => return Err(e),
+    };
+    let mut writeiter = match init_fdset(writefds, nfds) {
+        Ok(wfditer) => wfditer,
+        Err(e) => return Err(e),
+    };
+    let mut exceptiter = match init_fdset(exceptfds, nfds) {
+        Ok(exceptiter) => exceptiter,
+        Err(e) => return Err(e),
+    };
+    let task = current_task();
     let origin_sigset = task.op_sig_pending_mut(|sig_pending| sig_pending.mask.clone());
     if sigmask != 0 {
         let mut sigset: SigSet = SigSet::default();
@@ -877,13 +1000,12 @@ pub fn sys_pselect6(
     }
     drop(task);
     loop {
-        //这里必须要yield否则会死机
-        yield_current_task();
+        log::trace!("[sys_pselect6]:loop");
+        //这里必须要yield否则会死机           yield_current_task();
         let mut set: usize = 0;
         if readfditer.fdset.valid() {
             for fd in 0..readfditer.fds.len() {
-     
-                log::error!("[sys_pselect6] read fd: {}", readfditer.fds[fd]);
+                // log::error!("[sys_pselect6] read fd: {}", readfditer.fds[fd]);
                 if readfditer.files[fd].r_ready() {
                     //e内核会根据嗅探的结果设置fdset的对应位为1
                     readfditer.fdset.set(readfditer.fds[fd]);
@@ -891,7 +1013,7 @@ pub fn sys_pselect6(
                 }
             }
         }
-        log::error!("[sys_pselect6] after read set is: {}",set);
+        // log::error!("[sys_pselect6] after read set is: {}", set);
         if writeiter.fdset.valid() {
             for i in 0..writeiter.fds.len() {
                 if writeiter.files[i].w_ready() {
@@ -900,7 +1022,7 @@ pub fn sys_pselect6(
                 }
             }
         }
-        log::error!("[sys_pselect6] after write set is: {}",set);
+        // log::error!("[sys_pselect6] after write set is: {}", set);
         //todo exception condition
         // if exceptiter.fdset.valid(){
         //     for i in 0..exceptiter.fds.len() {
@@ -910,7 +1032,7 @@ pub fn sys_pselect6(
         //     }
         // }
         if set > 0 {
-            log::error!("[sys_pselect6]: set is {:?}", set);
+            // log::error!("[sys_pselect6]: set is {:?}", set);
             //将设置好的返回给用户
             if readfds != 0 {
                 // log::error!("[sys_pselect6] readfds fdset addr is {:?}",readfditer.fdset.get_addr());
@@ -927,6 +1049,14 @@ pub fn sys_pselect6(
                     nfds,
                 )?;
             }
+            if exceptfds != 0 {
+                copy_to_user(
+                    exceptfds as *mut usize,
+                    exceptiter.fdset.get_addr() as *const usize,
+                    nfds,
+                )
+                .unwrap();
+            }
             return Ok(set);
         }
         if timeout == 0 {
@@ -935,7 +1065,7 @@ pub fn sys_pselect6(
         } else if timeout > 0 {
             if get_time_ms() > timeout as usize {
                 // 超时了, 返回
-                log::error!("[sys_pselect]:timeout");
+                // log::error!("[sys_pselect]:timeout");
                 break;
             }
         }
@@ -944,15 +1074,45 @@ pub fn sys_pselect6(
             return Err(Errno::EINTR);
         }
         drop(task);
+        yield_current_task();
+    }
+    if readfds != 0 {
+        // log::error!("[sys_pselect6] readfds fdset addr is {:?}",readfditer.fdset.get_addr());
+        copy_to_user(
+            readfds as *mut usize,
+            readfditer.fdset.get_addr() as *const usize,
+            readfditer.fdset.get_len(),
+        )?;
+    }
+    if readfds != 0 {
+        // log::error!("[sys_pselect6] readfds fdset addr is {:?}",readfditer.fdset.get_addr());
+        copy_to_user(
+            readfds as *mut usize,
+            readfditer.fdset.get_addr() as *const usize,
+            readfditer.fdset.get_len(),
+        )?;
+    }
+    if writefds != 0 {
+        copy_to_user(
+            writefds as *mut usize,
+            writeiter.fdset.get_addr() as *const usize,
+            nfds,
+        )?;
+    }
+    if exceptfds != 0 {
+        copy_to_user(
+            exceptfds as *mut usize,
+            exceptiter.fdset.get_addr() as *const usize,
+            nfds,
+        )
+        .unwrap();
     }
     if sigmask != 0 {
         let task = current_task();
         task.op_sig_pending_mut(|sig_pending| sig_pending.mask = origin_sigset);
-        
     }
     return Ok(0);
 }
-
 
 // #[cfg(target_arch = "riscv64")]
 pub fn sys_ppoll(
