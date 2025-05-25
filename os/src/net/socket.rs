@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-03 16:40:04
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-05-24 17:52:21
+ * @LastEditTime: 2025-05-25 16:58:35
  * @FilePath: /RocketOS_netperfright/os/src/net/socket.rs
  * @Description: socket file
  * 
@@ -636,7 +636,7 @@ impl FileOp for Socket {
         if self.close_exec.load(core::sync::atomic::Ordering::Acquire) {
             flag|=OpenFlags::O_CLOEXEC;
         }
-        if self.is_nonblocking() {
+        if !self.is_nonblocking() {
             flag|=OpenFlags::O_NONBLOCK;
         }
         flag

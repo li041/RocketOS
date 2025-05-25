@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-03-30 16:26:09
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-05-24 17:12:07
+ * @LastEditTime: 2025-05-25 16:54:14
  * @FilePath: /RocketOS_netperfright/os/src/net/tcp.rs
  * @Description: tcp file 
  * 
@@ -242,10 +242,10 @@ impl TcpSocket {
         }
     }
     pub fn is_nonblocking(&self)->bool {
-        self.nonblock.load(Ordering::Acquire)
+        false
     }
     pub fn set_nonblocking(&self,block:bool) {
-        self.nonblock.store(false, Ordering::Release);
+        self.nonblock.store(block, Ordering::Release);
     }
     pub fn is_reuse_addr(&self)->bool {
         self.reuse_addr.load(Ordering::Acquire)

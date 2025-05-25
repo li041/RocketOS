@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-02 12:09:33
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-05-24 17:12:46
+ * @LastEditTime: 2025-05-25 16:54:22
  * @FilePath: /RocketOS_netperfright/os/src/net/udp.rs
  * @Description: udp socket
  * 
@@ -94,7 +94,7 @@ use super::SOCKET_SET;
         }
     }
     pub fn is_nonblocking(&self)->bool {
-        self.nonblock.load(core::sync::atomic::Ordering::Acquire)
+        false
     }
     pub fn set_nonblocking(&self,block:bool) {
         self.nonblock.store(false, core::sync::atomic::Ordering::Release);

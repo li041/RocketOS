@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-02 23:04:54
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-05-22 19:30:58
+ * @LastEditTime: 2025-05-25 16:47:50
  * @FilePath: /RocketOS_netperfright/os/src/syscall/net.rs
  * @Description: net syscall
  * 
@@ -124,7 +124,7 @@ pub fn syscall_connect(socketfd:usize,socketaddr:usize,socketlen:usize)->Syscall
     }
 }
 
-pub fn syscall_send(socketfd:usize,buf:*const u8,len:usize,socketaddr:usize,socketlen:usize,flag:usize)->SyscallRet {
+pub fn syscall_send(socketfd:usize,buf:*const u8,len:usize,flag:usize,socketaddr:usize,socketlen:usize)->SyscallRet {
     log::error!("[syscall_send]:begin send");
     log::error!("[syscall_send]:buf_prt:{}",buf as usize);
     log::error!("[syscall_send]:remote_addr:{}",socketaddr);
@@ -139,28 +139,14 @@ pub fn syscall_send(socketfd:usize,buf:*const u8,len:usize,socketaddr:usize,sock
         Some(s) => s,
         None => return Err(Errno::ENOTSOCK),
     };
-    let boundaddr=socket.name().unwrap();
+    let boundaddr=socket.name();
     log::error!("[syscall_send] sockt addr is {:?}",boundaddr);
     let addr;
     if socketaddr==0 {
         addr=match socket.peer_name() {
             Ok(a) => a,
             Err(e) => {
-                // if boundaddr.port()==49158 {
-                    from_ipendpoint_to_socketaddr(IpEndpoint::new(LOOP_BACK_IP, (boundaddr.port()+2 )as u16))
-                // }
-                // else if boundaddr.port()==49168 {
-                //     from_ipendpoint_to_socketaddr(IpEndpoint::new(LOOP_BACK_IP, 49170))
-                // }
-                // else if boundaddr.port()==49170 {
-                //     from_ipendpoint_to_socketaddr(IpEndpoint::new(LOOP_BACK_IP, 49168))
-                // }
-                // else if boundaddr.port()==49176 {
-                //     from_ipendpoint_to_socketaddr(IpEndpoint::new(LOOP_BACK_IP, 49178))
-                // }
-                // else {
-                //     return Err(e);
-                // }
+                    from_ipendpoint_to_socketaddr(IpEndpoint::new(LOOP_BACK_IP, (boundaddr.unwrap().port()+2 )as u16))
             },
         };
         log::error!("[syscall_send] peer name is {:?}",addr);
@@ -176,10 +162,13 @@ pub fn syscall_send(socketfd:usize,buf:*const u8,len:usize,socketaddr:usize,sock
     //todo,这里测试udp需要a修改
     match socket.send(kernel_buf.as_slice(), addr) {
         Ok(size) => {
-            copy_to_user(buf as *mut u8, kernel_buf.as_ptr(), len)?;
+            // copy_to_user(buf as *mut u8, kernel_buf.as_ptr(), len)?;
             Ok(size)
         },
-        Err(e) => Err(e)
+        Err(e) => {
+            log::error!("[syscall_send]:send error {:?}",e);
+            Err(e)
+        }
     }
 }
 pub fn syscall_recv(socketfd:usize,buf:*mut u8,len:usize,_socketaddr:usize,_socketlen:usize,_flag:usize)->SyscallRet {
@@ -351,7 +340,8 @@ pub fn syscall_getsockname(socketfd:usize,socketaddr:usize,socketlen:usize)->Sys
     //TODO sock name error
     let addr=socket.name().unwrap();
     log::error!("[syscall_getsockname]:addr{:?}",addr);
-    socket_address_to(addr, socketaddr, socketlen)
+    socket_address_to(addr, socketaddr, socketlen)?;
+    Ok(0)
 }
 pub fn syscall_getpeername(socketfd:usize,socketaddr:usize,socketlen:usize)->SyscallRet {
     log::error!("[syscall_getpeername]:begin getpeername");
