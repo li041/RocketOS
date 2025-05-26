@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-03-30 16:26:05
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-05-24 17:52:11
+ * @LastEditTime: 2025-05-26 16:50:54
  * @FilePath: /RocketOS_netperfright/os/src/net/mod.rs
  * @Description: net mod for interface wrapper,socketset 
  * 
@@ -236,15 +236,6 @@ impl<'a> SocketSetWrapper<'a> {
         LOOPBACK_DEV.lock().deref_mut(), 
     &mut self.0.lock());
         log::error!("[poll_interfaces]:LoopbackDev may readiness {}",b);
-        // let a=ETH0.poll(&self.0);
-        // log::error!("[poll_interfaces]:ETH0 may readiness {}",a);
-        // }
-        // else {
-            
-        //嗅探网卡，查看是否有输入输出的字符
-
-        // }
-
     }
 
     pub fn bind_check(&self, addr: IpAddress, port: u16) -> Result<usize, Errno> {

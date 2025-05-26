@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-03 16:40:04
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-05-26 14:04:51
+ * @LastEditTime: 2025-05-26 23:38:25
  * @FilePath: /RocketOS_netperfright/os/src/net/socket.rs
  * @Description: socket file
  * 
@@ -872,7 +872,7 @@ impl SocketOption {
     //配合getsockopt函数
     pub fn get(&self, socket: &Socket, opt_value: *mut u8, opt_len: *mut u32) {
         let buf_len = unsafe { *opt_len } as usize;
-
+        log::error!("[get_socket_option]buf_len is {:?}",buf_len);
         match self {
             SocketOption::SO_REUSEADDR => {
                 let value: i32 = if socket.get_reuse_addr() { 1 } else { 0 };
@@ -882,7 +882,8 @@ impl SocketOption {
                 }
 
                 unsafe {
-                    copy_nonoverlapping(&value.to_ne_bytes() as *const u8, opt_value, 4);
+                    // copy_nonoverlapping(&value.to_ne_bytes() as *const u8, opt_value, 4);
+                    copy_to_user(opt_value, &value.to_ne_bytes() as *const u8 , 4);
                     *opt_len = 4;
                 }
             }
@@ -894,31 +895,34 @@ impl SocketOption {
                 let size: i32 = if socket.dont_route { 1 } else { 0 };
 
                 unsafe {
-                    copy_nonoverlapping(&size.to_ne_bytes() as *const u8, opt_value, 4);
+                    // copy_nonoverlapping(&size.to_ne_bytes() as *const u8, opt_value, 4);
+                    copy_to_user(opt_value, &size.to_ne_bytes() as *const u8 , 4);
                     *opt_len = 4;
                 }
             }
             SocketOption::SO_SNDBUF => {
-                if buf_len < 4 {
-                    panic!("can't write a int to socket opt value");
-                }
+                // if buf_len < 4 {
+                //     panic!("can't write a int to socket opt value");
+                // }
 
                 let size: i32 = socket.get_send_buf_size() as i32;
 
                 unsafe {
-                    copy_nonoverlapping(&size.to_ne_bytes() as *const u8, opt_value, 4);
+                    copy_to_user(opt_value, &size.to_ne_bytes() as *const u8 , 4);
+                    // copy_nonoverlapping(&size.to_ne_bytes() as *const u8, opt_value, 4);
                     *opt_len = 4;
                 }
             }
             SocketOption::SO_RCVBUF => {
-                if buf_len < 4 {
-                    panic!("can't write a int to socket opt value");
-                }
+                // if buf_len < 4 {
+                //     panic!("can't write a int to socket opt value");
+                // }
 
                 let size: i32 = socket.get_recv_buf_size() as i32;
 
                 unsafe {
-                    copy_nonoverlapping(&size.to_ne_bytes() as *const u8, opt_value, 4);
+                    // copy_nonoverlapping(&size.to_ne_bytes() as *const u8, opt_value, 4);
+                    copy_to_user(opt_value, &size.to_ne_bytes() as *const u8 , 4);
                     *opt_len = 4;
                 }
             }
@@ -943,7 +947,8 @@ impl SocketOption {
                 };
 
                 unsafe {
-                    copy_nonoverlapping(&keep_alive.to_ne_bytes() as *const u8, opt_value, 4);
+                    // copy_nonoverlapping(&keep_alive.to_ne_bytes() as *const u8, opt_value, 4);
+                    copy_to_user(opt_value, &keep_alive.to_ne_bytes() as *const u8 , 4);
                     *opt_len = 4;
                 }
             }
@@ -954,13 +959,17 @@ impl SocketOption {
 
                 unsafe {
                     match socket.get_recv_timeout() {
-                        Some(time) => copy_nonoverlapping(
-                            (&time) as *const TimeSpec,
-                            opt_value as *mut TimeSpec,
-                            1,
-                        ),
+                        Some(time) =>{
+                        //     copy_nonoverlapping(
+                        //     (&time) as *const TimeSpec,
+                        //     opt_value as *mut TimeSpec,
+                        //     1,
+                        // )
+                            copy_to_user(opt_value as *mut TimeSpec, &time as *const TimeSpec, size_of::<TimeSpec>());
+                        }, 
                         None => {
-                            copy_nonoverlapping(&0u8 as *const u8, opt_value, size_of::<TimeSpec>())
+                            // copy_nonoverlapping(&0u8 as *const u8, opt_value, size_of::<TimeSpec>())
+                            copy_to_user(opt_value, &0u8 as *const u8 , size_of::<TimeSpec>());
                         }
                     }
 
@@ -1022,7 +1031,8 @@ impl TcpSocketOption {
                 let value = value.to_ne_bytes();
 
                 unsafe {
-                    copy_nonoverlapping(&value as *const u8, opt_addr, 4);
+                    // copy_nonoverlapping(&value as *const u8, opt_addr, 4);
+                    copy_to_user(opt_addr, &value as *const u8, 4);
                     *opt_len = 4;
                 }
             },
@@ -1032,7 +1042,8 @@ impl TcpSocketOption {
                 let value: usize = 1500;
 
                 unsafe {
-                    copy_nonoverlapping(&value as *const usize as *const u8, opt_addr, len);
+                    // copy_nonoverlapping(&value as *const usize as *const u8, opt_addr, len);
+                    copy_to_user(opt_addr, &value as *const usize as *const u8, len);
                     *opt_len = len as u32;
                 };
             },
@@ -1043,7 +1054,8 @@ impl TcpSocketOption {
                 let bytes = bytes.as_bytes();
 
                 unsafe {
-                    copy_nonoverlapping(bytes.as_ptr(), opt_addr, bytes.len());
+                    // copy_nonoverlapping(bytes.as_ptr(), opt_addr, bytes.len());
+                    copy_to_user(opt_addr, bytes.as_ptr(), bytes.len());
                     *opt_len = bytes.len() as u32;
                 };
             },

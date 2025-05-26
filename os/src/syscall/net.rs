@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-02 23:04:54
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-05-26 11:27:34
+ * @LastEditTime: 2025-05-26 23:57:45
  * @FilePath: /RocketOS_netperfright/os/src/syscall/net.rs
  * @Description: net syscall
  * 
@@ -15,7 +15,7 @@ use alloc::vec;
 use bitflags::Flags;
 use num_enum::TryFromPrimitive;
 use smoltcp::wire::IpEndpoint;
-use crate::{arch::mm::{copy_from_user, copy_to_user},fs::fdtable::FdFlags, net::{addr::{from_ipendpoint_to_socketaddr, LOOP_BACK_IP}, socket::{socket_address_from, socket_address_to, Domain, IpOption, Ipv6Option, Socket, SocketOption, SocketOptionLevel, SocketType, TcpSocketOption, SOCK_NONBLOCK}}, task::{current_task, yield_current_task}};
+use crate::{arch::mm::{copy_from_user, copy_to_user}, fs::fdtable::FdFlags, net::{addr::{from_ipendpoint_to_socketaddr, LOOP_BACK_IP}, socket::{socket_address_from, socket_address_to, Domain, IpOption, Ipv6Option, Socket, SocketOption, SocketOptionLevel, SocketType, TcpSocketOption, SOCK_NONBLOCK}}, syscall::task::sys_nanosleep, task::{current_task, yield_current_task}};
 
 use super::errno::{Errno, SyscallRet};
  ///函数会创建一个socket并返回一个fd,失败返回-1
@@ -23,6 +23,7 @@ use super::errno::{Errno, SyscallRet};
  /// flag:usize sockettype
  /// protocol:协议
 pub fn syscall_socket(domain:usize,sockettype:usize,_protocol:usize)->SyscallRet{
+    
     log::error!("[syscall_socket]:domain:{} sockettype:{}",domain,sockettype & 0xFF);
     let task=current_task();
     let domain=match Domain::try_from(domain) {
@@ -282,7 +283,15 @@ pub fn syscall_setsocketopt(fd:usize,level:usize,optname:usize,optval:*const u8,
 }
 
 pub fn syscall_getsocketopt(fd:usize,level:usize,optname:usize,optval:*mut u8,optlen:usize)->SyscallRet {
-    log::error!("[sys_getsocketopt] fd {:?} level {:?} optname {:?}",fd,level,optname);
+    log::error!("[sys_getsocketopt] fd {:?} level {:?} optname {:?},optlen {:?}",fd,level,optname,optlen);
+    let mut kernel_opt_len: u32 = 0;
+    // copy_from_user(src_user_addr, dst_kernel_addr, len_bytes)
+    // 这里把用户空间的 u32 拷到 kernel_opt_len
+    copy_from_user(
+        optlen as *const u32,
+        &mut kernel_opt_len as *mut u32,
+        core::mem::size_of::<u32>(),
+    )?; 
     let Ok(level) = SocketOptionLevel::try_from(level) else {
         log::error!("[setsockopt()] level {level} not supported");
         unimplemented!();
@@ -299,8 +308,6 @@ pub fn syscall_getsocketopt(fd:usize,level:usize,optname:usize,optval:*mut u8,op
         None => return Err(Errno::ENOTSOCK),
     };
 
-    // let opt = unsafe { copy_from_user(optval, optlen as usize).unwrap() };
-
     match level {
         //TODO getsockopt error
         SocketOptionLevel::IP => {
@@ -308,12 +315,12 @@ pub fn syscall_getsocketopt(fd:usize,level:usize,optname:usize,optval:*mut u8,op
         },
         SocketOptionLevel::Socket => {
             let option=SocketOption::try_from(optname).unwrap();
-            option.get(socket, optval, optlen as *mut u32);
+            option.get(socket, optval, kernel_opt_len as *mut u32);
             return Ok(0);
         },
         SocketOptionLevel::Tcp => {
             let option=TcpSocketOption::try_from(optname).unwrap();
-            option.get(socket, optval, optlen as *mut u32);
+            option.get(socket, optval, kernel_opt_len as *mut u32);
             return Ok(0);
         },
         SocketOptionLevel::IPv6 => {

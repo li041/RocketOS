@@ -444,7 +444,7 @@ checksum = "388a1df253eca08550bef6c72392cfe7c30914bf41df5269b68cbd6ff8f570a3"
 [[package]]
 name = "smoltcp"
 version = "0.11.0"
-source = "git+https://github.com/rcore-os/smoltcp.git?rev=8bf9a9a#8bf9a9a61ce9d50e72b71d541ecb24e29cc5450e"
+source = "git+https://github.com/BiorelaxA/smoltcp.git?branch=main#11b557e15674a2c347ae15d4453b741090823ddf"
 dependencies = [
  "bitflags 1.3.2",
  "byteorder",

@@ -1254,6 +1254,7 @@ impl MemorySet {
                         let ppn = page.ppn();
                         self.page_table.map(vpn, ppn, pte_flags);
                         area.pages.insert(vpn, Arc::new(page));
+                        // println!("1");
                         log::error!(
                             "[handle_lazy_allocation_area] lazy alloc area, vpn: {:#x}, ppn: {:#x}",
                             vpn.0,

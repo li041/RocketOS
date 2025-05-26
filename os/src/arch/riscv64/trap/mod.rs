@@ -125,6 +125,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
             log::error!("page fault cause {:?}", scause.cause());
             let task = current_task();
             task.op_memory_set_mut(|memory_set| {
+                // println!("ok1");
                 if let Err(_e) = memory_set.handle_recoverable_page_fault(va, casue) {
                     // memory_set.page_table.dump_all_user_mapping();
                     // dump_trap_context(&current_task());

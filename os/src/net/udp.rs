@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-02 12:09:33
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-05-25 16:54:22
+ * @LastEditTime: 2025-05-26 21:53:36
  * @FilePath: /RocketOS_netperfright/os/src/net/udp.rs
  * @Description: udp socket
  * 
@@ -197,7 +197,7 @@ use super::SOCKET_SET;
             Err(e) => {
                 log::error!("[recv_from_timeout]:recv error {:?}",e);
                 if get_time() > expire_at {
-                    Err(Errno::ETIMEDOUT)
+                    Err(Errno::EAGAIN)
                 } else {
                     Err(Errno::EAGAIN)
                 }
