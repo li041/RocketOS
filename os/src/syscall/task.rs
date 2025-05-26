@@ -559,7 +559,7 @@ pub fn sys_getuid() -> SyscallRet {
     Ok(0)
 }
 pub fn sys_geteuid() -> SyscallRet {
-    Ok(0)
+    Ok(1)
 }
 pub fn sys_getgid() -> SyscallRet {
     Ok(0)

@@ -33,9 +33,9 @@ endif
 
 elf: $(APPS) 
 ifeq ($(SUBMIT), true)
-	@cargo build --offline --release --target $(TARGET)
+	@$(shell which cargo)  build --offline --release --target $(TARGET)
 else
-	@cargo build $(MODE_ARG) --target $(TARGET)
+	@$(shell which cargo)  build $(MODE_ARG) --target $(TARGET)
 endif
 ifeq ($(TEST), 1)
 	@$(CP) $(TARGET_DIR)/usertests $(TARGET_DIR)/initproc
@@ -52,6 +52,6 @@ move-cargo:
 build: move-cargo binary
 
 clean:
-	@cargo clean
+	@$(shell which cargo)  clean
 
 .PHONY: elf binary build clean

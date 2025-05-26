@@ -72,11 +72,11 @@ pub fn schedule() {
     if let Some(next_task) = fetch_task() {
         let next_task_kernel_stack = next_task.kstack();
         {
-            log::debug!(
+            log::error!(
             "**********************************  task {} end **********************************",
             current_task().tid()
         );
-            log::debug!(
+            log::error!(
             "**********************************  task {} start **********************************",
             next_task.tid()
         );
@@ -96,10 +96,10 @@ pub fn schedule() {
             if let Some(next_task) = fetch_task() {
                 let next_task_kernel_stack = next_task.kstack();
                 {
-                    log::debug!(
+                    log::error!(
             "**********************************  task {} end **********************************",
             current_task().tid());
-                    log::debug!(
+                    log::error!(
             "**********************************  task {} start **********************************",
             next_task.tid());
                     // check_task_context_in_kernel_stack(next_task_kernel_stack);
@@ -118,11 +118,11 @@ pub fn schedule() {
                 if let Some(next_task) = fetch_task() {
                     let next_task_kernel_stack = next_task.kstack();
                     {
-                        log::debug!(
+                        log::error!(
                             "**********************************  task {} end **********************************",
                             current_task().tid()
                         );
-                        log::debug!(
+                        log::error!(
                             "**********************************  task {} start **********************************",
                             next_task.tid()
                         );
@@ -160,11 +160,11 @@ pub fn yield_current_task() {
         task.set_ready();
         // 将当前任务加入就绪队列
         add_task(task);
-        log::debug!(
+        log::error!(
             "**********************************  task {} end **********************************",
             current_task().tid()
         );
-        log::debug!(
+        log::error!(
             "**********************************  task {} start **********************************",
             next_task.tid()
         );
@@ -186,11 +186,11 @@ pub fn yield_current_task() {
             let next_task = fetch_task().unwrap();
             let next_task_kernel_stack = next_task.kstack();
             {
-                log::debug!(
+                log::error!(
                     "**********************************  task {} end **********************************",
                     current_task().tid()
                 );
-                log::debug!(
+                log::error!(
                     "**********************************  task {} start **********************************",
                     next_task.tid()
                 );

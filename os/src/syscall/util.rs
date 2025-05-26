@@ -217,7 +217,7 @@ pub fn sys_clock_gettime(clock_id: usize, timespec: *mut TimeSpec) -> SyscallRet
         return Ok(0);
     }
     match clock_id {
-        CLOCK_REALTIME | CLOCK_REALTIME_COARSE => {
+        CLOCK_REALTIME | CLOCK_REALTIME_COARSE |CLOCK_PROCESS_CPUTIME_ID=> {
             let time = TimeSpec::new_wall_time();
             // log::info!("[sys_clock_gettime] CLOCK_REALTIME: {:?}", time);
             copy_to_user(timespec, &time as *const TimeSpec, 1)?;
