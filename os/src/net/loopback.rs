@@ -142,4 +142,3 @@ impl Device for LoopbackDev {
         })
     }
 }
-

@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-03 16:40:04
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-05-26 10:35:06
+ * @LastEditTime: 2025-05-26 14:04:51
  * @FilePath: /RocketOS_netperfright/os/src/net/socket.rs
  * @Description: socket file
  * 
@@ -434,7 +434,12 @@ pub unsafe fn socket_address_from(addr: *const u8,len:usize, socket: &Socket) ->
             let port = u16::from_be(*kernel_addr_from_user.as_ptr().add(1));
             let task=current_task();
             // 2) 直接把后续 16 字节当作一个 u128 读入，再转换成主机字节序字节数组
-            let ip_bytes = (*(kernel_addr_from_user.as_ptr().add(2) as *const u128)).to_le_bytes();
+            let raw_u8_ptr = kernel_addr_from_user.as_ptr().add(2) as *const u8;
+            let mut ip_bytes = [0u8; 16];
+            unsafe {
+                // 从用户 vec 里拷 16 个字节到 ip_bytes
+                core::ptr::copy_nonoverlapping(raw_u8_ptr, ip_bytes.as_mut_ptr(), 16);
+            }
             log::error!("[socket_address_from] ip {:?},port {:?}",ip_bytes,port);
             // 3) 如果首字节为 32，返回一个“假”IPv6 地址；否则按正常流程
             if ip_bytes[0] == 32 {
