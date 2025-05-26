@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-02 23:04:54
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-05-26 23:57:45
+ * @LastEditTime: 2025-05-27 00:16:53
  * @FilePath: /RocketOS_netperfright/os/src/syscall/net.rs
  * @Description: net syscall
  * 
@@ -285,8 +285,6 @@ pub fn syscall_setsocketopt(fd:usize,level:usize,optname:usize,optval:*const u8,
 pub fn syscall_getsocketopt(fd:usize,level:usize,optname:usize,optval:*mut u8,optlen:usize)->SyscallRet {
     log::error!("[sys_getsocketopt] fd {:?} level {:?} optname {:?},optlen {:?}",fd,level,optname,optlen);
     let mut kernel_opt_len: u32 = 0;
-    // copy_from_user(src_user_addr, dst_kernel_addr, len_bytes)
-    // 这里把用户空间的 u32 拷到 kernel_opt_len
     copy_from_user(
         optlen as *const u32,
         &mut kernel_opt_len as *mut u32,
@@ -315,11 +313,17 @@ pub fn syscall_getsocketopt(fd:usize,level:usize,optname:usize,optval:*mut u8,op
         },
         SocketOptionLevel::Socket => {
             let option=SocketOption::try_from(optname).unwrap();
+            #[cfg(target_arch = "riscv64")]
+            option.get(socket, optval, optlen as *mut u32);
+            #[cfg(target_arch = "loongarch64")]
             option.get(socket, optval, kernel_opt_len as *mut u32);
             return Ok(0);
         },
         SocketOptionLevel::Tcp => {
             let option=TcpSocketOption::try_from(optname).unwrap();
+            #[cfg(target_arch = "riscv64")]
+            option.get(socket, optval, optlen as *mut u32);
+            #[cfg(target_arch = "loongarch64")]
             option.get(socket, optval, kernel_opt_len as *mut u32);
             return Ok(0);
         },

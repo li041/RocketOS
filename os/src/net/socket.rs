@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-03 16:40:04
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-05-26 23:38:25
+ * @LastEditTime: 2025-05-27 00:15:00
  * @FilePath: /RocketOS_netperfright/os/src/net/socket.rs
  * @Description: socket file
  * 
@@ -882,7 +882,9 @@ impl SocketOption {
                 }
 
                 unsafe {
-                    // copy_nonoverlapping(&value.to_ne_bytes() as *const u8, opt_value, 4);
+                    #[cfg(target_arch = "riscv64")]
+                    copy_nonoverlapping(&value.to_ne_bytes() as *const u8, opt_value, 4);
+                    #[cfg(target_arch = "loongarch64")]
                     copy_to_user(opt_value, &value.to_ne_bytes() as *const u8 , 4);
                     *opt_len = 4;
                 }
@@ -895,7 +897,9 @@ impl SocketOption {
                 let size: i32 = if socket.dont_route { 1 } else { 0 };
 
                 unsafe {
-                    // copy_nonoverlapping(&size.to_ne_bytes() as *const u8, opt_value, 4);
+                    #[cfg(target_arch = "riscv64")]
+                    copy_nonoverlapping(&size.to_ne_bytes() as *const u8, opt_value, 4);
+                    #[cfg(target_arch = "loongarch64")]
                     copy_to_user(opt_value, &size.to_ne_bytes() as *const u8 , 4);
                     *opt_len = 4;
                 }
@@ -908,8 +912,10 @@ impl SocketOption {
                 let size: i32 = socket.get_send_buf_size() as i32;
 
                 unsafe {
+                    #[cfg(target_arch = "loongarch64")]
                     copy_to_user(opt_value, &size.to_ne_bytes() as *const u8 , 4);
-                    // copy_nonoverlapping(&size.to_ne_bytes() as *const u8, opt_value, 4);
+                    #[cfg(target_arch = "riscv64")]
+                    copy_nonoverlapping(&size.to_ne_bytes() as *const u8, opt_value, 4);
                     *opt_len = 4;
                 }
             }
@@ -921,7 +927,9 @@ impl SocketOption {
                 let size: i32 = socket.get_recv_buf_size() as i32;
 
                 unsafe {
-                    // copy_nonoverlapping(&size.to_ne_bytes() as *const u8, opt_value, 4);
+                    #[cfg(target_arch = "riscv64")]
+                    copy_nonoverlapping(&size.to_ne_bytes() as *const u8, opt_value, 4);
+                    #[cfg(target_arch = "loongarch64")]
                     copy_to_user(opt_value, &size.to_ne_bytes() as *const u8 , 4);
                     *opt_len = 4;
                 }
@@ -947,7 +955,9 @@ impl SocketOption {
                 };
 
                 unsafe {
-                    // copy_nonoverlapping(&keep_alive.to_ne_bytes() as *const u8, opt_value, 4);
+                     #[cfg(target_arch = "riscv64")]
+                    copy_nonoverlapping(&keep_alive.to_ne_bytes() as *const u8, opt_value, 4);
+                    #[cfg(target_arch = "loongarch64")]
                     copy_to_user(opt_value, &keep_alive.to_ne_bytes() as *const u8 , 4);
                     *opt_len = 4;
                 }
@@ -960,15 +970,19 @@ impl SocketOption {
                 unsafe {
                     match socket.get_recv_timeout() {
                         Some(time) =>{
-                        //     copy_nonoverlapping(
-                        //     (&time) as *const TimeSpec,
-                        //     opt_value as *mut TimeSpec,
-                        //     1,
-                        // )
+                            #[cfg(target_arch = "riscv64")]
+                            copy_nonoverlapping(
+                            (&time) as *const TimeSpec,
+                            opt_value as *mut TimeSpec,
+                            1,
+                            );
+                            #[cfg(target_arch = "loongarch64")]
                             copy_to_user(opt_value as *mut TimeSpec, &time as *const TimeSpec, size_of::<TimeSpec>());
                         }, 
                         None => {
-                            // copy_nonoverlapping(&0u8 as *const u8, opt_value, size_of::<TimeSpec>())
+                            #[cfg(target_arch = "riscv64")]
+                            copy_nonoverlapping(&0u8 as *const u8, opt_value, size_of::<TimeSpec>());
+                            #[cfg(target_arch = "loongarch64")]
                             copy_to_user(opt_value, &0u8 as *const u8 , size_of::<TimeSpec>());
                         }
                     }
@@ -1031,7 +1045,9 @@ impl TcpSocketOption {
                 let value = value.to_ne_bytes();
 
                 unsafe {
-                    // copy_nonoverlapping(&value as *const u8, opt_addr, 4);
+                    #[cfg(target_arch = "riscv64")]
+                    copy_nonoverlapping(&value as *const u8, opt_addr, 4);
+                    #[cfg(target_arch = "loongarch64")]
                     copy_to_user(opt_addr, &value as *const u8, 4);
                     *opt_len = 4;
                 }
@@ -1042,7 +1058,9 @@ impl TcpSocketOption {
                 let value: usize = 1500;
 
                 unsafe {
-                    // copy_nonoverlapping(&value as *const usize as *const u8, opt_addr, len);
+                    #[cfg(target_arch = "riscv64")]
+                    copy_nonoverlapping(&value as *const usize as *const u8, opt_addr, len);
+                    #[cfg(target_arch = "loongarch64")]
                     copy_to_user(opt_addr, &value as *const usize as *const u8, len);
                     *opt_len = len as u32;
                 };
@@ -1054,7 +1072,9 @@ impl TcpSocketOption {
                 let bytes = bytes.as_bytes();
 
                 unsafe {
-                    // copy_nonoverlapping(bytes.as_ptr(), opt_addr, bytes.len());
+                    #[cfg(target_arch = "riscv64")]
+                    copy_nonoverlapping(bytes.as_ptr(), opt_addr, bytes.len());
+                    #[cfg(target_arch = "loongarch64")]
                     copy_to_user(opt_addr, bytes.as_ptr(), bytes.len());
                     *opt_len = bytes.len() as u32;
                 };
