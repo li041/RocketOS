@@ -38,7 +38,7 @@ use crate::{
         self, add_task,
         context::write_task_cx,
         dump_scheduler, dump_wait_queue,
-        manager::{cancel_wait_alarm, delete_wait, register_task},
+        manager::{add_group, cancel_wait_alarm, delete_wait, new_group, register_task},
         wakeup, INITPROC,
     },
     timer::{ITimerVal, TimeVal},
@@ -103,7 +103,10 @@ pub struct Task {
     itimerval: Arc<RwLock<[ITimerVal; 3]>>,      // 定时器
     rlimit: Arc<RwLock<[RLimit; 16]>>,           // 资源限制
     cpu_mask: SpinNoIrqLock<CpuMask>,            // CPU掩码
-                                                 // Todo: 进程组
+    pgid: AtomicUsize,                           // 进程组id
+    uid: AtomicUsize,                            // 用户id
+    euid: AtomicUsize,                           // 有效用户id
+    suid: AtomicUsize,                           // 保存用户id
                                                  // ToDo：运行时间(调度相关)
                                                  // ToDo: 多核启动
 }
@@ -149,6 +152,10 @@ impl Task {
             itimerval: Arc::new(RwLock::new([ITimerVal::default(); 3])),
             rlimit: Arc::new(RwLock::new([RLimit::default(); RLIM_NLIMITS])),
             cpu_mask: SpinNoIrqLock::new(CpuMask::ALL),
+            pgid: AtomicUsize::new(0),
+            uid: AtomicUsize::new(0),
+            euid: AtomicUsize::new(0),
+            suid: AtomicUsize::new(0),
         }
     }
 
@@ -158,6 +165,10 @@ impl Task {
             MemorySet::from_elf(elf_data.to_vec(), &mut Vec::<String>::new());
         let tid = tid_alloc();
         let tgid = AtomicUsize::new(tid.0);
+        let pgid = AtomicUsize::new(1);
+        let uid = AtomicUsize::new(0); // 默认为root(0)用户
+        let euid = AtomicUsize::new(0); 
+        let suid = AtomicUsize::new(0);
         // 申请内核栈
         let mut kstack = kstack_alloc();
         // Trap_context
@@ -192,6 +203,10 @@ impl Task {
             itimerval: Arc::new(RwLock::new([ITimerVal::default(); 3])),
             rlimit: Arc::new(RwLock::new([RLimit::default(); RLIM_NLIMITS])),
             cpu_mask: SpinNoIrqLock::new(CpuMask::ALL),
+            pgid,
+            uid,
+            euid,
+            suid
         });
         // 向线程组中添加该进程
         task.thread_group
@@ -199,6 +214,8 @@ impl Task {
             .add(task.tid(), Arc::downgrade(&task));
         add_task(task.clone());
         register_task(&task);
+        // 新建进程组
+        new_group(&task);
         // 令tp与kernel_tp指向主线程内核栈顶
         let task_ptr = Arc::as_ptr(&task) as usize;
         trap_context.set_tp(task_ptr);
@@ -211,6 +228,7 @@ impl Task {
             task_cx_ptr.write(task_context);
         }
         log::info!("[Initproc] Init-sp:\t{:#x}", kstack);
+        
         log::error!("[Initproc] Initproc complete!");
         task
     }
@@ -237,6 +255,10 @@ impl Task {
         let sig_stack;
         let rlimit;
         let cpu_mask;
+        let pgid;
+        let uid;
+        let euid;
+        let suid;
         log::info!("[kernel_clone] task{} ready to clone ...", self.tid());
 
         // 是否与父进程共享信号处理器
@@ -248,6 +270,12 @@ impl Task {
                 self.op_sig_handler_mut(|handler| handler.clone()),
             ))
         }
+
+        // 继承父进程
+        pgid = AtomicUsize::new(self.pgid());
+        uid = AtomicUsize::new(self.uid());
+        euid = AtomicUsize::new(self.euid());
+        suid = AtomicUsize::new(self.suid());
 
         // 创建线程
         if flags.contains(CloneFlags::CLONE_THREAD) {
@@ -346,6 +374,10 @@ impl Task {
             itimerval,
             rlimit,
             cpu_mask,
+            pgid,
+            uid,
+            euid,
+            suid,
         });
         log::trace!("[kernel_clone] child task{} created", task.tid());
 
@@ -362,8 +394,11 @@ impl Task {
                 }
             });
         }
+
         // 向线程组添加子进程 （包括当前任务为进程的情况）
         task.op_thread_group_mut(|tg| tg.add(task.tid(), Arc::downgrade(&task)));
+        // 向父进程组添加子进程
+        add_group(task.pgid(), &task);
 
         // 更新子进程的trap_cx
         let mut trap_cx = get_trap_context(&task);
@@ -388,6 +423,7 @@ impl Task {
         );
         log::info!("[kernel_clone] task{}-sp:\t{:x}", task.tid(), task.kstack());
         log::info!("[kernel_clone] task{}-tgid:\t{:x}", task.tid(), task.tgid());
+        log::info!("[kernel_clone] task{}-pgid:\t{:x}", task.tid(), task.pgid());
 
         let strong_count = Arc::strong_count(&task);
         if strong_count == 2 {
@@ -803,6 +839,22 @@ impl Task {
         *self.cpu_mask.lock()
     }
 
+    pub fn pgid(&self) -> usize {
+        self.pgid.load(core::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn uid(&self) -> usize {
+        self.uid.load(core::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn euid(&self) -> usize {
+        self.euid.load(core::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn suid(&self) -> usize {
+        self.suid.load(core::sync::atomic::Ordering::SeqCst)
+    }
+
     /*********************************** setter *************************************/
     pub fn set_root(&self, root: Arc<Path>) {
         *self.root.lock() = root;
@@ -831,6 +883,18 @@ impl Task {
     pub fn set_robust_list_head(&self, head: usize) {
         self.robust_list_head
             .store(head, core::sync::atomic::Ordering::SeqCst);
+    }
+    pub fn set_pgid(&self, pgid: usize) {
+        self.pgid.store(pgid, core::sync::atomic::Ordering::SeqCst);
+    }
+    pub fn set_uid(&self, uid: usize) {
+        self.uid.store(uid, core::sync::atomic::Ordering::SeqCst);
+    }
+    pub fn set_euid(&self, euid: usize) {
+        self.euid.store(euid, core::sync::atomic::Ordering::SeqCst);
+    }
+    pub fn set_suid(&self, suid: usize) {
+        self.suid.store(suid, core::sync::atomic::Ordering::SeqCst);
     }
 
     /*********************************** operator *************************************/
