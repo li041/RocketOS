@@ -24,9 +24,7 @@ use mm::{
     sys_munmap, sys_shmat, sys_shmctl, sys_shmdt, sys_shmget,
 };
 use net::{
-    syscall_accept, syscall_bind, syscall_connect, syscall_getpeername, syscall_getsocketopt,
-    syscall_getsockname, syscall_listen, syscall_recv, syscall_send, syscall_setsocketopt,
-    syscall_shutdown, syscall_socket,
+    syscall_accept, syscall_accept4, syscall_bind, syscall_connect, syscall_getpeername, syscall_getsocketopt, syscall_getsockname, syscall_listen, syscall_recv, syscall_send, syscall_setsocketopt, syscall_shutdown, syscall_socket
 };
 use sched::{
     sys_sched_getaffinity, sys_sched_getparam, sys_sched_getscheduler, sys_sched_setscheduler,
@@ -42,20 +40,14 @@ use task::{
     sys_waitpid, sys_yield,
 };
 use util::{
-    sys_clock_getres, sys_clock_gettime, sys_getrusage, sys_prlimit64, sys_setitimer, sys_syslog,
-    sys_times, sys_uname,
+    sys_adjtimex, sys_clock_adjtime, sys_clock_getres, sys_clock_gettime, sys_getrusage, sys_prlimit64, sys_setitimer, sys_syslog, sys_times, sys_uname
 };
 
 use crate::{
     fs::{
         kstat::{Stat, Statx},
         uapi::{IoVec, PollFd, RLimit, StatFs},
-    },
-    futex::robust_list::{sys_get_robust_list, sys_set_robust_list},
-    mm::shm::ShmId,
-    signal::{SigInfo, SigSet},
-    task::rusage::RUsage,
-    timer::{ITimerVal, TimeSpec},
+    }, futex::robust_list::{sys_get_robust_list, sys_set_robust_list}, mm::shm::ShmId, signal::{SigInfo, SigSet}, task::rusage::RUsage, time::KernelTimex, timer::{ITimerVal, TimeSpec}
 };
 pub use fs::FcntlOp;
 pub use fs::AT_SYMLINK_NOFOLLOW;
@@ -186,12 +178,14 @@ const SYSCALL_PRLIMIT: usize = 261;
 const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_GETRANDOM: usize = 278;
 const SYSCALL_MEMBARRIER: usize = 283;
-const SYSCALL_ACCEPT4: usize = 288;
+const SYSCALL_ACCEPT4: usize = 242;
 const SYSCALL_STATX: usize = 291;
 const SYSCALL_STRERROR: usize = 300;
 const SYSCALL_PERROR: usize = 301;
 const SYSCALL_PSELECT: usize = 72;
 const SYSCALL_SETSID: usize = 157;
+const SYSCALL_ADJTIMEX:usize=171;
+const SYSCALL_CLOCKADJTIME:usize=266;
 
 const CARELESS_SYSCALLS: [usize; 9] = [62, 63, 64, 72, 113, 124, 129, 165, 260];
 // const SYSCALL_NUM_2_NAME: [(&str, usize); 4] = [
@@ -344,7 +338,7 @@ pub fn syscall(
         SYSCALL_LISTEN => syscall_listen(a0, a1),
         SYSCALL_CONNECT => syscall_connect(a0, a1, a2),
         SYSCALL_ACCEPT => syscall_accept(a0, a1, a2),
-        SYSCALL_ACCEPT4 => syscall_accept(a0, a1, a2),
+        SYSCALL_ACCEPT4 => syscall_accept4(a0, a1, a2,a3),
         SYSCALL_SENDTO => syscall_send(a0, a1 as *const u8, a2, a3, a4, a5),
         SYSCALL_RECVFROM => syscall_recv(a0, a1 as *mut u8, a2, a3, a4, a5),
         SYSCALL_SHUTDOWN => syscall_shutdown(a0, a1),
@@ -372,7 +366,8 @@ pub fn syscall(
         // SYSCALL_SELECT=>sys_select(a0 , a1, a2,a3 ,a4 as *const TimeSpec , a5),
         SYSCALL_SETSOCKOPT => syscall_setsocketopt(a0, a1, a2, a3 as *const u8, a4),
         SYSCALL_GETSOCKOPT => syscall_getsocketopt(a0, a1, a2, a3 as *mut u8, a4),
-
+        SYSCALL_ADJTIMEX=>sys_adjtimex(a0 as *mut KernelTimex),
+        SYSCALL_CLOCKADJTIME=>sys_clock_adjtime(a0 as i32, a1 as *mut KernelTimex),
         _ => {
             log::warn!(
                 "Unsupported syscall_id: {}, {}",

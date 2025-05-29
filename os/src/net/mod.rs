@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-03-30 16:26:05
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-05-26 16:50:54
+ * @LastEditTime: 2025-05-28 18:23:55
  * @FilePath: /RocketOS_netperfright/os/src/net/mod.rs
  * @Description: net mod for interface wrapper,socketset 
  * 
@@ -156,6 +156,15 @@ pub fn add_membership(multicast_addr: IpAddress, _interface_addr: IpAddress) {
     // println!("[add_membership]add membership");
     let timestamp = SmolInstant::from_micros_const((get_time() / 1000) as i64);
     let _ = LOOPBACK.lock().join_multicast_group(
+        LOOPBACK_DEV.lock().deref_mut(),
+        multicast_addr,
+        timestamp,
+    );
+}
+pub fn remove_membership(multicast_addr: IpAddress, _interface_addr: IpAddress) {
+    // println!("[remove_membership]remove membership");
+    let timestamp = SmolInstant::from_micros_const((get_time() / 1000) as i64);
+    let _ = LOOPBACK.lock().leave_multicast_group(
         LOOPBACK_DEV.lock().deref_mut(),
         multicast_addr,
         timestamp,

@@ -136,6 +136,9 @@ impl RtcFile {
 }
 
 impl FileOp for RtcFile {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
     fn read(&self, buf: &mut [u8]) -> SyscallRet {
         let current_time = TimeSpec::new_wall_time();
         let date_time = DateTime::from(&current_time);
@@ -194,6 +197,9 @@ impl FileOp for RtcFile {
                 unimplemented!("RTC ioctl: {:?}", op);
             }
         }
+    }
+    fn get_flags(&self) -> OpenFlags {
+        self.flags
     }
 }
 

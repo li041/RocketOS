@@ -564,7 +564,7 @@ pub fn sys_setuid(uid: usize) -> SyscallRet {
     Ok(0)
 }
 pub fn sys_geteuid() -> SyscallRet {
-    Ok(1)
+    Ok(0)
 }
 pub fn sys_getgid() -> SyscallRet {
     Ok(0)

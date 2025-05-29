@@ -600,6 +600,7 @@ pub fn sys_pipe2(fdset_ptr: *mut i32, flags: i32) -> SyscallRet {
 }
 
 pub fn sys_close(fd: usize) -> SyscallRet {
+    log::error!("[sys_close] fd :{}", fd);
     let task = current_task();
     let fd_table = task.fd_table();
     if fd_table.close(fd) {

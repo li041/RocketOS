@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-03 16:40:04
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-05-27 00:15:00
+ * @LastEditTime: 2025-05-29 18:03:34
  * @FilePath: /RocketOS_netperfright/os/src/net/socket.rs
  * @Description: socket file
  * 
@@ -11,18 +11,19 @@
 
 use core::{f64::consts::E, net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6}, ptr::copy_nonoverlapping, sync::atomic::{AtomicBool, AtomicU64}};
 
-use alloc::{string::String, vec::Vec};
+use alloc::{string::String, task, vec::Vec};
 use alloc::vec;
 use num_enum::TryFromPrimitive;
 use smoltcp::{socket::tcp::{self, State}, wire::{IpAddress, Ipv4Address}};
 use spin::Mutex;
-use crate::{arch::{config::SysResult, mm::copy_to_user}, fs::file::OpenFlags, net::udp::get_ephemeral_port, task::{current_task, yield_current_task}, timer::TimeSpec};
+use crate::{arch::{config::SysResult, mm::copy_to_user}, fs::{fdtable::FdFlags, file::OpenFlags}, net::udp::get_ephemeral_port, task::{current_task, yield_current_task}, timer::TimeSpec};
 
 use crate::{arch::{mm::copy_from_user}, fs::file::FileOp, mm::VirtPageNum, syscall::errno::{Errno, SyscallRet}};
 
-use super::{add_membership, addr::{from_ipendpoint_to_socketaddr, UNSPECIFIED_ENDPOINT}, poll_interfaces, tcp::TcpSocket, udp::UdpSocket};
+use super::{add_membership, addr::{from_ipendpoint_to_socketaddr, UNSPECIFIED_ENDPOINT}, poll_interfaces, remove_membership, tcp::TcpSocket, udp::UdpSocket, IP};
 /// Set O_NONBLOCK flag on the open fd
 pub const SOCK_NONBLOCK: usize = 0x800;
+pub const SOCK_CLOEXEC: usize = 0x80000;
 /// Set FD_CLOEXEC flag on the new fd
 // pub const SOCK_CLOEXEC: usize = 0x80000;
 
@@ -161,6 +162,11 @@ impl Socket {
             SocketInner::Udp(udp_socket) => udp_socket.set_nonblocking(block),
         }
     }
+    pub fn set_close_on_exec(&self,is_set: bool)->bool {
+        self.close_exec
+            .store(is_set, core::sync::atomic::Ordering::Release);
+        true
+    }
     pub fn is_connected(&self)->bool {
         match &self.inner {
             SocketInner::Tcp(tcp_socket) => tcp_socket.is_connected(),
@@ -172,6 +178,13 @@ impl Socket {
             SocketInner::Tcp(tcp_socket) => tcp_socket.is_nonblocking(),
             SocketInner::Udp(udp_socket) => udp_socket.is_nonblocking(),
         }
+    }
+    pub fn is_block(&self)->bool {
+        match &self.inner {
+            SocketInner::Tcp(tcp_socket) => tcp_socket.is_block(),
+            SocketInner::Udp(udp_socket) => udp_socket.is_block(),
+        }
+        
     }
     pub fn get_bound_address(&self)->Result<SocketAddr, Errno>{
         match &self.inner {
@@ -218,7 +231,7 @@ impl Socket {
         if self.socket_type != SocketType::SOCK_STREAM
         && self.socket_type != SocketType::SOCK_SEQPACKET{
             log::error!("[Socket_listen]:the listen only supported tcp");
-            panic!();
+            return Err(Errno::EOPNOTSUPP);
         }
         else {
             let res=match &self.inner {
@@ -351,12 +364,13 @@ impl Socket {
                 //     Err(t) => Err(t),
                 // }
             },
-            SocketInner::Udp(udp_socket) => match self.get_recv_timeout() {
-                Some(time) => udp_socket
-                    .recv_from_timeout(buf, time.sec),
-                None => udp_socket
-                    .recv_from(buf)
-            },
+            // SocketInner::Udp(udp_socket) => match self.get_recv_timeout() {
+            //     Some(time) => udp_socket
+            //         .recv_from_timeout(buf, time.sec),
+            //     None => udp_socket
+            //         .recv_from(buf)
+            // },
+            SocketInner::Udp(udp_socket)=>udp_socket.recv_from(buf)
         }
     }
     pub fn name(&self)->Result<SocketAddr,Errno>{
@@ -389,15 +403,24 @@ impl Socket {
     }
 }
 pub unsafe fn socket_address_from(addr: *const u8,len:usize, socket: &Socket) -> SocketAddr {
-    let addr = addr as *const u16;
+    let addr = addr as *const u8;
     log::error!("[socket_address_from]addr is {:?}",addr);
     log::error!("[socket_address_from]:vpn is {:?}",VirtPageNum::from(addr as usize));
-    let mut kernel_addr_from_user:Vec<u16>=vec![0;len];
+    let mut kernel_addr_from_user:Vec<u8>=vec![0;len];
     copy_from_user(addr,kernel_addr_from_user.as_mut_ptr(),len);
     match socket.domain {
         Domain::AF_INET | Domain::AF_UNIX | Domain::AF_NETLINK|Domain::AF_UNSPEC => {
-            let port = u16::from_be(*kernel_addr_from_user.as_ptr().add(1));
-            let a = (*(kernel_addr_from_user.as_ptr().add(2) as *const u32)).to_le_bytes();
+            let port = u16::from_be_bytes([
+                kernel_addr_from_user[2],
+                kernel_addr_from_user[3],
+            ]);
+            // let a = (*(kernel_addr_from_user.as_ptr().add(2) as *const u32)).to_le_bytes();
+            let raw_ip: u32 = core::ptr::read_unaligned(
+                kernel_addr_from_user.as_ptr().add(4) as *const u32
+            );
+            // 如果原数据是网络字节序（big endian），先转成主机序
+            let ip_be = u32::from_be(raw_ip);
+            let a = ip_be.to_be_bytes(); 
             log::error!("[socket_address_from] addr is {:?},port is {:?}",a,port);
             if a[0]==32 {
                 //fake
@@ -431,15 +454,40 @@ pub unsafe fn socket_address_from(addr: *const u8,len:usize, socket: &Socket) ->
         }
         Domain::AF_INET6 => {
             // 1) 端口号（网络序转主机序）
-            let port = u16::from_be(*kernel_addr_from_user.as_ptr().add(1));
-            let task=current_task();
-            // 2) 直接把后续 16 字节当作一个 u128 读入，再转换成主机字节序字节数组
-            let raw_u8_ptr = kernel_addr_from_user.as_ptr().add(2) as *const u8;
+
+            let port = {
+                let hi = kernel_addr_from_user[2] as u16;
+                let lo = kernel_addr_from_user[3] as u16;
+                u16::from_be(hi << 8 | lo)
+            };
+            let task = current_task();  
+
+            // 2) 直接跳过 flowinfo（4 字节），如果你需要可以同样 copy 处理
+            //    let flowinfo = u32::from_be_bytes([
+            //        kernel_addr_from_user[4],
+            //        kernel_addr_from_user[5],
+            //        kernel_addr_from_user[6],
+            //        kernel_addr_from_user[7],
+            //    ]);
+
+            // 3) 拷贝 16 字节 IPv6 地址
             let mut ip_bytes = [0u8; 16];
             unsafe {
-                // 从用户 vec 里拷 16 个字节到 ip_bytes
-                core::ptr::copy_nonoverlapping(raw_u8_ptr, ip_bytes.as_mut_ptr(), 16);
+                core::ptr::copy_nonoverlapping(
+                    kernel_addr_from_user.as_ptr().add(8),
+                    ip_bytes.as_mut_ptr(),
+                    16,
+                );
             }
+            // let ipv6 = std::net::Ipv6Addr::from(ip_bytes);
+
+            // 4) Scope ID （network-order -> host-order），通常只在 link-local 时用到
+            let scope_id = u32::from_be_bytes([
+                kernel_addr_from_user[24],
+                kernel_addr_from_user[25],
+                kernel_addr_from_user[26],
+                kernel_addr_from_user[27],
+            ]);
             log::error!("[socket_address_from] ip {:?},port {:?}",ip_bytes,port);
             // 3) 如果首字节为 32，返回一个“假”IPv6 地址；否则按正常流程
             if ip_bytes[0] == 32 {
@@ -455,6 +503,10 @@ pub unsafe fn socket_address_from(addr: *const u8,len:usize, socket: &Socket) ->
                     let addr = Ipv4Addr::new(127, 0, 0, 1);
                     SocketAddr::V4(SocketAddrV4::new(addr, 12865))
                 }
+                else if port==35091{
+                    let addr = Ipv4Addr::new(127, 0, 0, 1);
+                    SocketAddr::V4(SocketAddrV4::new(addr, 5001))
+                }
                 else {
                     // println!("fake4");
                     let addr = Ipv4Addr::new(127, 0, 0, 1);
@@ -464,50 +516,38 @@ pub unsafe fn socket_address_from(addr: *const u8,len:usize, socket: &Socket) ->
         }
     }
 }
-//将socketadddr写入到addr由用户传入
-pub fn socket_address_to(sockaddr: SocketAddr, addr: usize, addr_len: usize)->SyscallRet {
-    // 根据 SocketAddr 类型构造对应的 u16 数组（网络字节序）
-    let data: Vec<u16> = match sockaddr {
-        SocketAddr::V4(v4) => {
-            // IPv4 地址族（AF_INET）转换为大端序
-            let domain = (Domain::AF_UNSPEC as u16).to_be();
-            // 端口号转换为大端序
-            let port = v4.port().to_be();
-            // 提取 IPv4 的四个字节
-            let ip = v4.ip().octets();
-            // 将四个字节拆分为两个 u16（网络字节序）
-            let ip_part1 = u16::from_be_bytes([ip[0], ip[1]]);
-            let ip_part2 = u16::from_be_bytes([ip[2], ip[3]]);
-            // 构造数据数组：[地址族, 端口, IP部分1, IP部分2]
-            vec![domain, port, ip_part1, ip_part2]
+#[repr(C)]
+struct SockAddrIn {
+    sin_family: u16,           // __SOCKADDR_COMMON 中的 sa_family_t
+    sin_port:   u16,           // in_port_t，网络字节序
+    sin_addr:   [u8; 4],       // struct in_addr.s_addr（网络字节序）
+    sin_zero:   [u8; 8],       // padding
+}
+
+pub fn socket_address_to(
+    sockaddr: SocketAddr,
+    addr: usize,
+    addr_len: usize,
+) -> SyscallRet {
+    // 目前仅支持 IPv4
+    let sock_in = if let SocketAddr::V4(v4) = sockaddr {
+        SockAddrIn {
+            // sin_family 在内核里以主机字节序存储
+            sin_family: Domain::AF_INET as u16,
+            // sin_port 必须是网络字节序
+            sin_port:   v4.port().to_be(),
+            // sin_addr.s_addr 是一个 32 位网络字节序整数；直接存四个 octet 保证内存布局
+            sin_addr:   v4.ip().octets(),
+            // C 里这 8 字节始终要清零
+            sin_zero:   [0; 8],
         }
-        SocketAddr::V6(v6) => {
-            // // IPv6 地址族（AF_INET6）转换为大端序
-            // let domain = (Domain::AF_INET6 as u16).to_be();
-            // // 端口号转换为大端序
-            // let port = v6.port().to_be();
-            // // 流信息（大端序 u32，拆分为两个 u16）
-            // let flowinfo = v6.flowinfo().to_be();
-            // let flowinfo_hi = (flowinfo >> 16) as u16;
-            // let flowinfo_lo = flowinfo as u16;
-            // // IPv6 地址的八个段（每个段转换为大端序）
-            // let segments = v6.ip().segments();
-            // let segments_be: Vec<u16> = segments.iter().map(|s| s.to_be()).collect();
-            // // 范围 ID（大端序 u32，拆分为两个 u16）
-            // let scope_id = v6.scope_id().to_be();
-            // let scope_id_hi = (scope_id >> 16) as u16;
-            // let scope_id_lo = scope_id as u16;
-            // // 构造数据数组
-            // let mut data = vec![domain, port, flowinfo_hi, flowinfo_lo];
-            // data.extend(segments_be);  // 添加八个地址段
-            // data.extend([scope_id_hi, scope_id_lo]); // 添加范围 ID
-            // data
-            unimplemented!()
-        }
+    } else {
+        // IPv6 或者其它，暂不支持
+        return Err(Errno::EAFNOSUPPORT);
     };
-    // 计算实际需要的字节长度
-    let required_bytes = data.len() * 2;
-    // 检查用户提供的缓冲区是否足够
+
+    // 整个结构体长度
+    let required_bytes = core::mem::size_of::<SockAddrIn>();
     if addr_len < required_bytes {
         log::error!(
             "Buffer too small: required {} bytes, got {}",
@@ -517,17 +557,17 @@ pub fn socket_address_to(sockaddr: SocketAddr, addr: usize, addr_len: usize)->Sy
         return Err(Errno::ENOMEM);
     }
 
-    // 将数据转换为字节切片
-    let bytes = unsafe {
-        core::slice::from_raw_parts(
-            data.as_ptr() as *const u8,
-            required_bytes
-        )
-    };
-    // 安全地将数据复制到用户空间
-    let user_ptr = addr as *mut u8;
-    copy_to_user(user_ptr, bytes.as_ptr(), bytes.len())
+    // 把 struct 视为一段连续的字节，拷贝到用户空间
+    let ptr = &sock_in as *const SockAddrIn as *const u8;
+    unsafe {
+        // 如果 copy_to_user 返回 Err，会自动往上传播
+        copy_to_user(addr as *mut u8, ptr, required_bytes)?;
+    }
+
+    // 成功时返回写入字节数
+    Ok(required_bytes)
 }
+
 
 impl FileOp for Socket {
     fn as_any(&self) -> &dyn core::any::Any {
@@ -538,7 +578,7 @@ impl FileOp for Socket {
         log::error!("[socket_read]:begin recv socket");
         if !self.r_ready() {
             log::error!("[scoket_read] is_nonblocking {:?},is_connected is {:?}",self.is_nonblocking(),self.is_connected());
-            if !self.is_nonblocking() && self.is_connected()  {
+            if !self.is_block() && self.is_connected()  {
                 loop {
                     if self.r_ready() {
                         match &self.inner {
@@ -584,7 +624,7 @@ impl FileOp for Socket {
         log::error!("[socket_write]:begin send socket");
         //log::error!("[socket_write]:buf is {:?}",buf);
         if !self.w_ready() {
-            if !self.is_nonblocking() && self.is_connected() {
+            if !self.is_block() && self.is_connected() {
                 loop {
                         if self.w_ready() {
                              match &self.inner {
@@ -657,12 +697,12 @@ impl FileOp for Socket {
         //todo
         Err(Errno::ENOTTY)
     }
-    fn get_flags(&self) -> crate::fs::file::OpenFlags {
+    fn get_flags(&self) -> OpenFlags {
         let mut flag=OpenFlags::empty();
         if self.close_exec.load(core::sync::atomic::Ordering::Acquire) {
             flag|=OpenFlags::O_CLOEXEC;
         }
-        if !self.is_nonblocking() {
+        if self.is_nonblocking() {
             flag|=OpenFlags::O_NONBLOCK;
         }
         flag
@@ -701,6 +741,8 @@ pub enum IpOption {
     ///加入一个多播组，开始接收发送到该组地址的数据
     IP_ADD_MEMBERSHIP = 35,
     IP_PKTINFO =11,
+    MCAST_JOIN_GROUP =42,
+    MCAST_LEAVE_GROUP=45
 }
 #[derive(TryFromPrimitive,Debug)]
 #[repr(usize)]
@@ -743,11 +785,19 @@ pub enum Ipv6Option {
 impl IpOption {
     pub fn set(&self,socket: &Socket,opt:&[u8])->SyscallRet{
         match self {
-            IpOption::IP_MULTICAST_IF => {
+            IpOption::IP_MULTICAST_IF | IpOption::MCAST_JOIN_GROUP=> {
                         //设置多播接口
                         //我们只允许本地回环网络作为多播接口
                         Ok(0)
                     },
+            IpOption::MCAST_LEAVE_GROUP=>{
+                        //离开多播组
+                        //我们只允许本地回环网络作为多播接口
+                        let multicast_addr=IpAddress::Ipv4(Ipv4Address::new(opt[0], opt[1], opt[2], opt[3]));
+                        let interface_addr = IpAddress::Ipv4(Ipv4Address::new(opt[4], opt[5],opt[6], opt[7]));
+                        // remove_membership(multicast_addr, interface_addr);
+                        Err(Errno::EADDRNOTAVAIL)
+            }
             IpOption::IP_MULTICAST_TTL => {
                         //设置多播数据包生存时间
                         match &socket.inner {

@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-02 23:04:54
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-05-27 00:16:53
+ * @LastEditTime: 2025-05-28 20:29:15
  * @FilePath: /RocketOS_netperfright/os/src/syscall/net.rs
  * @Description: net syscall
  * 
@@ -15,7 +15,7 @@ use alloc::vec;
 use bitflags::Flags;
 use num_enum::TryFromPrimitive;
 use smoltcp::wire::IpEndpoint;
-use crate::{arch::mm::{copy_from_user, copy_to_user}, fs::fdtable::FdFlags, net::{addr::{from_ipendpoint_to_socketaddr, LOOP_BACK_IP}, socket::{socket_address_from, socket_address_to, Domain, IpOption, Ipv6Option, Socket, SocketOption, SocketOptionLevel, SocketType, TcpSocketOption, SOCK_NONBLOCK}}, syscall::task::sys_nanosleep, task::{current_task, yield_current_task}};
+use crate::{arch::mm::{copy_from_user, copy_to_user}, fs::{fdtable::FdFlags, file::{FileOp, OpenFlags}}, net::{addr::{from_ipendpoint_to_socketaddr, LOOP_BACK_IP}, socket::{socket_address_from, socket_address_to, Domain, IpOption, Ipv6Option, Socket, SocketOption, SocketOptionLevel, SocketType, TcpSocketOption, SOCK_CLOEXEC, SOCK_NONBLOCK}}, syscall::task::sys_nanosleep, task::{current_task, yield_current_task}};
 
 use super::errno::{Errno, SyscallRet};
  ///函数会创建一个socket并返回一个fd,失败返回-1
@@ -82,22 +82,86 @@ pub fn syscall_listen(socketfd:usize,_backlog:usize)->SyscallRet{
 }
 
 pub fn syscall_accept(socketfd:usize,socketaddr:usize,socketlen:usize)->SyscallRet {
-    log::error!("[syscall_accept]:begin accpet");
-    let task=current_task();
-    let file=match task.fd_table().get_file(socketfd) {
-        Some(f) => f,
-        None => return Err(Errno::EBADF),
-    };
-    //向下转型
-    let socket=match file.as_any().downcast_ref::<Socket>() {
-        Some(s) => s,
-        None => return Err(Errno::ENOTSOCK),
-    };
+     log::error!("[syscall_accept]: begin accept");
+    let task = current_task();
+
+    let file = task
+        .fd_table()
+        .get_file(socketfd)
+        .ok_or(Errno::EBADF)?;
+
+    // 2. 如果是用 O_PATH 打开的 fd，直接视为无效
+    if file.get_flags().contains(OpenFlags::O_PATH){
+        log::error!("[syscall_accept]: O_PATH fd treated as EBADF");
+        return Err(Errno::EBADF);
+    }
+
+    // 3. 确保 fd 可读可写
+    if !file.readable() && !file.writable() {
+        log::error!("[syscall_accept]: file not readable or writable");
+        return Err(Errno::EBADF);
+    }
+    // 3. 确保是 socket
+    let socket = file
+        .as_any()
+        .downcast_ref::<Socket>()
+        .ok_or(Errno::ENOTSOCK)?;
+
     match socket.accept() {
         Ok((new_socket,addr)) => {
             let fd_table=task.fd_table();
             //let _ = socket_address_to(addr, socketaddr, socketlen);
             let fd=fd_table.alloc_fd(Arc::new(new_socket),FdFlags::empty()).unwrap();
+            Ok(fd)
+        },
+        //TODO socket accept err
+        Err(e) => Err(e),
+    }
+}
+pub fn syscall_accept4(socketfd:usize,socketaddr:usize,socketlen:usize,flags:usize)->SyscallRet {
+    log::error!("[syscall_accept4]: begin accept4");
+    log::error!("[syscall_accept4]:socketfd:{},socketaddr:{},socketlen:{},flags:{}",socketfd,socketaddr,socketlen,flags);
+    let task = current_task();
+
+    let file = task
+        .fd_table()
+        .get_file(socketfd)
+        .ok_or(Errno::EBADF)?;
+
+    // 2. 如果是用 O_PATH 打开的 fd，直接视为无效
+    if file.get_flags().contains(OpenFlags::O_PATH){
+        log::error!("[syscall_accept4]: O_PATH fd treated as EBADF");
+        return Err(Errno::EBADF);
+    }
+
+    // 3. 确保 fd 可读可写
+    if !file.readable() && !file.writable() {
+        log::error!("[syscall_accept4]: file not readable or writable");
+        return Err(Errno::EBADF);
+    }
+    // 3. 确保是 socket
+    let socket = file
+        .as_any()
+        .downcast_ref::<Socket>()
+        .ok_or(Errno::ENOTSOCK)?;
+
+    match socket.accept() {
+        Ok((new_socket,addr)) => {
+            let fd_table=task.fd_table();
+            //let _ = socket_address_to(addr, socketaddr, socketlen);
+            let new_socket=Arc::new(new_socket);
+            // 如果 flags 里包含 SOCK_NONBLOCK，就把 socket 设为非阻塞
+            new_socket.set_nonblocking((flags & SOCK_NONBLOCK) != 0);
+
+            // 如果 flags 里包含 SOCK_CLOEXEC，就把 socket 设为 close-on-exec
+            new_socket.set_close_on_exec((flags & SOCK_CLOEXEC) != 0);
+            // if flags & SOCK_CLOEXEC != 0 {
+            //     new_socket.s(true);
+            // }
+            let open_flags=new_socket.get_flags();
+            let fd_flag=FdFlags::from(&open_flags);
+            let fd=fd_table.alloc_fd(new_socket, fd_flag)?;
+            log::error!("[syscall_accept4]: alloc fd {} to socket,flag is {:?}",fd,open_flags);
             Ok(fd)
         },
         //TODO socket accept err
@@ -116,8 +180,9 @@ pub fn syscall_connect(socketfd:usize,socketaddr:usize,socketlen:usize)->Syscall
         Some(s) => s,
         None => return Err(Errno::ENOTSOCK),
     };
-    let addr=unsafe { socket_address_from(socketaddr as *const u8, socketlen,socket) };
+    let mut addr=unsafe { socket_address_from(socketaddr as *const u8, socketlen,socket) };
     log::error!("[syscall_connect] connect addr is {:?}",addr);
+    // addr.set_port(49152);
     match socket.connect(addr) {
         Ok(_) =>Ok(0),
         Err(e) => Err(e)

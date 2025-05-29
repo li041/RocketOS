@@ -124,6 +124,9 @@ impl MemInfoFile {
 }
 
 impl FileOp for MemInfoFile {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
     fn read(&self, buf: &mut [u8]) -> SyscallRet {
         let info = FAKEMEMINFO.read().serialize();
         let len = info.len();
@@ -162,6 +165,9 @@ impl FileOp for MemInfoFile {
     }
     fn get_inode(&self) -> Arc<dyn InodeOp> {
         self.inode.clone()
+    }
+    fn get_flags(&self) -> OpenFlags {
+        self.flags
     }
 }
 

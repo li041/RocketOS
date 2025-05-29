@@ -124,4 +124,10 @@ impl FileOp for ZeroFile {
     fn readable(&self) -> bool {
         true
     }
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+    fn get_flags(&self) -> OpenFlags {
+        self.flags
+    }
 }
