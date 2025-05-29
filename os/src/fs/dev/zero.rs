@@ -115,6 +115,9 @@ impl ZeroFile {
 }
 
 impl FileOp for ZeroFile {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
     fn read(&self, buf: &mut [u8]) -> SyscallRet {
         buf.fill(0);
         Ok(buf.len())

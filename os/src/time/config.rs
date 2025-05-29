@@ -4,6 +4,7 @@ use crate::syscall::errno::Errno;
 
 bitflags! {
     /// Modes for adjtimex()/clock_adjtime()/ntp_adjtime()
+    #[derive(Clone, Copy, Debug)]
     pub struct TimexModes: u32 {
         const ADJ_OFFSET           = 0x0001;
         const ADJ_FREQUENCY        = 0x0002;

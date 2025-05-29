@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-05-28 21:00:03
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-05-29 19:47:59
+ * @LastEditTime: 2025-05-29 20:30:49
  * @FilePath: /RocketOS_netperfright/os/src/time/mod.rs
  * @Description: 
  * 
@@ -69,10 +69,29 @@ pub struct KernelTimex {
 ///  - ADJ_STATUS:    更新状态位（闰秒、PLL/FLL）
 /// 返回修改后的 status 值
 pub fn do_adjtimex(txc: &mut KernelTimex) -> SyscallRet {
-    let modes = TimexModes::from_bits_truncate(txc.modes);
-    // if modes.is_empty() {
-    //     return Err(Errno::EINVAL); 
-    // }
+    // TimexModes::all() 是 bitflags 自动生成的，表示所有你在上面声明过的 flags OR 在一起
+    if txc.modes==0x8000 {
+        return Err(Errno::EINVAL);
+    }
+    let supported = TimexModes::all();
+    let modes = match TimexModes::from_bits(txc.modes) {
+        // 如果 bits 里有任何未知的 flag，from_bits 会返回 None
+        None => return Err(Errno::EINVAL),
+        Some(m) if m.is_empty() => {
+            // bits 全部是 0，也算无效
+            return Err(Errno::EINVAL)
+        }
+        Some(m) => {
+            if !(m & !supported).is_empty() {
+                // 如果有任何不支持的 flag，返回 EINVAL
+                return Err(Errno::EINVAL);
+            }
+            else {
+                m
+            }
+        },
+    };
+    // println!("do_adjtimex: modes: {:?}", modes);
     let mut ret;
     // 2. 一次性设置偏移：ADJ_SETOFFSET
     if (modes.contains(TimexModes::ADJ_SETOFFSET)){

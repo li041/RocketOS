@@ -167,6 +167,9 @@ impl PageMapFile {
 }
 
 impl FileOp for PageMapFile {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
     fn get_inode(&self) -> Arc<dyn InodeOp> {
         self.inode.clone()
     }
