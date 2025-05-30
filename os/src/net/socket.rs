@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-03 16:40:04
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-05-29 18:03:34
+ * @LastEditTime: 2025-05-30 21:55:59
  * @FilePath: /RocketOS_netperfright/os/src/net/socket.rs
  * @Description: socket file
  * 
@@ -11,12 +11,12 @@
 
 use core::{f64::consts::E, net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6}, ptr::copy_nonoverlapping, sync::atomic::{AtomicBool, AtomicU64}};
 
-use alloc::{string::String, task, vec::Vec};
+use alloc::{string::String, sync::Arc, task, vec::Vec};
 use alloc::vec;
 use num_enum::TryFromPrimitive;
 use smoltcp::{socket::tcp::{self, State}, wire::{IpAddress, Ipv4Address}};
 use spin::Mutex;
-use crate::{arch::{config::SysResult, mm::copy_to_user}, fs::{fdtable::FdFlags, file::OpenFlags}, net::udp::get_ephemeral_port, task::{current_task, yield_current_task}, timer::TimeSpec};
+use crate::{arch::{config::SysResult, mm::copy_to_user}, fs::{fdtable::FdFlags, file::OpenFlags, pipe::Pipe}, net::udp::get_ephemeral_port, task::{current_task, yield_current_task}, timer::TimeSpec};
 
 use crate::{arch::{mm::copy_from_user}, fs::file::FileOp, mm::VirtPageNum, syscall::errno::{Errno, SyscallRet}};
 
@@ -81,6 +81,7 @@ pub struct Socket{
     //setsockopt需要设置timeout,这里可以加一个
     recvtimeout:Mutex<Option<TimeSpec>>,
     dont_route:bool,
+    pub buffer:Option<Arc<Pipe>>,
 }
 
 unsafe impl Send for Socket {
@@ -154,7 +155,10 @@ impl Socket {
              send_buf_size: AtomicU64::new(64*1024),
             recv_buf_size: AtomicU64::new(64*1024), 
             recvtimeout:Mutex::new(None),
-            congestion: Mutex::new(String::from("reno")) }
+            congestion: Mutex::new(String::from("reno")),
+            buffer: None, 
+        }
+           
     }
     pub fn set_nonblocking(&self,block:bool) {
         match &self.inner {
@@ -256,6 +260,7 @@ impl Socket {
                         send_buf_size: AtomicU64::new(64*1024),
                         recv_buf_size: AtomicU64::new(64*1024),
                         congestion: Mutex::new(String::from("reno")),
+                        buffer: None,
                     },from_ipendpoint_to_socketaddr(remote_addr)))
                 }
                 Err(e)=>Err(e)
@@ -270,6 +275,7 @@ impl Socket {
     }
 
     pub fn connect(&self,addr:SocketAddr)->Result<(), Errno> {
+        
         match &self.inner {
             SocketInner::Tcp(tcp_socket) => tcp_socket.connect(addr),
             SocketInner::Udp(udp_socket) => udp_socket.connect(addr),
@@ -308,6 +314,10 @@ impl Socket {
     }
 
     pub fn send(&self,buf:&[u8],addr:SocketAddr)->Result<usize,Errno> {
+        // if self.domain==Domain::AF_UNIX {
+        //     //unix本地回环网络
+        //     return self.buffer.as_ref().unwrap().write(buf);
+        // }
         match &self.inner {
             SocketInner::Tcp(tcp_socket) => {
                 if tcp_socket.is_closed() {
@@ -331,9 +341,14 @@ impl Socket {
     }
     pub fn recv_from(&self,buf:&mut [u8])->Result<(usize,SocketAddr),Errno> {
         //这里暂时保留unix本地回环网络的接受，需要pipe?
-        // if self.domain==Domain::AF_UNIX {
-        //     let ans=self.
-        // }
+        if self.domain==Domain::AF_UNIX {
+            let ans=self.buffer.as_ref().unwrap().read(buf)?;
+            return Ok((
+                ans,
+                SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),0)
+            ));
+        }
         match &self.inner {
             SocketInner::Tcp(tcp_socket) => {
                 match self.get_recv_timeout() {
@@ -402,6 +417,39 @@ impl Socket {
         
     }
 }
+
+pub unsafe fn socket_address_from_unix(
+    addr: *const u8,
+    len: usize,
+    socket: &Socket,
+) -> Result<Vec<u8>,Errno> {
+    assert!(
+        socket.domain == Domain::AF_UNIX,
+        "[socket_address_from_unix]: the socket domain is not AF_UNIX"
+    );
+    let addr = addr as *const u8;
+    log::error!("[socket_address_from]addr is {:?}",addr);
+    log::error!("[socket_address_from]:vpn is {:?}",VirtPageNum::from(addr as usize));
+    // 从用户空间拷贝原始数据
+    let mut kernel_buf: Vec<u8> = vec![0; len];
+    copy_from_user(addr, kernel_buf.as_mut_ptr(), len)?;
+
+    // 跳过前两个字节（sockaddr_un.sa_family）
+    let raw_path = &kernel_buf[2..];
+
+    // 找第一个 '\0' 作为结尾
+    let path_len = raw_path
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(raw_path.len());
+
+    // （可选）验证 UTF-8，确保日志可读
+    core::str::from_utf8(&raw_path[..path_len]).expect("Invalid UTF-8 in socket path");
+
+    // 只返回实际用到的部分
+    Ok(raw_path[..path_len].to_vec())
+}
+
 pub unsafe fn socket_address_from(addr: *const u8,len:usize, socket: &Socket) -> SocketAddr {
     let addr = addr as *const u8;
     log::error!("[socket_address_from]addr is {:?}",addr);
@@ -409,7 +457,32 @@ pub unsafe fn socket_address_from(addr: *const u8,len:usize, socket: &Socket) ->
     let mut kernel_addr_from_user:Vec<u8>=vec![0;len];
     copy_from_user(addr,kernel_addr_from_user.as_mut_ptr(),len);
     match socket.domain {
-        Domain::AF_INET | Domain::AF_UNIX | Domain::AF_NETLINK|Domain::AF_UNSPEC => {
+            // let raw_path = &kernel_addr_from_user[2..];
+            //     // 找到第一个 '\0'（C 字符串终结符）
+            //     let path_len = raw_path.iter().position(|&b| b == 0).unwrap_or(raw_path.len());
+            //     // 验证 UTF-8（可选，只是为了确保日志打印不出乱码）
+            //     if core::str::from_utf8(&raw_path[..path_len]).is_err() {
+            //         panic!()
+            //     }
+            //     log::error!(
+            //         "[socket_address_from] AF_UNIX: invalid UTF-8 in path {:?}",
+            //         &raw_path[..path_len]
+            //     );
+            //     // 用一个定长数组来存储 path
+            //     let mut sun_path = [0u8; 300];
+            //     sun_path[..path_len].copy_from_slice(&raw_path[..path_len]);
+            //     log::error!(
+            //         "[socket_address_from] AF_UNIX path (len={}): {:?}",
+            //         path_len,
+            //         &sun_path[..path_len]
+            //     );
+
+            //     //todo
+            //     return SocketAddr::(UnixSocketAddr {
+            //         path: sun_path,
+            //         len: path_len,
+            //     });
+        Domain::AF_INET | Domain::AF_UNIX|Domain::AF_NETLINK|Domain::AF_UNSPEC => {
             let port = u16::from_be_bytes([
                 kernel_addr_from_user[2],
                 kernel_addr_from_user[3],
@@ -576,6 +649,11 @@ impl FileOp for Socket {
 
      fn read<'a>(&'a self, buf: &'a mut [u8]) -> SyscallRet {
         log::error!("[socket_read]:begin recv socket");
+        if self.domain==Domain::AF_UNIX {
+            //unix本地回环网络
+            return self.buffer.as_ref().unwrap().read(buf);
+            
+        }
         if !self.r_ready() {
             log::error!("[scoket_read] is_nonblocking {:?},is_connected is {:?}",self.is_nonblocking(),self.is_connected());
             if !self.is_block() && self.is_connected()  {
@@ -622,6 +700,9 @@ impl FileOp for Socket {
 
     fn write<'a>(&'a self, buf: &'a [u8]) -> SyscallRet {
         log::error!("[socket_write]:begin send socket");
+        if self.domain==Domain::AF_UNIX {
+            return self.buffer.as_ref().unwrap().write(buf);
+        }
         //log::error!("[socket_write]:buf is {:?}",buf);
         if !self.w_ready() {
             if !self.is_block() && self.is_connected() {
@@ -660,6 +741,9 @@ impl FileOp for Socket {
     }
     fn r_ready(&self) -> bool {
         log::error!("[sokcet_readable]:poll readable");
+        if self.domain==Domain::AF_UNIX {
+            return self.buffer.as_ref().unwrap().r_ready();
+        }
         // yield_current_task();
         poll_interfaces();
         match &self.inner {
@@ -673,6 +757,9 @@ impl FileOp for Socket {
         }
     }
     fn w_ready(&self) -> bool {
+        if self.domain==Domain::AF_UNIX {
+            return self.buffer.as_ref().unwrap().w_ready();
+        }
         poll_interfaces();
         log::error!("[sokcet_writedable]:poll writeable");
         match &self.inner {

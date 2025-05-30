@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-05-28 21:00:03
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-05-29 20:30:49
+ * @LastEditTime: 2025-05-30 22:11:53
  * @FilePath: /RocketOS_netperfright/os/src/time/mod.rs
  * @Description: 
  * 
@@ -77,10 +77,6 @@ pub fn do_adjtimex(txc: &mut KernelTimex) -> SyscallRet {
     let modes = match TimexModes::from_bits(txc.modes) {
         // 如果 bits 里有任何未知的 flag，from_bits 会返回 None
         None => return Err(Errno::EINVAL),
-        Some(m) if m.is_empty() => {
-            // bits 全部是 0，也算无效
-            return Err(Errno::EINVAL)
-        }
         Some(m) => {
             if !(m & !supported).is_empty() {
                 // 如果有任何不支持的 flag，返回 EINVAL

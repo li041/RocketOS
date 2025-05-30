@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-02 23:04:54
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-05-28 20:29:15
+ * @LastEditTime: 2025-05-30 22:18:33
  * @FilePath: /RocketOS_netperfright/os/src/syscall/net.rs
  * @Description: net syscall
  * 
@@ -10,22 +10,21 @@
  */
 
 use core::{fmt::Result, net::{IpAddr, Ipv4Addr, SocketAddr}};
-use alloc::{sync::Arc, vec::{Vec}};
+use alloc::{sync::Arc, task, vec::Vec};
 use alloc::vec;
 use bitflags::Flags;
 use num_enum::TryFromPrimitive;
 use smoltcp::wire::IpEndpoint;
-use crate::{arch::mm::{copy_from_user, copy_to_user}, fs::{fdtable::FdFlags, file::{FileOp, OpenFlags}}, net::{addr::{from_ipendpoint_to_socketaddr, LOOP_BACK_IP}, socket::{socket_address_from, socket_address_to, Domain, IpOption, Ipv6Option, Socket, SocketOption, SocketOptionLevel, SocketType, TcpSocketOption, SOCK_CLOEXEC, SOCK_NONBLOCK}}, syscall::task::sys_nanosleep, task::{current_task, yield_current_task}};
-
+use crate::{arch::mm::{copy_from_user, copy_to_user}, fs::{fdtable::FdFlags, file::{FileOp, OpenFlags}, pipe::{self, make_pipe}}, net::{addr::{from_ipendpoint_to_socketaddr, LOOP_BACK_IP}, socket::{socket_address_from, socket_address_from_unix, socket_address_to, Domain, IpOption, Ipv6Option, Socket, SocketOption, SocketOptionLevel, SocketType, TcpSocketOption, SOCK_CLOEXEC, SOCK_NONBLOCK}}, syscall::task::sys_nanosleep, task::{current_task, yield_current_task}};
+pub const SOCKET_TYPE_MASK: usize = 0xFF;
 use super::errno::{Errno, SyscallRet};
  ///函数会创建一个socket并返回一个fd,失败返回-1
  /// domain: 展示使用的
  /// flag:usize sockettype
  /// protocol:协议
-pub fn syscall_socket(domain:usize,sockettype:usize,_protocol:usize)->SyscallRet{
+pub fn syscall_socket(domain:usize,sockettype:usize,protocol:usize)->SyscallRet{
     
     log::error!("[syscall_socket]:domain:{} sockettype:{}",domain,sockettype & 0xFF);
-    let task=current_task();
     let domain=match Domain::try_from(domain) {
         Ok(res) => res,
         Err(e) => {return Err(Errno::EAFNOSUPPORT)},
@@ -34,7 +33,7 @@ pub fn syscall_socket(domain:usize,sockettype:usize,_protocol:usize)->SyscallRet
         Ok(res)=>res,
         Err(e)=>{return Err(Errno::EINVAL);},
     };
-    let socket=Arc::new(Socket::new(domain, s_type));
+    let  socket=Arc::new(Socket::new(domain, s_type));
     //SOCK_NONBLOCK=0X800,按照flag设计
     socket.set_nonblocking((sockettype&SOCK_NONBLOCK)!=0);
     let task=current_task();
@@ -180,7 +179,16 @@ pub fn syscall_connect(socketfd:usize,socketaddr:usize,socketlen:usize)->Syscall
         Some(s) => s,
         None => return Err(Errno::ENOTSOCK),
     };
-    let mut addr=unsafe { socket_address_from(socketaddr as *const u8, socketlen,socket) };
+    if socket.domain== Domain::AF_UNIX {
+        log::error!("[syscall_connect]: unix domain socket supported");
+        let mut path=unsafe { socket_address_from_unix(socketaddr as *const u8, socketlen, socket) }?;
+        log::error!("[syscall_connect]: unix domain socket path is {:?}",path);
+        //todo
+        //根据路径获得对于的inode,这个路径指向的就是unix套接字
+        //验证目标文件确实是一个 UNIX 域套接字文件
+        return Ok(0);
+    }
+    let addr=unsafe { socket_address_from(socketaddr as *const u8, socketlen,socket) };
     log::error!("[syscall_connect] connect addr is {:?}",addr);
     // addr.set_port(49152);
     match socket.connect(addr) {
@@ -435,4 +443,45 @@ pub fn syscall_getpeername(socketfd:usize,socketaddr:usize,socketlen:usize)->Sys
     let addr=socket.peer_name().unwrap();
     log::error!("[syscall_getpeername]:addr{:?}",addr);
     socket_address_to(addr, socketaddr, socketlen)
+}
+
+//socketpair中fd在socketfds中用数组给出
+pub fn syscall_socketpair(domain:usize,sockettype:usize,_protocol:usize,socketfds:*mut usize)->SyscallRet {
+    if domain != Domain::AF_UNIX as usize {
+        log::error!("[syscall_socketpair]: domain not supported");
+        panic!()
+    }
+    log::error!("[syscall_socketpair]:begin socketpair");
+    if SocketType::try_from(sockettype & SOCKET_TYPE_MASK).is_err() {
+        // return ErrorNo::EINVAL as isize;
+        return Err(Errno::EINVAL);
+    };
+    let mut fd_flags=OpenFlags::empty();
+    if sockettype & SOCK_NONBLOCK != 0 {
+        fd_flags |= OpenFlags::O_NONBLOCK;
+    }
+    if sockettype & SOCK_CLOEXEC != 0 {
+        fd_flags |= OpenFlags::O_CLOEXEC;
+    }
+    let (fd1, fd2) = make_socketpair(sockettype,fd_flags);
+    let task = current_task();
+    let fd_table = task.fd_table();
+    let fd_f=FdFlags::from(&fd_flags);
+    let fd_num1=fd_table.alloc_fd(fd1, fd_f)?;
+    let fd_num2=fd_table.alloc_fd(fd2, fd_f)?;
+    log::error!("alloc fd1 {} fd2 {} as socketpair", fd_num1, fd_num2);
+    //写回
+    let kernel_fds:Vec<usize> = vec![fd_num1, fd_num2];
+    copy_to_user(socketfds, kernel_fds.as_ptr(), 2)?;
+    Ok(0)
+}
+
+pub fn make_socketpair(sockettype:usize,pipe_flag:OpenFlags)->(Arc<Socket>,Arc<Socket>){
+    let s_type = SocketType::try_from(sockettype & SOCKET_TYPE_MASK).unwrap();
+    let mut fd1=Socket::new(Domain::AF_UNIX, s_type);
+    let mut fd2=Socket::new(Domain::AF_UNIX, s_type);
+    let (pipe1, pipe2) = make_pipe(pipe_flag);
+    fd1.buffer = Some(pipe1);
+    fd2.buffer = Some(pipe2);
+    (Arc::new(fd1), Arc::new(fd2))
 }

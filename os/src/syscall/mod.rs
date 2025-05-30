@@ -24,7 +24,7 @@ use mm::{
     sys_munmap, sys_shmat, sys_shmctl, sys_shmdt, sys_shmget,
 };
 use net::{
-    syscall_accept, syscall_accept4, syscall_bind, syscall_connect, syscall_getpeername, syscall_getsocketopt, syscall_getsockname, syscall_listen, syscall_recv, syscall_send, syscall_setsocketopt, syscall_shutdown, syscall_socket
+    syscall_accept, syscall_accept4, syscall_bind, syscall_connect, syscall_getpeername, syscall_getsocketopt, syscall_getsockname, syscall_listen, syscall_recv, syscall_send, syscall_setsocketopt, syscall_shutdown, syscall_socket, syscall_socketpair
 };
 use sched::{
     sys_sched_getaffinity, sys_sched_getparam, sys_sched_getscheduler, sys_sched_setscheduler,
@@ -196,7 +196,6 @@ const SYSCALL_PSELECT: usize = 72;
 const SYSCALL_SETSID: usize = 157;
 const SYSCALL_ADJTIMEX:usize=171;
 const SYSCALL_CLOCKADJTIME:usize=266;
-
 const CARELESS_SYSCALLS: [usize; 9] = [62, 63, 64, 72, 113, 124, 129, 165, 260];
 // const SYSCALL_NUM_2_NAME: [(&str, usize); 4] = [
 const SYSCALL_NUM_2_NAME: [(usize, &str); 1] = [(SYSCALL_SIGALTSTACK, "SYS_SIGALTSTACK")];
@@ -382,6 +381,7 @@ pub fn syscall(
         SYSCALL_GETSOCKOPT => syscall_getsocketopt(a0, a1, a2, a3 as *mut u8, a4),
         SYSCALL_ADJTIMEX=>sys_adjtimex(a0 as *mut KernelTimex),
         SYSCALL_CLOCKADJTIME=>sys_clock_adjtime(a0 as i32, a1 as *mut KernelTimex),
+        SYSCALL_SOCKETPAIR=>syscall_socketpair(a0, a1, a2, a3 as *mut usize),
         _ => {
             log::warn!(
                 "Unsupported syscall_id: {}, {}",
