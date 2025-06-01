@@ -640,6 +640,8 @@ impl Drop for Ext4Inode {
     fn drop(&mut self) {
         // 释放页缓存
         self.address_space.clear();
+        //
+        write_inode(&self, self.inode_num, self.block_device.clone());
         // 释放inode bitmap和inode table
         // self.ext4_fs.upgrade().unwrap().dealloc_inode(
         //     self.block_device.clone(),
@@ -1551,7 +1553,7 @@ pub fn modify_inode(inode: &Ext4Inode, block_device: Arc<dyn BlockDevice>) {
 
 /// 将新建的inode写回到block_cache
 /// 注意对于inode的修改, 不调用这个函数
-pub fn write_inode(inode: &Arc<Ext4Inode>, inode_num: usize, block_device: Arc<dyn BlockDevice>) {
+pub fn write_inode(inode: &Ext4Inode, inode_num: usize, block_device: Arc<dyn BlockDevice>) {
     log::warn!(
         "[write_inode] inode_num: {}, size: {}",
         inode_num,
