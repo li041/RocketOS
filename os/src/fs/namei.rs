@@ -14,6 +14,8 @@ use super::{
         meminfo::{self, MEMINFO},
         mounts::{MountsFile, MOUNTS},
         pagemap::PAGEMAP,
+        pid::PID_STAT,
+        status::STATUS,
     },
     FileOld, Stdin, FS_BLOCK_SIZE,
 };
@@ -26,6 +28,7 @@ use crate::{
         dentry::DentryFlags,
         dev::{null::NULL, rtc::RTC, urandom::URANDOM, zero::ZERO},
         fdtable::{FdEntry, FdFlags},
+        proc::pid::{record_target_pid, TARGERT_PID},
         AT_FDCWD,
     },
     syscall::{errno::Errno, AT_SYMLINK_NOFOLLOW},
@@ -206,7 +209,6 @@ pub fn open_last_lookups(
                 }
             }
         };
-
         return create_file_from_dentry(target_dentry, nd.mnt.clone(), flags);
     }
 }
@@ -244,6 +246,16 @@ fn create_file_from_dentry(
             let pagemap: Arc<dyn FileOp> = PAGEMAP.get().unwrap().clone();
             pagemap.seek(0, super::uapi::Whence::SeekSet).unwrap();
             return Ok(pagemap);
+        }
+        if dentry.absolute_path == "/proc/self/status" {
+            let status: Arc<dyn FileOp> = STATUS.get().unwrap().clone();
+            status.seek(0, super::uapi::Whence::SeekSet).unwrap();
+            return Ok(status);
+        }
+        if dentry.absolute_path == "/proc/pid/stat" {
+            let pid_stat: Arc<dyn FileOp> = PID_STAT.get().unwrap().clone();
+            pid_stat.seek(0, super::uapi::Whence::SeekSet).unwrap();
+            return Ok(pid_stat);
         }
     }
 
@@ -341,6 +353,11 @@ pub fn path_openat(
 //     1. nd.dentry即为父目录
 pub fn lookup_dentry(nd: &mut Nameidata) -> Arc<Dentry> {
     let mut absolute_current_dir = nd.dentry.absolute_path.clone();
+    if nd.path_segments.len() >= 2 && nd.path_segments[1] == "pid" && nd.path_segments[0] == "proc"
+    {
+        // 特殊处理/proc/pid目录
+        absolute_current_dir = "/proc/pid".to_string();
+    }
     absolute_current_dir = absolute_current_dir + "/" + &nd.path_segments[nd.depth];
     log::info!(
         "[lookup_dentry] absolute_current_dir: {}",
@@ -529,6 +546,10 @@ pub fn link_path_walk(nd: &mut Nameidata) -> Result<String, Errno> {
             let parent_dentry = nd.dentry.get_parent();
             nd.depth += 1;
             nd.dentry = parent_dentry;
+        } else if nd.path_segments[nd.depth].parse::<usize>().is_ok() {
+            record_target_pid(nd.path_segments[nd.depth].parse::<usize>().unwrap());
+            nd.path_segments[nd.depth] = "pid".to_string();
+            nd.depth += 1;
         } else {
             // name是String
             let mut dentry = lookup_dentry(nd);

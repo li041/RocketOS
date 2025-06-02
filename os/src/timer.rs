@@ -103,6 +103,10 @@ impl TimeVal {
     pub fn is_zero(&self) -> bool {
         self.sec == 0 && self.usec == 0
     }
+
+    pub fn timespec_to_ticks(&self) -> usize {
+        self.sec * TICKS_PER_SEC + self.usec / (1_000 / TICKS_PER_SEC)
+    }
 }
 
 impl PartialEq for TimeVal {
