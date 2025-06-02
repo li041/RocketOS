@@ -2,25 +2,25 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-03 16:40:04
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-05-30 21:55:59
+ * @LastEditTime: 2025-06-01 18:12:20
  * @FilePath: /RocketOS_netperfright/os/src/net/socket.rs
  * @Description: socket file
  * 
  * Copyright (c) 2025 by peterluck2021@163.com, All Rights Reserved. 
  */
 
-use core::{f64::consts::E, net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6}, ptr::copy_nonoverlapping, sync::atomic::{AtomicBool, AtomicU64}};
+use core::{cell::RefCell, f64::consts::E, net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6}, ptr::copy_nonoverlapping, sync::atomic::{AtomicBool, AtomicU64}};
 
-use alloc::{string::String, sync::Arc, task, vec::Vec};
+use alloc::{string::{String, ToString}, sync::Arc, task, vec::Vec};
 use alloc::vec;
 use num_enum::TryFromPrimitive;
 use smoltcp::{socket::tcp::{self, State}, wire::{IpAddress, Ipv4Address}};
-use spin::Mutex;
-use crate::{arch::{config::SysResult, mm::copy_to_user}, fs::{fdtable::FdFlags, file::OpenFlags, pipe::Pipe}, net::udp::get_ephemeral_port, task::{current_task, yield_current_task}, timer::TimeSpec};
+use spin::{Mutex, MutexGuard};
+use crate::{arch::{config::SysResult, mm::copy_to_user}, fs::{fdtable::FdFlags, file::OpenFlags, pipe::Pipe, uapi::IoVec}, net::{alg::AlgType, udp::get_ephemeral_port, unix::PasswdEntry}, task::{current_task, yield_current_task}, timer::TimeSpec};
 
 use crate::{arch::{mm::copy_from_user}, fs::file::FileOp, mm::VirtPageNum, syscall::errno::{Errno, SyscallRet}};
 
-use super::{add_membership, addr::{from_ipendpoint_to_socketaddr, UNSPECIFIED_ENDPOINT}, poll_interfaces, remove_membership, tcp::TcpSocket, udp::UdpSocket, IP};
+use super::{add_membership, addr::{from_ipendpoint_to_socketaddr, UNSPECIFIED_ENDPOINT}, alg::SockAddrAlg, poll_interfaces, remove_membership, tcp::TcpSocket, udp::UdpSocket, unix::{Database, NscdRequest, RequestType}, IP};
 /// Set O_NONBLOCK flag on the open fd
 pub const SOCK_NONBLOCK: usize = 0x800;
 pub const SOCK_CLOEXEC: usize = 0x80000;
@@ -36,6 +36,7 @@ pub enum Domain {
     AF_INET6=10,
     AF_NETLINK=16,
     AF_UNSPEC=512,
+    AF_ALG=38,
 }
 #[derive(TryFromPrimitive, Clone, PartialEq, Eq, Debug,Copy)]
 #[repr(usize)]
@@ -82,6 +83,10 @@ pub struct Socket{
     recvtimeout:Mutex<Option<TimeSpec>>,
     dont_route:bool,
     pub buffer:Option<Arc<Pipe>>,
+    isaf_alg:AtomicBool,
+    //只有在isaf_alg为true时才有意义
+    pub socket_af_alg:Mutex<Option<SockAddrAlg>>,
+    pub socket_nscdrequest:Mutex<Option<NscdRequest>>,
 }
 
 unsafe impl Send for Socket {
@@ -157,6 +162,9 @@ impl Socket {
             recvtimeout:Mutex::new(None),
             congestion: Mutex::new(String::from("reno")),
             buffer: None, 
+            isaf_alg: AtomicBool::new(false),
+            socket_af_alg: Mutex::new(None),
+            socket_nscdrequest: Mutex::new(None),
         }
            
     }
@@ -190,6 +198,12 @@ impl Socket {
         }
         
     }
+    pub fn get_is_af_alg(&self)->bool {
+        self.isaf_alg.load(core::sync::atomic::Ordering::Acquire)   
+    }
+    pub fn set_is_af_alg(&self,af:bool){
+        self.isaf_alg.store(af, core::sync::atomic::Ordering::Release);
+    } 
     pub fn get_bound_address(&self)->Result<SocketAddr, Errno>{
         match &self.inner {
             SocketInner::Tcp(tcp_socket) => {
@@ -213,6 +227,20 @@ impl Socket {
             SocketInner::Tcp(tcp_socket) => tcp_socket.bind(local_addr),
             SocketInner::Udp(udp_socket) => udp_socket.bind(local_addr),
         }
+    }
+    pub fn bind_af_alg(&self,addr:SockAddrAlg)->SyscallRet {
+        if self.domain!=Domain::AF_ALG {
+            log::error!("[Socket_bind_af_alg]:the socket domain is not AF_ALG");
+            panic!();
+        }
+        ///必须是af_alg的socket
+        assert!(addr.salg_family==Domain::AF_ALG as u16,"[Socket_bind_af_alg]:the socket domain is not AF_ALG");
+        assert!(self.get_is_af_alg()==true,"[Socket_bind_af_alg]:the socket is not af_alg");
+        let al_type=AlgType::from_raw_salg_type(&addr.salg_type);
+        log::error!("[Socket_bind_af_alg]:the alg type is {:?}",al_type);
+        *self.socket_af_alg.lock()=Some(addr);
+        //匹配对应的算法，绑定到对应的算法上，这里只要保证内核存在socket,后续通过fd加下面这个函数即可访问对应的加密算法
+        Ok(0)
     }
     pub fn listen(&self) {
         //监听只对tcp有用，udp不需要建立连接
@@ -261,6 +289,9 @@ impl Socket {
                         recv_buf_size: AtomicU64::new(64*1024),
                         congestion: Mutex::new(String::from("reno")),
                         buffer: None,
+                        isaf_alg: AtomicBool::new(false),
+                        socket_af_alg: Mutex::new(None),
+                        socket_nscdrequest: Mutex::new(None),
                     },from_ipendpoint_to_socketaddr(remote_addr)))
                 }
                 Err(e)=>Err(e)
@@ -272,6 +303,33 @@ impl Socket {
                 
             // }
         }
+    }
+    pub fn accept_alg(&self)->Result<Self,Errno> {
+        // assert!(self.domain==Domain::AF_ALG,"[Socket_accept_alg]:the socket domain is not AF_ALG");
+        if self.domain!=Domain::AF_ALG {
+            log::error!("[Socket_accept_alg]:the socket domain is not AF_ALG");
+            return Err(Errno::EOPNOTSUPP);
+        }
+        // assert!(self.get_is_af_alg()==true,"[Socket_accept_alg]:the socket is not af_alg");
+        if !self.get_is_af_alg() {
+            log::error!("[Socket_accept_alg]:the socket is not af_alg");
+            return Err(Errno::EOPNOTSUPP);
+        }
+        Ok(Socket {
+            dont_route:false,
+            domain: self.domain.clone(),
+            socket_type: self.socket_type,
+            inner: SocketInner::Tcp(TcpSocket::new()),
+            recvtimeout:Mutex::new(None),
+            close_exec: AtomicBool::new(false),
+            send_buf_size: AtomicU64::new(64*1024),
+            recv_buf_size: AtomicU64::new(64*1024),
+            congestion: Mutex::new(String::from("reno")),
+            buffer: None,
+            isaf_alg: AtomicBool::new(true),
+            socket_af_alg: Mutex::new(self.socket_af_alg.lock().clone()),
+            socket_nscdrequest: Mutex::new(None),
+        })
     }
 
     pub fn connect(&self,addr:SocketAddr)->Result<(), Errno> {
@@ -339,9 +397,64 @@ impl Socket {
             }
         }
     }
+    pub fn unix_send(&self,buf:&[u8])->Result<usize,Errno> {
+        //构建内核nscd请求
+        let mut tmp4 = [0u8; 4];
+        tmp4.copy_from_slice(&buf[0..4]);
+        let raw_req = u32::from_le_bytes(tmp4);
+        let req_type = RequestType::try_from(raw_req)
+            .map_err(|_| Errno::EINVAL)?;
+        tmp4.copy_from_slice(&buf[4..8]);
+        let raw_db = u32::from_le_bytes(tmp4);
+        let db = if raw_db == 0 {
+            None
+        } else {
+            Some(Database::try_from(raw_db).map_err(|_| Errno::EINVAL)?)
+        };
+        tmp4.copy_from_slice(&buf[8..12]);
+        let str_len = u32::from_le_bytes(tmp4) as usize;
+        if str_len == 0 {
+            return Err(Errno::EINVAL);
+        }
+        let raw_str_bytes = &buf[12 .. 12 + str_len];
+        //    最后一个字节必须是 0
+        if raw_str_bytes[str_len - 1] != 0 {
+            return Err(Errno::EINVAL);
+        }
+        let key_bytes = &raw_str_bytes[.. (str_len - 1)];
+        let key = match core::str::from_utf8(key_bytes) {
+            Ok(s) => s,
+            Err(_) => return Err(Errno::EINVAL),
+        };
+        let key_string = alloc::string::String::from(key);
+        let parsed = NscdRequest {
+            req_type,
+            db,
+            key: key_string,
+        };
+        log::error!("[Socket_unix_send]:parsed is {:?}",parsed);
+        *self.socket_nscdrequest.lock() = Some(parsed);
+        Ok(buf.len())
+    }
     pub fn recv_from(&self,buf:&mut [u8])->Result<(usize,SocketAddr),Errno> {
         //这里暂时保留unix本地回环网络的接受，需要pipe?
         if self.domain==Domain::AF_UNIX {
+            if self.buffer.is_none() {
+                let passwd_blob = PasswdEntry::passwd_lookup(self, buf.len())?;
+                log::error!("[socket_read]:len is {:?}",passwd_blob.len());
+
+                // 2) 把 blob 里的字节一次性 copy 进用户给的 buf
+                //    只要 blob.len() <= buf.len()，就不会越界
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        passwd_blob.as_ptr(),
+                        buf.as_mut_ptr(),
+                        passwd_blob.len(),
+                    );
+                }
+                return Ok((passwd_blob.len(), SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),0)));
+            }
             let ans=self.buffer.as_ref().unwrap().read(buf)?;
             return Ok((
                 ans,
@@ -417,6 +530,66 @@ impl Socket {
         
     }
 }
+pub unsafe fn socket_address_from_af_alg(
+    addr: *const u8,
+    len: usize,
+) ->Result<SockAddrAlg,Errno> {
+
+    // 2. 拷贝用户空间数据到内核分配的 Vec
+    let mut buf: Vec<u8> = Vec::with_capacity(len);
+    buf.set_len(len);
+    copy_from_user(addr, buf.as_mut_ptr(), len)?;
+
+    // 3. 解析未对齐的结构体
+    let sa: SockAddrAlg = core::ptr::read_unaligned(buf.as_ptr() as *const SockAddrAlg);
+
+    // 4. 提取 NUL 结尾的字符串
+    let ty_end = sa.salg_type.iter().position(|&b| b == 0).unwrap_or(sa.salg_type.len());
+    let nm_end = sa.salg_name.iter().position(|&b| b == 0).unwrap_or(sa.salg_name.len());
+    let alg_type = core::str::from_utf8(&sa.salg_type[..ty_end])
+        .unwrap_or("<invalid utf8 type>")
+        .to_string();
+    let alg_name = core::str::from_utf8(&sa.salg_name[..nm_end])
+        .unwrap_or("<invalid utf8 name>")
+        .to_string();
+    log::error!("[socket_address_from_af_alg] alg_type is {:?},alg_name is {:?}",alg_type,alg_name);
+    // 5. 返回解析结果
+    Ok(sa)
+}
+/// 下面是我们要补充的“检查函数”，专门负责：
+///   - 提取 `salg_type`、`salg_name`
+///   - 如果 `salg_type == "hash"` 并且 `salg_name` 嵌套了两层 HMAC，则 Err(EINVAL)
+pub fn check_alg(sa: &SockAddrAlg) -> SyscallRet {
+    log::error!("begin check_alg");
+    let ty_end = sa.salg_type.iter().position(|&b| b == 0).unwrap_or(sa.salg_type.len());
+    let raw_type = &sa.salg_type[..ty_end];
+    let alg_type_str = match core::str::from_utf8(raw_type) {
+        Ok(s) => s,
+        Err(_) => {
+            return Err(Errno::EINVAL);
+        }
+    };
+    if alg_type_str == "hash" {
+        let nm_end = sa.salg_name.iter().position(|&b| b == 0).unwrap_or(sa.salg_name.len());
+        let raw_name = &sa.salg_name[..nm_end];
+        let alg_name_str = match core::str::from_utf8(raw_name) {
+            Ok(s) => s,
+            Err(_) => {
+                return Err(Errno::EINVAL);
+            }
+        };
+        // 如果名字就是 "hmac(...)" 这种格式，就取出括号内的 inner 部分来做二次检查
+        if alg_name_str.starts_with("hmac(") && alg_name_str.ends_with(')') {
+            let inner_part = &alg_name_str[5 .. alg_name_str.len() - 1];
+            if inner_part.starts_with("hmac(") {
+                log::error!("[check_alg] Invalid HMAC nesting: {}", alg_name_str);
+                return Err(Errno::ENOENT);
+            }
+        }
+    }
+    // 其它情况都合法
+    Ok(0)
+}
 
 pub unsafe fn socket_address_from_unix(
     addr: *const u8,
@@ -482,7 +655,8 @@ pub unsafe fn socket_address_from(addr: *const u8,len:usize, socket: &Socket) ->
             //         path: sun_path,
             //         len: path_len,
             //     });
-        Domain::AF_INET | Domain::AF_UNIX|Domain::AF_NETLINK|Domain::AF_UNSPEC => {
+            //i这里的unix,af_alg无用
+        Domain::AF_INET | Domain::AF_UNIX|Domain::AF_NETLINK|Domain::AF_UNSPEC |Domain::AF_ALG=> {
             let port = u16::from_be_bytes([
                 kernel_addr_from_user[2],
                 kernel_addr_from_user[3],
@@ -648,11 +822,33 @@ impl FileOp for Socket {
     }
 
      fn read<'a>(&'a self, buf: &'a mut [u8]) -> SyscallRet {
-        log::error!("[socket_read]:begin recv socket");
+        log::error!("[socket_read]:begin recv socket,recv len is {:?}",buf.len());
         if self.domain==Domain::AF_UNIX {
             //unix本地回环网络
+            if self.buffer.is_none() {
+                let passwd_blob = PasswdEntry::passwd_lookup(self, buf.len())?;
+                log::error!("[socket_read]: passwd blob len is {:?}", passwd_blob.len());
+                if buf.len() < passwd_blob.len() {
+                    log::error!("[socket_read]: buf is too small,buf len is {:?}",buf.len());
+                    return Err(Errno::ENOMEM);
+                }
+
+                // 2) 把 blob 里的字节一次性 copy 进用户给的 buf
+                //    只要 blob.len() <= buf.len()，就不会越界
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        passwd_blob.as_ptr(),
+                        buf.as_mut_ptr(),
+                        passwd_blob.len(),
+                    );
+                }
+                let sa = super::socket::SocketAddr::new(
+                    super::socket::IpAddr::V4([127, 0, 0, 1].into()), 
+                    0,
+                );
+                return Ok((passwd_blob.len()));         
+            }
             return self.buffer.as_ref().unwrap().read(buf);
-            
         }
         if !self.r_ready() {
             log::error!("[scoket_read] is_nonblocking {:?},is_connected is {:?}",self.is_nonblocking(),self.is_connected());
@@ -742,7 +938,8 @@ impl FileOp for Socket {
     fn r_ready(&self) -> bool {
         log::error!("[sokcet_readable]:poll readable");
         if self.domain==Domain::AF_UNIX {
-            return self.buffer.as_ref().unwrap().r_ready();
+            //这里将寻找的文件中内容返回给进程
+            return true
         }
         // yield_current_task();
         poll_interfaces();
@@ -779,10 +976,8 @@ impl FileOp for Socket {
     fn writable(&self) -> bool {
         true
     }
-    
-    fn ioctl(&self, op: usize, arg_ptr: usize) -> SyscallRet {
-        //todo
-        Err(Errno::ENOTTY)
+    fn hang_up(&self) -> bool {
+        true
     }
     fn get_flags(&self) -> OpenFlags {
         let mut flag=OpenFlags::empty();
@@ -810,6 +1005,7 @@ pub enum SocketOptionLevel {
     Socket=1,
     Tcp=6,
     IPv6=41,
+    SOL_ALG=279,
 }
 
 ///为每个level建立一个配置enum
@@ -1224,4 +1420,49 @@ impl Ipv6Option {
     pub fn set(&self, socket: &Socket, opt: &[u8]) -> SyscallRet {
         Ok(0)
     }
+}
+#[derive(TryFromPrimitive,Debug)]
+#[repr(usize)]
+#[allow(non_camel_case_types)]
+pub enum ALG_Option {
+    ALG_SET_KEY=1,
+    ALG_SET_IV=2,
+    ALG_SET_AEAD_AUTHSIZE=3,
+    ALG_SET_OP=4,
+}
+impl ALG_Option {
+    //optval已经复制到内核
+    pub fn set(&self,socket:&Socket,opt:&[u8])->SyscallRet {
+        log::error!("[ALG_Option_set]opt is {:?}",opt);
+        assert!(socket.domain==Domain::AF_ALG);
+        match self {
+            ALG_Option::ALG_SET_KEY => {
+                // 设置密钥
+                //optval 指向一个缓冲区，里面存放着“raw key bytes”，optlen 则是这个密钥（字节串）的长度
+                //对称加密/消息鉴别（MAC/HMAC）算法的密
+                socket.socket_af_alg.lock().as_mut().unwrap().set_alg_key(opt);
+                Ok(0)
+            },
+            ALG_Option::ALG_SET_IV => {
+                unimplemented!()
+            },
+            ALG_Option::ALG_SET_AEAD_AUTHSIZE => {
+                unimplemented!()
+            },
+            ALG_Option::ALG_SET_OP => {
+                unimplemented!()
+            },
+        }
+    }
+}
+#[repr(C)]
+#[derive(Debug,Copy,Clone)]
+pub struct MessageHeaderRaw {
+    pub name:      *mut u8,   // 对应 sockaddr 或者 AF_ALG 下的 SockAddrAlg
+    pub name_len:  u32,       // name 缓冲区的大小
+    pub iovec:     *mut IoVec,
+    pub iovec_len: i32,       // iovec 数量
+    pub control:   *mut u8,   // 控制消息 (cmsg) 缓冲区
+    pub control_len: u32,     // control 缓冲区的大小
+    pub flags:     i32,       // recvmsg/sendmsg 时的 flags
 }

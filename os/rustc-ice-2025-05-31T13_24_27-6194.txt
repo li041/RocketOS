@@ -1,0 +1,39 @@
+thread 'rustc' panicked at /rustc/6067b36314ab5eb2eb47cecc464545ba58e1ad24/compiler/rustc_query_system/src/query/plumbing.rs:731:9:
+Found unstable fingerprints for type_of(os[cf63]::drivers::net::init_net_dev_la::{constant#0}): EarlyBinder { value: {type error}, .. }
+stack backtrace:
+   0:     0x7b34a8014525 - std::backtrace::Backtrace::create::h7a5fee2d64374978
+   1:     0x7b34a64dee45 - std::backtrace::Backtrace::force_capture::h6fd44a74ca3bcce1
+   2:     0x7b34a5658e30 - std[c5a2511fc2043fe7]::panicking::update_hook::<alloc[7d3fe847112c5d63]::boxed::Box<rustc_driver_impl[66794832f42c061b]::install_ice_hook::{closure#1}>>::{closure#0}
+   3:     0x7b34a64f7783 - std::panicking::rust_panic_with_hook::h625eea43051b2edc
+   4:     0x7b34a64f747a - std::panicking::begin_panic_handler::{{closure}}::h4f9159cfbc3f6bd3
+   5:     0x7b34a64f4e39 - std::sys::backtrace::__rust_end_short_backtrace::h0390abce48353151
+   6:     0x7b34a64f713d - rust_begin_unwind
+   7:     0x7b34a31a7a00 - core::panicking::panic_fmt::h9e7c637e9e5f29c9
+   8:     0x7b34a5bfbf24 - rustc_query_system[3a842672b6d3f8b1]::query::plumbing::incremental_verify_ich_failed::<rustc_middle[196b59351b8fa565]::ty::context::TyCtxt>
+   9:     0x7b34a703a0d0 - rustc_query_system[3a842672b6d3f8b1]::query::plumbing::try_execute_query::<rustc_query_impl[c79696042a2573c8]::DynamicConfig<rustc_query_system[3a842672b6d3f8b1]::query::caches::DefIdCache<rustc_middle[196b59351b8fa565]::query::erase::Erased<[u8; 8usize]>>, false, false, false>, rustc_query_impl[c79696042a2573c8]::plumbing::QueryCtxt, true>
+  10:     0x7b34a7034c6e - rustc_query_impl[c79696042a2573c8]::query_impl::type_of::get_query_incr::__rust_end_short_backtrace
+  11:     0x7b34a6d07aea - rustc_middle[196b59351b8fa565]::query::plumbing::query_get_at::<rustc_query_system[3a842672b6d3f8b1]::query::caches::DefIdCache<rustc_middle[196b59351b8fa565]::query::erase::Erased<[u8; 8usize]>>>
+  12:     0x7b34a6d0800b - <rustc_query_impl[c79696042a2573c8]::plumbing::query_callback<rustc_query_impl[c79696042a2573c8]::query_impl::type_of::QueryType>::{closure#1} as core[5c6bd7c805f20f96]::ops::function::FnOnce<(rustc_middle[196b59351b8fa565]::ty::context::TyCtxt, rustc_query_system[3a842672b6d3f8b1]::dep_graph::dep_node::DepNode)>>::call_once
+  13:     0x7b34a6d0b383 - <rustc_middle[196b59351b8fa565]::query::on_disk_cache::OnDiskCache>::drop_serialized_data
+  14:     0x7b34a7c162c2 - rustc_incremental[57dbaaeef7aaa0ec]::persist::save::save_dep_graph::{closure#0}::{closure#3}
+  15:     0x7b34a7c37799 - rustc_middle[196b59351b8fa565]::ty::context::tls::with_context::<<rustc_middle[196b59351b8fa565]::dep_graph::DepsType as rustc_query_system[3a842672b6d3f8b1]::dep_graph::Deps>::with_deps<rustc_incremental[57dbaaeef7aaa0ec]::persist::save::save_dep_graph::{closure#0}, ()>::{closure#0}, ()>::{closure#0}
+  16:     0x7b34a7c3734b - <rustc_incremental[57dbaaeef7aaa0ec]::provide::{closure#0} as core[5c6bd7c805f20f96]::ops::function::FnOnce<(rustc_middle[196b59351b8fa565]::query::plumbing::TyCtxtAt,)>>::call_once
+  17:     0x7b34a7c36d89 - <rustc_middle[196b59351b8fa565]::ty::context::TyCtxt>::finish
+  18:     0x7b34a7c34366 - rustc_interface[d2cd5fdeaa3b20ba]::passes::create_and_enter_global_ctxt::<core[5c6bd7c805f20f96]::option::Option<rustc_interface[d2cd5fdeaa3b20ba]::queries::Linker>, rustc_driver_impl[66794832f42c061b]::run_compiler::{closure#0}::{closure#2}>::{closure#2}::{closure#0}
+  19:     0x7b34a7c27556 - rustc_interface[d2cd5fdeaa3b20ba]::interface::run_compiler::<(), rustc_driver_impl[66794832f42c061b]::run_compiler::{closure#0}>::{closure#1}
+  20:     0x7b34a7a6f9c7 - std[c5a2511fc2043fe7]::sys::backtrace::__rust_begin_short_backtrace::<rustc_interface[d2cd5fdeaa3b20ba]::util::run_in_thread_with_globals<rustc_interface[d2cd5fdeaa3b20ba]::util::run_in_thread_pool_with_globals<rustc_interface[d2cd5fdeaa3b20ba]::interface::run_compiler<(), rustc_driver_impl[66794832f42c061b]::run_compiler::{closure#0}>::{closure#1}, ()>::{closure#0}, ()>::{closure#0}::{closure#0}, ()>
+  21:     0x7b34a7a6f699 - <<std[c5a2511fc2043fe7]::thread::Builder>::spawn_unchecked_<rustc_interface[d2cd5fdeaa3b20ba]::util::run_in_thread_with_globals<rustc_interface[d2cd5fdeaa3b20ba]::util::run_in_thread_pool_with_globals<rustc_interface[d2cd5fdeaa3b20ba]::interface::run_compiler<(), rustc_driver_impl[66794832f42c061b]::run_compiler::{closure#0}>::{closure#1}, ()>::{closure#0}, ()>::{closure#0}::{closure#0}, ()>::{closure#1} as core[5c6bd7c805f20f96]::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}
+  22:     0x7b34a7a6ee2b - std::sys::pal::unix::thread::Thread::new::thread_start::h2d970728ae887adc
+  23:     0x7b34a1c9caa4 - start_thread
+                               at ./nptl/pthread_create.c:447:8
+  24:     0x7b34a1d29c3c - clone3
+                               at ./misc/../sysdeps/unix/sysv/linux/x86_64/clone3.S:78:0
+  25:                0x0 - <unknown>
+
+
+rustc version: 1.86.0-nightly (6067b3631 2025-01-17)
+platform: x86_64-unknown-linux-gnu
+
+query stack during panic:
+#0 [type_of] computing type of `drivers::net::init_net_dev_la::{constant#0}`
+end of query stack
