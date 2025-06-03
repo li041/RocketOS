@@ -1,4 +1,4 @@
-use crate::ext4::inode::{S_IFCHR, S_IFDIR, S_IFREG};
+use crate::ext4::inode::{Ext4InodeDisk, S_IFCHR, S_IFDIR, S_IFLNK, S_IFREG};
 
 use super::{
     dentry::{self, insert_core_dentry, Dentry},
@@ -6,11 +6,12 @@ use super::{
     mount::VfsMount,
     namei::{filename_create, parse_path, path_openat, Nameidata},
     path::Path,
+    pipe::PipeInode,
     uapi::DevT,
     AT_FDCWD,
 };
 use alloc::sync::Arc;
-use exe::{ExeFile, EXE};
+use exe::{ExeFile, ExeInode, EXE};
 use meminfo::{MemInfoFile, MEMINFO};
 use mounts::{MountsFile, MOUNTS};
 
@@ -19,6 +20,8 @@ pub mod maps;
 pub mod meminfo;
 pub mod mounts;
 pub mod pagemap;
+pub mod pid;
+pub mod status;
 
 pub fn init_procfs(root_path: Arc<Path>) {
     let proc_path = "/proc";
@@ -116,7 +119,7 @@ pub fn init_procfs(root_path: Arc<Path>) {
     };
     // /proc/self/exe
     let exe_path = "/proc/self/exe";
-    let exe_mode = S_IFREG as u16 | 0o444;
+    let exe_mode = S_IFLNK as u16 | 0o444;
     nd = Nameidata {
         path_segments: parse_path(exe_path),
         dentry: root_path.dentry.clone(),
@@ -127,10 +130,14 @@ pub fn init_procfs(root_path: Arc<Path>) {
         Ok(dentry) => {
             let parent_inode = nd.dentry.get_inode();
             parent_inode.create(dentry.clone(), exe_mode);
+            *dentry.flags.write() = dentry::DentryFlags::DCACHE_SYMLINK_TYPE; // 设置为符号链接类型
+            let exe_inode = ExeInode::new(Ext4InodeDisk::default());
+            dentry.inner.lock().inode.replace(exe_inode.clone());
+
             // 现在dentry的inode指向/proc/self/exe
             let exe_file = ExeFile::new(
                 Path::new(root_path.mnt.clone(), dentry.clone()),
-                dentry.get_inode().clone(),
+                exe_inode,
                 OpenFlags::empty(),
             );
             EXE.call_once(|| exe_file.clone());
@@ -190,6 +197,77 @@ pub fn init_procfs(root_path: Arc<Path>) {
         }
         Err(e) => {
             panic!("create {} failed: {:?}", pagemap_path, e);
+        }
+    }
+    // /proc/self/status
+    let status_path = "/proc/self/status";
+    let status_mode = S_IFREG as u16 | 0o444;
+    nd = Nameidata {
+        path_segments: parse_path(status_path),
+        dentry: root_path.dentry.clone(),
+        mnt: root_path.mnt.clone(),
+        depth: 0,
+    };
+    match filename_create(&mut nd, 0) {
+        Ok(dentry) => {
+            let parent_inode = nd.dentry.get_inode();
+            parent_inode.create(dentry.clone(), status_mode);
+            // 现在dentry的inode指向/proc/self/status
+            let status_file = status::StatusFile::new(
+                Path::new(root_path.mnt.clone(), dentry.clone()),
+                dentry.get_inode().clone(),
+                OpenFlags::empty(),
+            );
+            status::STATUS.call_once(|| status_file.clone());
+            insert_core_dentry(dentry.clone());
+        }
+        Err(e) => {
+            panic!("create {} failed: {:?}", status_path, e);
+        }
+    }
+
+    // /proc/pid
+    let pid_path = "/proc/pid";
+    let mut nd = Nameidata {
+        path_segments: parse_path(pid_path),
+        dentry: root_path.dentry.clone(),
+        mnt: root_path.mnt.clone(),
+        depth: 0,
+    };
+    let pid_mode = S_IFDIR as u16 | 0o755;
+    match filename_create(&mut nd, 0) {
+        Ok(dentry) => {
+            let parent_inode = nd.dentry.get_inode();
+            parent_inode.mkdir(dentry, pid_mode);
+        }
+        Err(e) => {
+            panic!("create {} failed: {:?}", pid_path, e);
+        }
+    };
+    // /proc/pid/stat
+    let pid_stat_path = "/proc/pid/stat";
+    let pid_stat_mode = S_IFREG as u16 | 0o444;
+    nd = Nameidata {
+        path_segments: parse_path(pid_stat_path),
+        dentry: root_path.dentry.clone(),
+        mnt: root_path.mnt.clone(),
+        depth: 0,
+    };
+    match filename_create(&mut nd, 0) {
+        Ok(dentry) => {
+            let parent_inode = nd.dentry.get_inode();
+            parent_inode.create(dentry.clone(), pid_stat_mode);
+            // 现在dentry的inode指向/proc/pid/stat
+            let pid_stat_file = pid::PidStatFile::new(
+                Path::new(root_path.mnt.clone(), dentry.clone()),
+                dentry.get_inode().clone(),
+                OpenFlags::empty(),
+            );
+            pid::PID_STAT.call_once(|| pid_stat_file.clone());
+            insert_core_dentry(dentry.clone());
+        }
+        Err(e) => {
+            panic!("create {} failed: {:?}", pid_stat_path, e);
         }
     }
 }

@@ -29,45 +29,46 @@ pub struct FileInner {
     pub flags: OpenFlags,
 }
 
-// 不支持对文件执行ioctl操作
-const ENOTTY: isize = 25;
 /// File trait
 pub trait FileOp: Any + Send + Sync {
     fn as_any(&self) -> &dyn Any {
         unimplemented!();
     }
     // 从文件中读取数据到buf中, 返回读取的字节数, 同时更新文件偏移量
-    fn read<'a>(&'a self, buf: &'a mut [u8]) -> SyscallRet {
+    fn read<'a>(&'a self, _buf: &'a mut [u8]) -> SyscallRet {
         unimplemented!();
     }
     // 从文件偏移量为offset处读取数据到buf中, 返回读取的字节数, 不会更新文件偏移量
-    fn pread<'a>(&'a self, buf: &'a mut [u8], offset: usize) -> SyscallRet {
+    fn pread<'a>(&'a self, _buf: &'a mut [u8], _offset: usize) -> SyscallRet {
         unimplemented!();
     }
     // 从文件偏移量为offset处写数据到buf中, 返回写的字节数, 不会更新文件偏移量
-    fn pwrite<'a>(&'a self, buf: &'a [u8], offset: usize) -> SyscallRet {
+    fn pwrite<'a>(&'a self, _buf: &'a [u8], _offset: usize) -> SyscallRet {
         unimplemented!();
     }
 
     fn read_all(&self) -> Vec<u8> {
         unimplemented!();
     }
-    fn get_page<'a>(&'a self, page_offset: usize) -> Option<Arc<Page>> {
+    fn get_page<'a>(&'a self, _page_offset: usize) -> Option<Arc<Page>> {
         unimplemented!();
     }
     fn get_inode(&self) -> Arc<dyn InodeOp> {
         unimplemented!();
     }
     /// Write `UserBuffer` to file
-    fn write<'a>(&'a self, buf: &'a [u8]) -> SyscallRet {
+    fn write<'a>(&'a self, _buf: &'a [u8]) -> SyscallRet {
+        unimplemented!();
+    }
+    fn write_dio<'a>(&'a self, _buf: &'a [u8]) -> SyscallRet {
         unimplemented!();
     }
     // move the file offset
-    fn seek(&self, offset: isize, whence: Whence) -> SyscallRet {
+    fn seek(&self, _offset: isize, _whence: Whence) -> SyscallRet {
         unimplemented!();
     }
     // truncate the file to a given length
-    fn truncate(&self, length: usize) -> SyscallRet {
+    fn truncate(&self, _length: usize) -> SyscallRet {
         unimplemented!();
     }
     // Get the file offset
@@ -204,6 +205,17 @@ impl FileOp for File {
                 inner.offset = inner.inode.get_size();
             }
             inner.inode.write(inner.offset, buf)
+        });
+        self.add_offset(write_size);
+        Ok(write_size)
+    }
+    fn write_dio<'a>(&'a self, buf: &'a [u8]) -> SyscallRet {
+        let write_size = self.inner_handler(|inner| {
+            if inner.flags.contains(OpenFlags::O_APPEND) {
+                inner.offset = inner.inode.get_size();
+            }
+            // 注意需要直接写入磁盘, 不使用页缓存, 否则会爆
+            inner.inode.write_dio(inner.offset, buf)
         });
         self.add_offset(write_size);
         Ok(write_size)

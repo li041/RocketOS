@@ -1,11 +1,11 @@
 use core::time;
 
+use super::errno::SyscallRet;
 use crate::{
     arch::mm::{copy_from_user, copy_to_user}, fs::uapi::{RLimit, Resource}, syscall::{errno::Errno, task::sys_geteuid}, task::{
         add_real_timer, current_task, get_task, remove_timer, rusage::RUsage, update_real_timer,
     }, time::{config::{ClockIdFlags, TimexModes}, do_adjtimex, KernelTimex}, timer::{ITimerVal, TimeSpec, TimeVal}
 };
-use super::errno::SyscallRet;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -364,7 +364,7 @@ pub fn sys_clock_getres(_clockid: usize, res: usize) -> SyscallRet {
 /// 调用进程的系统时间调整
 /// 根据传入的kernelTimex调整时间并返回最新的内核结构体到指针
 pub fn sys_adjtimex(user_timex: *mut KernelTimex) -> SyscallRet {
-    log::info!("[sys_adjtimex] user_timex: {:#x}", user_timex as usize);
+    log::error!("[sys_adjtimex] user_timex: {:#x}", user_timex as usize);
     if user_timex.is_null(){
         return Err(Errno::EFAULT);
     }
@@ -378,6 +378,9 @@ pub fn sys_adjtimex(user_timex: *mut KernelTimex) -> SyscallRet {
     // let len = size_of::<KernelTime
     copy_from_user(user_timex as *const KernelTimex,core::ptr::addr_of_mut!(kernel_timex), 1)?;
     //todo
+    if kernel_timex.modes==0x8000 {
+        return Err(Errno::EINVAL);
+    }
     if kernel_timex.modes != 0 && task.euid() != 0 {
         return Err(Errno::EPERM);
     }
@@ -387,7 +390,7 @@ pub fn sys_adjtimex(user_timex: *mut KernelTimex) -> SyscallRet {
             return Err(Errno::EINVAL);
         }
     }
-    println!("[sys_adjtimex] kernel_timex: {:?}", kernel_timex);
+    log::error!("[sys_adjtimex] kernel_timex: {:?}", kernel_timex);
     let status = do_adjtimex(&mut kernel_timex)?;
 
     let out_from = (&kernel_timex as *const KernelTimex);

@@ -60,10 +60,12 @@ pub fn c_str_to_string(ptr: *const u8) -> Result<String, Errno> {
             None => {}
         };
         memory_set.check_valid_user_vpn_range(vpn_range, MapPermission::R)?;
-        memory_set.handle_lazy_allocation_area(
-            VirtAddr::from(ptr as usize),
-            crate::arch::trap::PageFaultCause::LOAD,
-        )?;
+        memory_set
+            .handle_lazy_allocation_area(
+                VirtAddr::from(ptr as usize),
+                crate::arch::trap::PageFaultCause::LOAD,
+            )
+            .map_err(|_sig| Errno::EFAULT)?;
         match memory_set.translate_va_to_pa(VirtAddr::from(ptr as usize)) {
             Some(pa) => return Ok(pa),
             None => return Err(Errno::EFAULT),
@@ -173,7 +175,7 @@ impl From<&DateTime> for TimeSpec {
         let mut seconds = 0;
         let mut year = dt.year as u64;
         let mut month = dt.month as u64;
-        let mut day = dt.day as u64;
+        let day = dt.day as u64;
 
         // Step 1: 计算天数
         while year > 1970 {

@@ -2,26 +2,22 @@ use core::fmt::{Debug, Formatter};
 
 use alloc::{
     collections::vec_deque::VecDeque,
-    format,
     string::{String, ToString},
     sync::{Arc, Weak},
     vec::Vec,
 };
-use bitflags::Flag;
 use hashbrown::HashMap;
 use lazy_static::lazy_static;
-use log::set_logger;
 use spin::{Mutex, RwLock};
 
 use crate::{
-    ext4::{
-        dentry::{self, Ext4DirEntry},
-        inode::{self, S_IFDIR},
-    },
+    ext4::inode::{S_ISGID, S_ISUID},
     mutex::SpinNoIrqLock,
+    syscall::errno::{Errno, SyscallRet},
+    task::current_task,
 };
 
-use super::{file::OpenFlags, inode::InodeOp, uapi::RenameFlags};
+use super::inode::InodeOp;
 
 bitflags::bitflags! {
     /// 目前只支持type
@@ -46,6 +42,147 @@ impl DentryFlags {
         const DCACHE_ENTRY_TYPE_MASK: u32 = 7 << 20;
         DentryFlags::from_bits_truncate(self.bits() & DCACHE_ENTRY_TYPE_MASK)
     }
+}
+#[allow(unused)]
+pub const F_OK: i32 = 0; // 检查文件是否存在
+pub const R_OK: i32 = 4; // 检查读权限
+pub const W_OK: i32 = 2; // 检查写权限
+pub const X_OK: i32 = 1; // 检查执行权限
+
+// 由调用者保证
+//     1. dentry不是负目录项
+/// 检查dentry的访问权限, mode: R_OK, W_OK, X_OK的组合
+pub fn dentry_check_access(
+    dentry: &Dentry,
+    mode: i32,
+    use_effective: bool,
+) -> Result<usize, Errno> {
+    let task = current_task();
+    let (uid, gid) = if use_effective {
+        (task.euid(), task.egid())
+    } else {
+        (task.uid(), task.gid())
+    };
+    // 特殊处理root
+    if uid == 0 {
+        // root不能绕过可执行权限检查, 必须有至少一个执行位
+        if mode & X_OK != 0 {
+            let i_mode = dentry.get_inode().get_mode();
+            if i_mode & 0o111 == 0 {
+                log::error!(
+                    "[dentry_check_access] Root user has no execute permission on {}, i_mode: {:o}",
+                    dentry.absolute_path,
+                    i_mode
+                );
+                return Err(Errno::EACCES);
+            }
+        }
+        return Ok(0); // root用户总是有读写权限
+    }
+    // 其他用户
+    let inode = dentry.get_inode();
+    let i_mode = inode.get_mode();
+    let (user_perm, group_perm, other_perm) = (
+        (i_mode >> 6) & 0o7, // 用户权限
+        (i_mode >> 3) & 0o7, // 组权限
+        i_mode & 0o7,        // 其他用户权限
+    );
+    let perm = if uid == inode.get_uid() {
+        user_perm
+    } else if gid == inode.get_gid() {
+        group_perm
+    } else {
+        other_perm
+    };
+    if mode & R_OK != 0 && perm & 0o4 == 0
+        || mode & W_OK != 0 && perm & 0o2 == 0
+        || mode & X_OK != 0 && perm & 0o1 == 0
+    {
+        return Err(Errno::EACCES);
+    }
+    Ok(0)
+}
+
+// 由调用者保证:
+//    1. dentry不是负目录项
+/// 要修改文件的所有者, 必须具备`CAP_CHOWN`能力(目前只支持root用户)
+pub fn dentry_chown(dentry: &Dentry, new_uid: u32, new_gid: u32) -> SyscallRet {
+    let task = current_task();
+    let (euid, egid) = (task.euid(), task.egid());
+    let inode = dentry.get_inode();
+    let mut i_mode = inode.get_mode();
+    log::info!(
+        "[dentry_chown] euid: {}, egid: {}, new_uid: {}, new_gid: {}, i_mode: {:o}",
+        euid,
+        egid,
+        new_uid,
+        new_gid,
+        i_mode
+    );
+    // 特殊处理root
+    if euid == 0 {
+        if new_uid != u32::MAX {
+            // dentry.get_inode().set_uid(new_uid);
+            // 当super-user修改可执行文件的所有者时需要清除setuid和setgid位
+            if i_mode & 0o111 != 0 {
+                log::warn!(
+                    "[dentry_chown] Root user is changing owner of executable file {}, clearing setuid/setgid bits",
+                    dentry.absolute_path
+                );
+                // 如果是文件是non-group-executable, 则保留setgid位
+                if i_mode & 0o10 == 0 {
+                    i_mode &= !(S_ISUID) as u16
+                } else {
+                    i_mode &= !(S_ISGID | S_ISUID) as u16; // 清除setuid和setgid位
+                }
+                inode.set_mode(i_mode);
+            }
+            inode.set_uid(new_uid);
+        }
+        if new_gid != u32::MAX {
+            inode.set_gid(new_gid);
+        }
+        return Ok(0);
+    }
+    if new_uid != u32::MAX {
+        return Err(Errno::EPERM); // 目前只支持root用户修改所有者
+    }
+    // 文件的所有者可以将文件的组更改为其所属的任何组
+    if new_gid != u32::MAX && new_gid != inode.get_gid() {
+        log::warn!("inode gid: {}", inode.get_gid());
+        if euid != inode.get_uid() {
+            log::error!(
+                "[dentry_check_chown] No permission to change ownership of {}, euid: {}, egid: {}",
+                dentry.absolute_path,
+                euid,
+                egid
+            );
+            return Err(Errno::EPERM);
+        }
+        // 检查new_gid是否是当前用户的egid或附属组
+        if egid != new_gid {
+            task.op_sup_groups(
+            |groups| {
+                if !groups.contains(&new_gid) {
+                    log::error!(
+                        "[dentry_check_chown] New group {} is not in the effective groups of task {}, euid: {}, egid: {}",
+                        new_gid,
+                        task.tid(),
+                        euid,
+                        egid
+                    );
+                    return Err(Errno::EPERM);
+                }
+                Ok(0)
+            },
+        )?;
+        }
+        inode.set_gid(new_gid);
+    }
+    // 非root用户需要清除setuid和setgid位
+    i_mode &= !(S_ISUID | S_ISGID) as u16;
+    inode.set_mode(i_mode);
+    Ok(0)
 }
 
 // VFS层的统一目录项结构
@@ -128,6 +265,40 @@ impl Dentry {
     pub fn is_negative(&self) -> bool {
         self.inner.lock().inode.is_none()
     }
+    // 由上层调用者保证: 负目录项不能调用该函数
+    pub fn can_search(&self) -> bool {
+        let (euid, egid) = {
+            let task = current_task();
+            (task.euid(), task.egid())
+        };
+        if euid == 0 {
+            return true; // root用户总是有权限
+        }
+        let i_mode = self.get_inode().get_mode();
+        let (user_perm, group_perm, other_perm) = (
+            (i_mode >> 6) & 0o7, // 用户权限
+            (i_mode >> 3) & 0o7, // 组权限
+            i_mode & 0o7,        // 其他用户权限
+        );
+        let perm = if euid == self.get_inode().get_uid() {
+            user_perm
+        } else if egid == self.get_inode().get_gid() {
+            group_perm
+        } else {
+            other_perm
+        };
+        if perm & 0o111 == 0 {
+            log::error!(
+                "[can_search] No search permission for {}, i_mode: {:o}, euid: {}, egid: {}",
+                self.absolute_path,
+                i_mode,
+                euid,
+                egid
+            );
+            return false;
+        }
+        true
+    }
     pub fn is_symlink(&self) -> bool {
         self.flags.read().contains(DentryFlags::DCACHE_SYMLINK_TYPE)
     }
@@ -194,13 +365,6 @@ impl Dentry {
     pub fn set_parent(&self, parent: Arc<Dentry>) {
         self.inner.lock().parent = Some(Arc::downgrade(&parent));
     }
-    /// renameat在dentry层次的操作 + inode层次的操作
-    pub fn rename(&self, new_dentry: Option<Arc<Dentry>>, flags: RenameFlags) {
-        // 需要检查, 不能将自己放在自己的子目录下, 需要一个辅助函数
-        // 从旧父目录的dentry中移除自身, 修改路径`absolute_path`, 修改 parent 引用为新的父目录（如果 new_dentry 在其他目录下）。
-        // 添加到新父目录的 children
-        // 注意需要操作底层的inode
-    }
 }
 
 lazy_static! {
@@ -222,16 +386,15 @@ pub fn clean_dentry_cache() {
     for name in lru.iter() {
         if let Some(dentry) = cache_map.get(name) {
             let strong_count = Arc::strong_count(dentry);
-            let count = if let Some(inode) = dentry.inner.lock().inode.as_ref() {
-                inode.get_resident_page_count()
-            } else {
-                0
-            };
             // println!(
             //     "[DentryCache] Key: {}, Path: {:?}, Strong Count: {}, pages: {}",
             //     name, dentry.absolute_path, strong_count, count
             // );
-            if strong_count == 1 && count > 100 {
+            if name.contains("iozone") {
+                // 特例处理, 保留 iozone*
+                continue;
+            }
+            if strong_count == 1 {
                 // 没有其他强引用，可以安全移除
                 cache_map.remove(name);
                 // println!("[DentryCache] Removed {} due to low strong count", name);
@@ -245,11 +408,6 @@ pub fn clean_dentry_cache() {
 
 pub fn lookup_dcache_with_absolute_path(absolute_path: &str) -> Option<Arc<Dentry>> {
     DENTRY_CACHE.read().get(absolute_path)
-}
-
-pub fn lookup_dcache(parent: &Arc<Dentry>, name: &str) -> Option<Arc<Dentry>> {
-    let absolute_path = format!("{}/{}", parent.absolute_path, name);
-    DENTRY_CACHE.read().get(&absolute_path)
 }
 
 pub fn insert_dentry(dentry: Arc<Dentry>) {

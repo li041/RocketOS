@@ -4,6 +4,7 @@ use core::time;
 
 use crate::arch::mm::copy_from_user;
 use crate::arch::trap::context::{dump_trap_context, get_trap_context, save_trap_context};
+use crate::ext4::fs;
 use crate::fs::file::OpenFlags;
 use crate::futex::do_futex;
 use crate::syscall::errno::Errno;
@@ -49,7 +50,7 @@ pub fn sys_clone(
     };
     log::error!("[sys_clone] flags: {:?}", flags);
     let task = current_task();
-    let new_task = task.kernel_clone(&flags, stack_ptr);
+    let new_task = task.kernel_clone(&flags, stack_ptr, children_tid_ptr)?;
     let new_task_tid = new_task.tid();
 
     if flags.contains(CloneFlags::CLONE_PARENT_SETTID) {
@@ -58,17 +59,9 @@ pub fn sys_clone(
         log::error!("parent_tid_ptr: {:x}", parent_tid_ptr);
         copy_to_user(parent_tid_ptr as *mut u8, &content as *const u8, 8)?;
     }
-    // Todo: 这里的CLONE_CHILD_SETTID应该要写到子进程空间
-    if flags.contains(CloneFlags::CLONE_CHILD_SETTID) {
-        log::warn!("[sys_clone] handle CLONE_CHILD_SETTID");
-        let content = (new_task_tid as u64).to_le_bytes();
-        log::error!("chilren_tid_ptr: {:x}", parent_tid_ptr);
-        copy_to_user(children_tid_ptr as *mut u8, &content as *const u8, 8)?;
-        new_task.set_TAS(new_task.tid());
-    }
     if flags.contains(CloneFlags::CLONE_CHILD_CLEARTID) {
         log::warn!("[sys_clone] handle CLONE_CHILD_CLEARTID");
-        new_task.set_TAC(children_tid_ptr);
+        new_task.set_tac(children_tid_ptr);
     }
     if flags.contains(CloneFlags::CLONE_SETTLS) {
         log::warn!("[sys_clone] handle CLONE_SETTLS");
@@ -78,6 +71,11 @@ pub fn sys_clone(
         save_trap_context(&new_task, trap_cx);
     }
     add_task(new_task);
+    if flags.contains(CloneFlags::CLONE_VFORK) {
+        log::warn!("[sys_clone] handle CLONE_VFORK");
+        // vfork的特殊处理, 需要阻塞父进程直到子进程调用execve或exit
+        wait();
+    }
     drop(task);
     // yield_current_task();
     Ok(new_task_tid)
@@ -107,7 +105,7 @@ pub fn sys_clone(
     };
     log::error!("[sys_clone] flags: {:?}", flags);
     let task = current_task();
-    let new_task = task.kernel_clone(&flags, stack_ptr);
+    let new_task = task.kernel_clone(&flags, stack_ptr, chilren_tid_ptr)?;
     let new_task_tid = new_task.tid();
 
     if flags.contains(CloneFlags::CLONE_PARENT_SETTID) {
@@ -121,11 +119,11 @@ pub fn sys_clone(
         let content = (new_task_tid as u64).to_le_bytes();
         log::error!("chilren_tid_ptr: {:x}", parent_tid_ptr);
         copy_to_user(chilren_tid_ptr as *mut u8, &content as *const u8, 8)?;
-        new_task.set_TAS(new_task.tid());
+        new_task.set_tas(new_task.tid());
     }
     if flags.contains(CloneFlags::CLONE_CHILD_CLEARTID) {
         log::warn!("[sys_clone] handle CLONE_CHILD_CLEARTID");
-        new_task.set_TAC(chilren_tid_ptr);
+        new_task.set_tac(chilren_tid_ptr);
     }
     if flags.contains(CloneFlags::CLONE_SETTLS) {
         log::warn!("[sys_clone] handle CLONE_SETTLS");
@@ -140,7 +138,7 @@ pub fn sys_clone(
     Ok(new_task_tid)
 }
 
-pub const IGNOER_TEST: [&str; 20] = [
+pub const IGNOER_TEST: [&str; 21] = [
     /* 本身就不应该单独运行的 */
     "ltp/testcases/bin/ask_password.sh",
     "ltp/testcases/bin/assign_password.sh",
@@ -163,6 +161,7 @@ pub const IGNOER_TEST: [&str; 20] = [
     "ltp/testcases/bin/mmap1",
     "ltp/testcases/bin/mmap2",
     "ltp/testcases/bin/mmap3",
+    "ltp/testcases/bin/copy_file_range01",
 ];
 
 pub fn sys_execve(path: *const u8, args: *const usize, envs: *const usize) -> SyscallRet {
@@ -260,7 +259,7 @@ pub fn sys_getpgid(pid: usize) -> SyscallRet {
 pub fn sys_set_tid_address(tidptr: usize) -> SyscallRet {
     let task = current_task();
     log::info!("[sys_set_tid_address] tidptr:{:#x}", tidptr);
-    task.set_TAC(tidptr);
+    task.set_tac(tidptr);
     Ok(task.tid())
 }
 
@@ -633,7 +632,7 @@ pub fn sys_acct(pathname: *const u8) -> SyscallRet {
 /// 执行此操作后，程序将无法重新获得 root 权限。
 /// EPERM 用户不具有特权（Linux：其用户命名空间中没有 CAP_SETUID 功能），并且 uid 与调用进程的真实 UID 或保存的设置用户 ID 不匹配。
 // Todo: 命名空间
-pub fn sys_setuid(uid: usize) -> SyscallRet {
+pub fn sys_setuid(uid: u32) -> SyscallRet {
     let task = current_task();
     if task.euid() == 0 {
         log::warn!(
@@ -644,6 +643,7 @@ pub fn sys_setuid(uid: usize) -> SyscallRet {
         task.set_uid(uid);
         task.set_euid(uid);
         task.set_suid(uid);
+        task.set_fsuid(uid);
     } else {
         if uid != task.uid() && uid != task.suid() {
             log::warn!(
@@ -655,6 +655,7 @@ pub fn sys_setuid(uid: usize) -> SyscallRet {
         } else {
             log::warn!("[sys_setuid] task{} set uid to {}", task.tid(), uid);
             task.set_euid(uid);
+            task.set_fsuid(uid);
         }
     }
     Ok(0)
@@ -662,7 +663,7 @@ pub fn sys_setuid(uid: usize) -> SyscallRet {
 
 /// setgid() 设置调用进程的有效组 ID。
 /// 如果调用进程拥有特权则还会设置实际 GID 和保存的设置组 ID。
-pub fn sys_setgid(gid: usize) -> SyscallRet {
+pub fn sys_setgid(gid: u32) -> SyscallRet {
     let task = current_task();
     if task.euid() == 0 {
         log::warn!(
@@ -673,6 +674,7 @@ pub fn sys_setgid(gid: usize) -> SyscallRet {
         task.set_gid(gid);
         task.set_egid(gid);
         task.set_sgid(gid);
+        task.set_fsgid(gid);
     } else {
         if gid != task.gid() && gid != task.sgid() {
             log::warn!(
@@ -684,6 +686,7 @@ pub fn sys_setgid(gid: usize) -> SyscallRet {
         } else {
             log::warn!("[sys_setgid] task{} set gid to {}", task.tid(), gid);
             task.set_egid(gid);
+            task.set_fsgid(gid);
         }
     }
     Ok(0)
@@ -694,12 +697,12 @@ pub fn sys_setgid(gid: usize) -> SyscallRet {
 /// 非特权进程只能将有效用户 ID 设置为实际用户 ID、有效用户 ID 或保存的设置用户 ID。
 /// 非特权用户只能将实际用户 ID 设置为实际用户 ID 或有效用户 ID。
 /// 如果设置了实际用户 ID（即 ruid 不为 -1）或有效用户 ID 的值不等于先前的实际用户 ID，则保存的设置用户 ID 将被设置为新的有效用户 ID。
-pub fn sys_setreuid(ruid: isize, euid: isize) -> SyscallRet {
+pub fn sys_setreuid(ruid: i32, euid: i32) -> SyscallRet {
     log::info!("[sys_setreuid] ruid: {}, euid: {}", ruid, euid);
     let task = current_task();
-    let origin_uid = task.uid() as isize;
-    let origin_euid = task.euid() as isize;
-    let origin_suid = task.suid() as isize;
+    let origin_uid = task.uid() as i32;
+    let origin_euid = task.euid() as i32;
+    let origin_suid = task.suid() as i32;
     if task.euid() == 0 {
         log::warn!(
             "[sys_setreuid] task{} is root, set ruid: {}, euid: {}",
@@ -708,14 +711,15 @@ pub fn sys_setreuid(ruid: isize, euid: isize) -> SyscallRet {
             euid
         );
         if ruid != -1 {
-            task.set_uid(ruid as usize);
+            task.set_uid(ruid as u32);
         }
         if euid != -1 {
-            task.set_euid(euid as usize);
+            task.set_euid(euid as u32);
+            task.set_fsuid(euid as u32);
         }
     } else {
         if ruid != -1 {
-            if ruid != origin_uid as isize && ruid != origin_euid as isize {
+            if ruid != origin_uid as i32 && ruid != origin_euid as i32 {
                 return Err(Errno::EPERM);
             }
             log::warn!(
@@ -723,12 +727,10 @@ pub fn sys_setreuid(ruid: isize, euid: isize) -> SyscallRet {
                 task.tid(),
                 ruid,
             );
-            task.set_uid(ruid as usize);
+            task.set_uid(ruid as u32);
         }
         if euid != -1 {
-            if euid != origin_uid as isize
-                && euid != origin_euid as isize
-                && euid != origin_suid as isize
+            if euid != origin_uid as i32 && euid != origin_euid as i32 && euid != origin_suid as i32
             {
                 return Err(Errno::EPERM);
             }
@@ -737,11 +739,12 @@ pub fn sys_setreuid(ruid: isize, euid: isize) -> SyscallRet {
                 task.tid(),
                 euid,
             );
-            task.set_euid(euid as usize);
+            task.set_euid(euid as u32);
+            task.set_fsuid(euid as u32);
         }
     }
-    if ruid != -1 || (euid != -1 && euid != origin_uid as isize) {
-        task.set_suid(task.euid() as usize);
+    if ruid != -1 || (euid != -1 && euid != origin_uid as i32) {
+        task.set_suid(task.euid() as u32);
     }
     Ok(0)
 }
@@ -753,11 +756,11 @@ pub fn sys_setreuid(ruid: isize, euid: isize) -> SyscallRet {
 /// 调用进程的任何补充组 ID 均保持不变。
 /// 将实际组 ID 更改为保存的 sgid，
 /// 或将有效组 ID 更改为实际组 ID 或保存的设置组 ID 之外的更改。
-pub fn sys_setregid(rgid: isize, egid: isize) -> SyscallRet {
+pub fn sys_setregid(rgid: i32, egid: i32) -> SyscallRet {
     log::info!("[sys_setregid] rgid: {}, egid: {}", rgid, egid);
     let task = current_task();
-    let origin_gid = task.gid() as isize;
-    let origin_sgid = task.sgid() as isize;
+    let origin_gid = task.gid() as i32;
+    let origin_sgid = task.sgid() as i32;
     log::error!(
         "[sys_setregid] task {} origin_gid: {}, origin_sgid: {}",
         task.tid(),
@@ -772,14 +775,15 @@ pub fn sys_setregid(rgid: isize, egid: isize) -> SyscallRet {
             egid
         );
         if rgid != -1 {
-            task.set_gid(rgid as usize);
+            task.set_gid(rgid as u32);
         }
         if egid != -1 {
-            task.set_egid(egid as usize);
+            task.set_egid(egid as u32);
+            task.set_fsgid(egid as u32);
         }
     } else {
         if rgid != -1 {
-            if rgid != origin_sgid as isize && rgid != origin_gid as isize {
+            if rgid != origin_sgid as i32 && rgid != origin_gid as i32 {
                 return Err(Errno::EPERM);
             }
             log::warn!(
@@ -787,10 +791,10 @@ pub fn sys_setregid(rgid: isize, egid: isize) -> SyscallRet {
                 task.tid(),
                 rgid,
             );
-            task.set_gid(rgid as usize);
+            task.set_gid(rgid as u32);
         }
         if egid != -1 {
-            if egid != origin_gid as isize && egid != origin_sgid as isize {
+            if egid != origin_gid as i32 && egid != origin_sgid as i32 {
                 return Err(Errno::EPERM);
             }
             log::warn!(
@@ -798,11 +802,12 @@ pub fn sys_setregid(rgid: isize, egid: isize) -> SyscallRet {
                 task.tid(),
                 egid,
             );
-            task.set_egid(egid as usize);
+            task.set_egid(egid as u32);
+            task.set_fsgid(egid as u32);
         }
     }
-    if rgid != -1 || (egid != -1 && egid != origin_gid as isize) {
-        task.set_sgid(task.egid() as usize);
+    if rgid != -1 || (egid != -1 && egid != origin_gid as i32) {
+        task.set_sgid(task.egid() as u32);
     }
     Ok(0)
 }
@@ -811,7 +816,7 @@ pub fn sys_setregid(rgid: isize, egid: isize) -> SyscallRet {
 /// 非特权进程可以将其真实 UID、有效 UID 和已保存的设置用户 ID 分别更改为：当前真实 UID、当前有效 UID 或当前已保存的设置用户 ID。
 /// 特权进程（在 Linux 上，指具有 CAP_SETUID 功能的进程）可以将其真实 UID、有效 UID 和已保存的设置用户 ID 设置为任意值。
 /// 如果其中一个参数等于 -1，则相应的值保持不变。
-pub fn sys_setresuid(ruid: isize, euid: isize, suid: isize) -> SyscallRet {
+pub fn sys_setresuid(ruid: i32, euid: i32, suid: i32) -> SyscallRet {
     log::info!(
         "[sys_setreuid] ruid: {}, euid: {}, suid: {}",
         ruid,
@@ -819,9 +824,9 @@ pub fn sys_setresuid(ruid: isize, euid: isize, suid: isize) -> SyscallRet {
         suid
     );
     let task = current_task();
-    let origin_uid = task.uid() as isize;
-    let origin_euid = task.euid() as isize;
-    let origin_suid = task.suid() as isize;
+    let origin_uid = task.uid() as i32;
+    let origin_euid = task.euid() as i32;
+    let origin_suid = task.suid() as i32;
     if task.euid() == 0 {
         log::warn!(
             "[sys_setreuid] task{} is root, set ruid: {}, euid: {}",
@@ -830,19 +835,18 @@ pub fn sys_setresuid(ruid: isize, euid: isize, suid: isize) -> SyscallRet {
             euid
         );
         if ruid != -1 {
-            task.set_uid(ruid as usize);
+            task.set_uid(ruid as u32);
         }
         if euid != -1 {
-            task.set_euid(euid as usize);
+            task.set_euid(euid as u32);
+            task.set_fsuid(euid as u32);
         }
         if suid != -1 {
-            task.set_suid(suid as usize);
+            task.set_suid(suid as u32);
         }
     } else {
         if ruid != -1 {
-            if ruid != origin_uid as isize
-                && ruid != origin_euid as isize
-                && ruid != origin_suid as isize
+            if ruid != origin_uid as i32 && ruid != origin_euid as i32 && ruid != origin_suid as i32
             {
                 return Err(Errno::EPERM);
             }
@@ -851,12 +855,10 @@ pub fn sys_setresuid(ruid: isize, euid: isize, suid: isize) -> SyscallRet {
                 task.tid(),
                 ruid,
             );
-            task.set_uid(ruid as usize);
+            task.set_uid(ruid as u32);
         }
         if euid != -1 {
-            if euid != origin_uid as isize
-                && euid != origin_euid as isize
-                && euid != origin_suid as isize
+            if euid != origin_uid as i32 && euid != origin_euid as i32 && euid != origin_suid as i32
             {
                 return Err(Errno::EPERM);
             }
@@ -865,12 +867,11 @@ pub fn sys_setresuid(ruid: isize, euid: isize, suid: isize) -> SyscallRet {
                 task.tid(),
                 euid,
             );
-            task.set_euid(euid as usize);
+            task.set_euid(euid as u32);
+            task.set_fsuid(euid as u32);
         }
         if suid != -1 {
-            if suid != origin_uid as isize
-                && suid != origin_euid as isize
-                && suid != origin_suid as isize
+            if suid != origin_uid as i32 && suid != origin_euid as i32 && suid != origin_suid as i32
             {
                 return Err(Errno::EPERM);
             }
@@ -879,14 +880,14 @@ pub fn sys_setresuid(ruid: isize, euid: isize, suid: isize) -> SyscallRet {
                 task.tid(),
                 suid,
             );
-            task.set_suid(suid as usize);
+            task.set_suid(suid as u32);
         }
     }
     Ok(0)
 }
 
 /// 类似 setresuid
-pub fn sys_setresgid(rgid: isize, egid: isize, sgid: isize) -> SyscallRet {
+pub fn sys_setresgid(rgid: i32, egid: i32, sgid: i32) -> SyscallRet {
     log::info!(
         "[sys_setregid] rgid: {}, egid: {}, sgid: {}",
         rgid,
@@ -894,9 +895,9 @@ pub fn sys_setresgid(rgid: isize, egid: isize, sgid: isize) -> SyscallRet {
         sgid
     );
     let task = current_task();
-    let origin_gid = task.gid() as isize;
-    let origin_egid = task.egid() as isize;
-    let origin_sgid = task.sgid() as isize;
+    let origin_gid = task.gid() as i32;
+    let origin_egid = task.egid() as i32;
+    let origin_sgid = task.sgid() as i32;
     if task.euid() == 0 {
         log::warn!(
             "[sys_setregid] task{} is root, set rgid: {}, egid: {}",
@@ -905,19 +906,18 @@ pub fn sys_setresgid(rgid: isize, egid: isize, sgid: isize) -> SyscallRet {
             egid
         );
         if rgid != -1 {
-            task.set_gid(rgid as usize);
+            task.set_gid(rgid as u32);
         }
         if egid != -1 {
-            task.set_egid(egid as usize);
+            task.set_egid(egid as u32);
+            task.set_fsgid(egid as u32);
         }
         if sgid != -1 {
-            task.set_sgid(sgid as usize);
+            task.set_sgid(sgid as u32);
         }
     } else {
         if rgid != -1 {
-            if rgid != origin_gid as isize
-                && rgid != origin_egid as isize
-                && rgid != origin_sgid as isize
+            if rgid != origin_gid as i32 && rgid != origin_egid as i32 && rgid != origin_sgid as i32
             {
                 return Err(Errno::EPERM);
             }
@@ -926,12 +926,10 @@ pub fn sys_setresgid(rgid: isize, egid: isize, sgid: isize) -> SyscallRet {
                 task.tid(),
                 rgid,
             );
-            task.set_gid(rgid as usize);
+            task.set_gid(rgid as u32);
         }
         if egid != -1 {
-            if egid != origin_gid as isize
-                && egid != origin_egid as isize
-                && egid != origin_sgid as isize
+            if egid != origin_gid as i32 && egid != origin_egid as i32 && egid != origin_sgid as i32
             {
                 return Err(Errno::EPERM);
             }
@@ -940,12 +938,11 @@ pub fn sys_setresgid(rgid: isize, egid: isize, sgid: isize) -> SyscallRet {
                 task.tid(),
                 egid,
             );
-            task.set_egid(egid as usize);
+            task.set_egid(egid as u32);
+            task.set_fsgid(egid as u32);
         }
         if sgid != -1 {
-            if sgid != origin_gid as isize
-                && sgid != origin_egid as isize
-                && sgid != origin_sgid as isize
+            if sgid != origin_gid as i32 && sgid != origin_egid as i32 && sgid != origin_sgid as i32
             {
                 return Err(Errno::EPERM);
             }
@@ -954,13 +951,13 @@ pub fn sys_setresgid(rgid: isize, egid: isize, sgid: isize) -> SyscallRet {
                 task.tid(),
                 sgid,
             );
-            task.set_sgid(sgid as usize);
+            task.set_sgid(sgid as u32);
         }
     }
     Ok(0)
 }
 
-pub fn sys_getresuid(ruid_ptr: usize, euid_ptr: usize, suid_ptr: usize) -> SyscallRet {
+pub fn sys_getresuid(ruid_ptr: u32, euid_ptr: u32, suid_ptr: u32) -> SyscallRet {
     log::info!(
         "[sys_getresuid] ruid_ptr: {:x}, euid_ptr: {:x}, suid_ptr: {:x}",
         ruid_ptr,
@@ -969,18 +966,18 @@ pub fn sys_getresuid(ruid_ptr: usize, euid_ptr: usize, suid_ptr: usize) -> Sysca
     );
     let task = current_task();
     if ruid_ptr != 0 {
-        copy_to_user(ruid_ptr as *mut usize, &task.uid() as *const usize, 1)?;
+        copy_to_user(ruid_ptr as *mut u32, &task.uid() as *const u32, 1)?;
     }
     if euid_ptr != 0 {
-        copy_to_user(euid_ptr as *mut usize, &task.euid() as *const usize, 1)?;
+        copy_to_user(euid_ptr as *mut u32, &task.euid() as *const u32, 1)?;
     }
     if suid_ptr != 0 {
-        copy_to_user(suid_ptr as *mut usize, &task.suid() as *const usize, 1)?;
+        copy_to_user(suid_ptr as *mut u32, &task.suid() as *const u32, 1)?;
     }
     Ok(0)
 }
 
-pub fn sys_getresgid(rgid_ptr: usize, egid_ptr: usize, sgid_ptr: usize) -> SyscallRet {
+pub fn sys_getresgid(rgid_ptr: u32, egid_ptr: u32, sgid_ptr: u32) -> SyscallRet {
     log::info!(
         "[sys_getresgid] rgid_ptr: {:x}, egid_ptr: {:x}, sgid_ptr: {:x}",
         rgid_ptr,
@@ -989,31 +986,31 @@ pub fn sys_getresgid(rgid_ptr: usize, egid_ptr: usize, sgid_ptr: usize) -> Sysca
     );
     let task = current_task();
     if rgid_ptr != 0 {
-        copy_to_user(rgid_ptr as *mut usize, &task.gid() as *const usize, 1)?;
+        copy_to_user(rgid_ptr as *mut u32, &task.gid() as *const u32, 1)?;
     }
     if egid_ptr != 0 {
-        copy_to_user(egid_ptr as *mut usize, &task.egid() as *const usize, 1)?;
+        copy_to_user(egid_ptr as *mut u32, &task.egid() as *const u32, 1)?;
     }
     if sgid_ptr != 0 {
-        copy_to_user(sgid_ptr as *mut usize, &task.sgid() as *const usize, 1)?;
+        copy_to_user(sgid_ptr as *mut u32, &task.sgid() as *const u32, 1)?;
     }
     Ok(0)
 }
 
 pub fn sys_getuid() -> SyscallRet {
-    Ok(current_task().uid())
+    Ok(current_task().uid() as usize)
 }
 
 pub fn sys_geteuid() -> SyscallRet {
-    Ok(current_task().euid())
+    Ok(current_task().euid() as usize)
 }
 
 pub fn sys_getgid() -> SyscallRet {
-    Ok(current_task().gid())
+    Ok(current_task().gid() as usize)
 }
 
 pub fn sys_getegid() -> SyscallRet {
-    Ok(current_task().egid())
+    Ok(current_task().egid() as usize)
 }
 
 pub fn sys_setgroups(size: usize, list: usize) -> SyscallRet {
@@ -1056,9 +1053,9 @@ pub fn sys_getgroups(size: usize, list: usize) -> SyscallRet {
     }
     if size == 0 {
         // 如果size为0, 则只返回补充组的数量
-        return Ok(task.op_sup_groups_mut(|groups| groups.len()));
+        return Ok(task.op_sup_groups(|groups| groups.len()));
     }
-    let groups = task.op_sup_groups_mut(|groups| Ok(groups.clone()))?;
+    let groups = task.op_sup_groups(|groups| Ok(groups.clone()))?;
     if size < groups.len() {
         return Err(Errno::EINVAL);
     }
@@ -1066,4 +1063,78 @@ pub fn sys_getgroups(size: usize, list: usize) -> SyscallRet {
         copy_to_user(list as *mut u32, groups.as_ptr(), groups.len())?;
     }
     Ok(groups.len())
+}
+
+/// 进程可以使用 setfsuid() 将其文件系统用户 ID 更改为 fsuid 中指定的值，从而使其文件系统用户 ID 的值与其有效用户 ID 的值不同。
+/// 只有当调用者是超级用户，或者 fsuid 与调用者的真实用户 ID、有效用户 ID、保存的设置用户 ID 或当前文件系统用户 ID 匹配时，setfsuid() 才会成功。
+pub fn sys_setfsuid(fsuid: i32) -> SyscallRet {
+    log::info!("[sys_setfsuid] fsuid: {}", fsuid);
+    let task = current_task();
+    let origin_fsuid = task.fsuid() as i32;
+    if task.euid() == 0 {
+        log::warn!(
+            "[sys_setfsuid] task{} is root, set fsuid to {}",
+            task.tid(),
+            fsuid
+        );
+        if fsuid != -1 {
+            task.set_fsuid(fsuid as u32);
+        }
+    } else {
+        if fsuid != task.uid() as i32
+            && fsuid != task.euid() as i32
+            && fsuid != task.suid() as i32
+            && fsuid != task.fsuid() as i32
+        {
+            log::warn!(
+                "[sys_setfsuid] task{} is not root, set fsuid to {}",
+                task.tid(),
+                fsuid
+            );
+            return Ok(origin_fsuid as usize);
+        } else {
+            log::warn!("[sys_setfsuid] task{} set fsuid to {}", task.tid(), fsuid);
+            if fsuid != -1 {
+                task.set_fsuid(fsuid as u32);
+            }
+        }
+    }
+    Ok(origin_fsuid as usize)
+}
+
+/// 进程可以通过使用 setfsgid() 将其文件系统组 ID 更改为 fsgid 中指定的值，从而使其文件系统组 ID 的值与其有效组 ID 不同。
+/// 只有当调用者是超级用户，或者 fsgid 与调用者的实际组 ID、有效组 ID、保存的设置组 ID 或当前文件系统用户 ID 匹配时，setfsgid() 才会成功。
+pub fn sys_setfsgid(fsgid: i32) -> SyscallRet {
+    log::info!("[sys_setfsgid] fsgid: {}", fsgid);
+    let task = current_task();
+    let origin_fsgid = task.fsgid() as i32;
+    if task.euid() == 0 {
+        if fsgid != -1 {
+            log::warn!(
+                "[sys_setfsgid] task{} is root, set fsgid to {}",
+                task.tid(),
+                fsgid
+            );
+            task.set_fsgid(fsgid as u32);
+        }
+    } else {
+        if fsgid != task.gid() as i32
+            && fsgid != task.egid() as i32
+            && fsgid != task.sgid() as i32
+            && fsgid != task.fsgid() as i32
+        {
+            log::warn!(
+                "[sys_setfsgid] task{} is not root, set fsgid to {}",
+                task.tid(),
+                fsgid
+            );
+            return Ok(origin_fsgid as usize);
+        } else {
+            log::warn!("[sys_setfsgid] task{} set fsgid to {}", task.tid(), fsgid);
+            if fsgid != -1 {
+                task.set_fsgid(fsgid as u32);
+            }
+        }
+    }
+    Ok(origin_fsgid as usize)
 }

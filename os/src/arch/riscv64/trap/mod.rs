@@ -1,8 +1,5 @@
 use core::arch::global_asm;
 
-use alloc::sync::Arc;
-use bitflags::bitflags;
-use context::dump_trap_context;
 pub use context::TrapContext;
 use riscv::register::{
     satp,
@@ -17,8 +14,8 @@ use crate::{
     arch::mm::PageTable,
     fs::dentry::clean_dentry_cache,
     mm::VirtAddr,
-    signal::{handle_signal, SiField, Sig, SigInfo},
-    syscall::{errno::Errno, syscall},
+    signal::{handle_signal, SiField, SigInfo},
+    syscall::syscall,
     task::{current_task, handle_timeout, yield_current_task},
 };
 
@@ -122,7 +119,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
             // 2. lazy allocation
             let va = VirtAddr::from(stval);
             let casue = PageFaultCause::from(scause.cause());
-            log::error!("page fault cause {:?}", scause.cause());
+            // log::error!("page fault cause {:?}", scause.cause());
             let task = current_task();
             task.op_memory_set_mut(|memory_set| {
                 if let Err(sig) = memory_set.handle_recoverable_page_fault(va, casue) {

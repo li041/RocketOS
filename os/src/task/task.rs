@@ -14,7 +14,7 @@ use crate::{
         config::USER_STACK_SIZE,
         mm::copy_to_user,
         trap::{
-            context::{dump_trap_context, get_trap_context, save_trap_context},
+            context::{get_trap_context, save_trap_context},
             TrapContext,
         },
     },
@@ -25,22 +25,20 @@ use crate::{
         inode::InodeOp,
         path::Path,
         uapi::{RLimit, Resource},
-        FileOld, Stdin, Stdout,
     },
     futex::{
         do_futex,
         flags::{FUTEX_PRIVATE_FLAG, FUTEX_WAKE},
-        robust_list::RobustListHead,
     },
-    mm::{MapArea, MapPermission, MapType, MemorySet, VPNRange, VirtAddr},
-    mutex::{Spin, SpinNoIrq, SpinNoIrqLock},
+    mm::{MapArea, MapPermission, MapType, MemorySet, VPNRange, VirtAddr, KERNEL_SPACE},
+    mutex::SpinNoIrqLock,
     net::addr::is_unspecified,
     signal::{SiField, Sig, SigHandler, SigInfo, SigPending, SigSet, SignalStack, UContext},
-    syscall::errno::SyscallRet,
+    syscall::errno::{self, Errno, SyscallRet},
     task::{
         self, add_task,
         context::write_task_cx,
-        dump_scheduler, dump_wait_queue,
+        current_task, dump_scheduler, dump_wait_queue,
         manager::{add_group, cancel_wait_alarm, delete_wait, new_group, register_task},
         wakeup, INITPROC,
     },
@@ -48,6 +46,8 @@ use crate::{
 };
 use alloc::{
     collections::btree_map::BTreeMap,
+    format,
+    string::ToString,
     sync::{Arc, Weak},
     vec,
     vec::Vec,
@@ -55,9 +55,10 @@ use alloc::{
 use bitflags::bitflags;
 use core::{
     assert_ne,
-    cell::{SyncUnsafeCell, UnsafeCell},
+    cell::SyncUnsafeCell,
+    fmt::Write,
     mem,
-    sync::atomic::{AtomicI32, AtomicUsize},
+    sync::atomic::{AtomicI32, AtomicU32, AtomicUsize},
 };
 use spin::{Mutex, RwLock};
 
@@ -92,7 +93,7 @@ pub struct Task {
 
     // 内存管理
     // 包括System V shm管理
-    memory_set: Arc<RwLock<MemorySet>>, // 地址空间
+    memory_set: RwLock<Arc<RwLock<MemorySet>>>, // 地址空间
     // futex管理, 线程局部
     robust_list_head: AtomicUsize, // struct robust_list_head* head
     // 文件系统
@@ -108,13 +109,15 @@ pub struct Task {
     cpu_mask: SpinNoIrqLock<CpuMask>,            // CPU掩码
     // 权限设置
     pgid: AtomicUsize, // 进程组id
-    uid: AtomicUsize,  // 用户id
-    euid: AtomicUsize, // 有效用户id
-    suid: AtomicUsize, // 保存用户id
-    gid: AtomicUsize,  // 组id
-    egid: AtomicUsize, // 有效组id
-    sgid: AtomicUsize, // 保存组id
-    sup_groups: SpinNoIrqLock<Vec<u32>>, // 附加组列表
+    uid: AtomicU32,    // 用户id
+    euid: AtomicU32,   // 有效用户id
+    suid: AtomicU32,   // 保存用户id
+    fsuid: AtomicU32,  // 文件系统用户id
+    gid: AtomicU32,    // 组id
+    egid: AtomicU32,   // 有效组id
+    sgid: AtomicU32,   // 保存组id
+    fsgid: AtomicU32,  // 文件系统组id
+    sup_groups: RwLock<Vec<u32>>, // 附加组列表
                        // ToDo：运行时间(调度相关)
                        // ToDo: 多核启动
 }
@@ -149,9 +152,9 @@ impl Task {
             thread_group: Arc::new(SpinNoIrqLock::new(ThreadGroup::new())),
             exit_code: AtomicI32::new(0),
             exe_path: Arc::new(RwLock::new(String::new())),
-            memory_set: Arc::new(RwLock::new(MemorySet::new_bare())),
+            memory_set: RwLock::new(Arc::new(RwLock::new(MemorySet::new_bare()))),
             robust_list_head: AtomicUsize::new(0),
-            fd_table: FdTable::new(),
+            fd_table: FdTable::new_bare(),
             root: Arc::new(SpinNoIrqLock::new(Path::zero_init())),
             pwd: Arc::new(SpinNoIrqLock::new(Path::zero_init())),
             sig_pending: SpinNoIrqLock::new(SigPending::new()),
@@ -161,13 +164,15 @@ impl Task {
             rlimit: Arc::new(RwLock::new([RLimit::default(); RLIM_NLIMITS])),
             cpu_mask: SpinNoIrqLock::new(CpuMask::ALL),
             pgid: AtomicUsize::new(0),
-            uid: AtomicUsize::new(0),
-            euid: AtomicUsize::new(0),
-            suid: AtomicUsize::new(0),
-            gid: AtomicUsize::new(0),
-            egid: AtomicUsize::new(0),
-            sgid: AtomicUsize::new(0),
-            sup_groups: SpinNoIrqLock::new(Vec::new()),
+            uid: AtomicU32::new(0),
+            euid: AtomicU32::new(0),
+            suid: AtomicU32::new(0),
+            fsuid: AtomicU32::new(0),
+            gid: AtomicU32::new(0),
+            egid: AtomicU32::new(0),
+            sgid: AtomicU32::new(0),
+            fsgid: AtomicU32::new(0),
+            sup_groups: RwLock::new(Vec::new()),
         }
     }
 
@@ -178,13 +183,15 @@ impl Task {
         let tid = tid_alloc();
         let tgid = AtomicUsize::new(tid.0);
         let pgid = AtomicUsize::new(1);
-        let uid = AtomicUsize::new(0); // 默认为root(0)用户
-        let euid = AtomicUsize::new(0);
-        let suid = AtomicUsize::new(0);
-        let gid = AtomicUsize::new(0); // 默认为root(0)组
-        let egid = AtomicUsize::new(0);
-        let sgid = AtomicUsize::new(0);
-        let sup_groups = SpinNoIrqLock::new(Vec::new());
+        let uid = AtomicU32::new(0); // 默认为root(0)用户
+        let euid = AtomicU32::new(0);
+        let suid = AtomicU32::new(0);
+        let fsuid = AtomicU32::new(0);
+        let gid = AtomicU32::new(0); // 默认为root(0)组
+        let egid = AtomicU32::new(0);
+        let sgid = AtomicU32::new(0);
+        let fsgid = AtomicU32::new(0);
+        let sup_groups = RwLock::new(Vec::new());
         // 申请内核栈
         let mut kstack = kstack_alloc();
         // Trap_context
@@ -208,7 +215,7 @@ impl Task {
             thread_group: Arc::new(SpinNoIrqLock::new(ThreadGroup::new())),
             exit_code: AtomicI32::new(0),
             exe_path: Arc::new(RwLock::new(String::from("/initproc"))),
-            memory_set: Arc::new(RwLock::new(memory_set)),
+            memory_set: RwLock::new(Arc::new(RwLock::new(memory_set))),
             robust_list_head: AtomicUsize::new(0),
             fd_table: FdTable::new(),
             root: Arc::new(SpinNoIrqLock::new(root_path.clone())),
@@ -223,9 +230,11 @@ impl Task {
             uid,
             euid,
             suid,
+            fsuid,
             gid,
             egid,
             sgid,
+            fsgid,
             sup_groups,
         });
         // 向线程组中添加该进程
@@ -234,8 +243,6 @@ impl Task {
             .add(task.tid(), Arc::downgrade(&task));
         add_task(task.clone());
         register_task(&task);
-        // 新建进程组
-        new_group(&task);
         // 新建进程组
         new_group(&task);
         // 令tp与kernel_tp指向主线程内核栈顶
@@ -250,13 +257,16 @@ impl Task {
             task_cx_ptr.write(task_context);
         }
         log::info!("[Initproc] Init-sp:\t{:#x}", kstack);
-        
-        log::error!("[Initproc] Initproc complete!");
         task
     }
 
     // 从父进程复制子进程的核心逻辑实现
-    pub fn kernel_clone(self: &Arc<Self>, flags: &CloneFlags, ustack_ptr: usize) -> Arc<Self> {
+    pub fn kernel_clone(
+        self: &Arc<Self>,
+        flags: &CloneFlags,
+        ustack_ptr: usize,
+        children_tid_ptr: usize,
+    ) -> Result<Arc<Self>, Errno> {
         let tid = tid_alloc();
         let tid_address = SpinNoIrqLock::new(TidAddress::new());
         let exit_code = AtomicI32::new(0);
@@ -264,7 +274,7 @@ impl Task {
         let status = SpinNoIrqLock::new(TaskStatus::Ready);
         let tgid;
         let mut kstack;
-        let parent;
+        let mut parent;
         let children;
         let thread_group;
         let itimerval;
@@ -281,9 +291,11 @@ impl Task {
         let uid;
         let euid;
         let suid;
+        let fsuid;
         let gid;
         let egid;
         let sgid;
+        let fsgid;
         let sup_groups;
         log::info!("[kernel_clone] task{} ready to clone ...", self.tid());
 
@@ -297,15 +309,24 @@ impl Task {
             ))
         }
 
+        // 为了写到子空间，此处直接写入父空间再复制到子空间
+        if flags.contains(CloneFlags::CLONE_CHILD_SETTID) {
+            log::warn!("[sys_clone] handle CLONE_CHILD_SETTID");
+            let content = (tid.0 as u64).to_le_bytes();
+            copy_to_user(children_tid_ptr as *mut u8, &content as *const u8, 8)?;
+        }
+
         // 继承父进程
         pgid = AtomicUsize::new(self.pgid());
-        uid = AtomicUsize::new(self.uid());
-        euid = AtomicUsize::new(self.euid());
-        suid = AtomicUsize::new(self.suid());
-        gid = AtomicUsize::new(self.gid());
-        egid = AtomicUsize::new(self.egid());
-        sgid = AtomicUsize::new(self.sgid());
-        sup_groups = SpinNoIrqLock::new(self.op_sup_groups_mut(|groups| groups.clone()));
+        uid = AtomicU32::new(self.uid());
+        euid = AtomicU32::new(self.euid());
+        suid = AtomicU32::new(self.suid());
+        fsuid = AtomicU32::new(self.fsuid());
+        gid = AtomicU32::new(self.gid());
+        egid = AtomicU32::new(self.egid());
+        sgid = AtomicU32::new(self.sgid());
+        fsgid = AtomicU32::new(self.fsgid());
+        sup_groups = RwLock::new(self.op_sup_groups_mut(|groups| groups.clone()));
 
         // 创建线程
         if flags.contains(CloneFlags::CLONE_THREAD) {
@@ -341,13 +362,18 @@ impl Task {
             rlimit = Arc::new(RwLock::new([RLimit::default(); RLIM_NLIMITS]));
         }
 
+        if flags.contains(CloneFlags::CLONE_PARENT) {
+            parent = Arc::new(SpinNoIrqLock::new(self.parent.lock().clone()));
+        }
+
+        // 对vfork情况做特殊处理
         if flags.contains(CloneFlags::CLONE_VM) {
             log::warn!("[kernel_clone] handle CLONE_VM");
-            memory_set = self.memory_set.clone()
+            memory_set = RwLock::new(self.memory_set.read().clone());
         } else {
-            memory_set = Arc::new(RwLock::new(MemorySet::from_existed_user_lazily(
-                &self.memory_set.read(),
-            )));
+            memory_set = RwLock::new(Arc::new(RwLock::new(MemorySet::from_existed_user_lazily(
+                &self.memory_set.read().read(),
+            ))));
         }
 
         if flags.contains(CloneFlags::CLONE_FS) {
@@ -408,12 +434,18 @@ impl Task {
             uid,
             euid,
             suid,
+            fsuid,
             gid,
             egid,
             sgid,
+            fsgid,
             sup_groups,
         });
         log::trace!("[kernel_clone] child task{} created", task.tid());
+
+        if flags.contains(CloneFlags::CLONE_CHILD_SETTID) {
+            task.set_tas(task.tid());
+        }
 
         // 向任务管理器注册新任务（不是调度器）
         register_task(&task);
@@ -455,10 +487,16 @@ impl Task {
             task.tid(),
             Arc::as_ptr(&task) as usize
         );
+        log::info!(
+            "[kernel_clone] task{}-parent:\t{:x}",
+            task.tid(),
+            task.op_parent(|p| p.as_ref().unwrap().upgrade().unwrap().tid())
+        );
         log::info!("[kernel_clone] task{}-sp:\t{:x}", task.tid(), task.kstack());
         log::info!("[kernel_clone] task{}-tgid:\t{:x}", task.tid(), task.tgid());
         log::info!("[kernel_clone] task{}-pgid:\t{:x}", task.tid(), task.pgid());
 
+        // ToOptimize: 把这边输出删了
         let strong_count = Arc::strong_count(&task);
         if strong_count == 2 {
             log::info!("[kernel_clone] strong_count:\t{}", strong_count);
@@ -468,7 +506,8 @@ impl Task {
             log::error!("[kernel_clone] strong_count:\t{}", strong_count);
         }
         log::info!("[kernel_clone] task{} clone complete!", self.tid());
-        task
+
+        Ok(task)
     }
 
     // Todo: sgid 与文件权限检查
@@ -521,7 +560,8 @@ impl Task {
         log::trace!("[kernel_execve] task{} close thread_group", self.tid());
 
         // 更新地址空间
-        self.op_memory_set_mut(|m| *m = memory_set);
+        *self.memory_set.write() = Arc::new(RwLock::new(memory_set));
+
         // 更新trap_cx
         let mut trap_cx = TrapContext::app_init_trap_context(
             entry_point,
@@ -632,7 +672,8 @@ impl Task {
         log::trace!("[kernel_execve] task{} close thread_group", self.tid());
 
         // 更新地址空间
-        self.op_memory_set_mut(|m| *m = memory_set);
+        *self.memory_set.write() = Arc::new(RwLock::new(memory_set));
+
         // 更新trap_cx
         let mut trap_cx = TrapContext::app_init_trap_context(
             entry_point,
@@ -867,7 +908,7 @@ impl Task {
         self.exe_path.read().clone()
     }
     pub fn memory_set(&self) -> Arc<RwLock<MemorySet>> {
-        self.memory_set.clone()
+        self.memory_set.read().clone()
     }
     pub fn fd_table(&self) -> Arc<FdTable> {
         self.fd_table.clone()
@@ -879,7 +920,7 @@ impl Task {
     pub fn sigstack(&self) -> Option<SignalStack> {
         self.sig_stack.lock().take()
     }
-    pub fn TAC(&self) -> Option<usize> {
+    pub fn tac(&self) -> Option<usize> {
         self.tid_address.lock().clear_child_tid
     }
     pub fn robust_list_head(&self) -> usize {
@@ -894,28 +935,36 @@ impl Task {
         self.pgid.load(core::sync::atomic::Ordering::SeqCst)
     }
 
-    pub fn uid(&self) -> usize {
+    pub fn uid(&self) -> u32 {
         self.uid.load(core::sync::atomic::Ordering::SeqCst)
     }
 
-    pub fn euid(&self) -> usize {
+    pub fn euid(&self) -> u32 {
         self.euid.load(core::sync::atomic::Ordering::SeqCst)
     }
 
-    pub fn suid(&self) -> usize {
+    pub fn suid(&self) -> u32 {
         self.suid.load(core::sync::atomic::Ordering::SeqCst)
     }
 
-    pub fn gid(&self) -> usize {
+    pub fn fsuid(&self) -> u32 {
+        self.fsuid.load(core::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn gid(&self) -> u32 {
         self.gid.load(core::sync::atomic::Ordering::SeqCst)
     }
 
-    pub fn egid(&self) -> usize {
+    pub fn egid(&self) -> u32 {
         self.egid.load(core::sync::atomic::Ordering::SeqCst)
     }
 
-    pub fn sgid(&self) -> usize {
+    pub fn sgid(&self) -> u32 {
         self.sgid.load(core::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn fsgid(&self) -> u32 {
+        self.fsgid.load(core::sync::atomic::Ordering::SeqCst)
     }
 
     /*********************************** setter *************************************/
@@ -936,11 +985,11 @@ impl Task {
         *self.sig_stack.lock() = Some(sigstack)
     }
     // tid_address 中的 set_child_tid
-    pub fn set_TAS(&self, tas: usize) {
+    pub fn set_tas(&self, tas: usize) {
         self.tid_address.lock().set_child_tid = Some(tas);
     }
     // tid_address 中的 clear_child_tid
-    pub fn set_TAC(&self, tac: usize) {
+    pub fn set_tac(&self, tac: usize) {
         self.tid_address.lock().clear_child_tid = Some(tac);
     }
     pub fn set_robust_list_head(&self, head: usize) {
@@ -950,25 +999,32 @@ impl Task {
     pub fn set_pgid(&self, pgid: usize) {
         self.pgid.store(pgid, core::sync::atomic::Ordering::SeqCst);
     }
-    pub fn set_uid(&self, uid: usize) {
+    pub fn set_uid(&self, uid: u32) {
         self.uid.store(uid, core::sync::atomic::Ordering::SeqCst);
     }
-    pub fn set_euid(&self, euid: usize) {
+    pub fn set_euid(&self, euid: u32) {
         self.euid.store(euid, core::sync::atomic::Ordering::SeqCst);
     }
-    pub fn set_suid(&self, suid: usize) {
+    pub fn set_suid(&self, suid: u32) {
         self.suid.store(suid, core::sync::atomic::Ordering::SeqCst);
     }
-    pub fn set_gid(&self, gid: usize) {
+    pub fn set_fsuid(&self, fsuid: u32) {
+        self.fsuid
+            .store(fsuid, core::sync::atomic::Ordering::SeqCst);
+    }
+    pub fn set_gid(&self, gid: u32) {
         self.gid.store(gid, core::sync::atomic::Ordering::SeqCst);
     }
-    pub fn set_egid(&self, egid: usize) {
+    pub fn set_egid(&self, egid: u32) {
         self.egid.store(egid, core::sync::atomic::Ordering::SeqCst);
     }
-    pub fn set_sgid(&self, sgid: usize) {
+    pub fn set_sgid(&self, sgid: u32) {
         self.sgid.store(sgid, core::sync::atomic::Ordering::SeqCst);
     }
-
+    pub fn set_fsgid(&self, fsgid: u32) {
+        self.fsgid
+            .store(fsgid, core::sync::atomic::Ordering::SeqCst);
+    }
     /*********************************** operator *************************************/
     pub fn op_parent<T>(&self, f: impl FnOnce(&Option<Weak<Task>>) -> T) -> T {
         f(&self.parent.lock())
@@ -977,10 +1033,10 @@ impl Task {
         f(&mut self.children.lock())
     }
     pub fn op_memory_set<T>(&self, f: impl FnOnce(&MemorySet) -> T) -> T {
-        f(&self.memory_set.read())
+        f(&self.memory_set.read().read())
     }
     pub fn op_memory_set_mut<T>(&self, f: impl FnOnce(&mut MemorySet) -> T) -> T {
-        f(&mut self.memory_set.write())
+        f(&mut self.memory_set.read().write())
     }
     pub fn op_thread_group<T>(&self, f: impl FnOnce(&ThreadGroup) -> T) -> T {
         f(&self.thread_group.lock())
@@ -1009,8 +1065,11 @@ impl Task {
     pub fn op_rlimit_mut<T>(&self, f: impl FnOnce(&mut [RLimit; RLIM_NLIMITS]) -> T) -> T {
         f(&mut self.rlimit.write())
     }
+    pub fn op_sup_groups<T>(&self, f: impl FnOnce(&Vec<u32>) -> T) -> T {
+        f(&mut self.sup_groups.read())
+    }
     pub fn op_sup_groups_mut<T>(&self, f: impl FnOnce(&mut Vec<u32>) -> T) -> T {
-        f(&mut self.sup_groups.lock())
+        f(&mut self.sup_groups.write())
     }
     /******************************** 任务状态判断 **************************************/
     pub fn is_ready(&self) -> bool {
@@ -1040,6 +1099,318 @@ impl Task {
     pub fn set_zombie(&self) {
         *self.status.lock() = TaskStatus::Zombie;
     }
+    /******************************** 任务信息提供 **************************************/
+
+    pub fn info(&self) -> String {
+        let mut info = String::new();
+        // 名称：这里我们用执行路径的文件名部分作为任务名（类似 bash）
+        let name = self.exe_path.read();
+        let name = name.rsplit('/').next().unwrap_or("unknown");
+        let umask = 0o022; // 默认umask为022(fake)
+        let status = self.status.lock();
+        let state_str = match *status {
+            TaskStatus::Running | TaskStatus::Ready => "R (running)",
+            TaskStatus::Interruptable => "S (sleeping)",
+            TaskStatus::UnInterruptable => "D (Uninterruptible sleep)",
+            TaskStatus::Zombie => "Z (zombie)",
+        };
+        let tgid = self.tgid();
+        let ngid = 0; // NUMA 组 ID（如果没有则为 0）
+        let pid = self.tid();
+        let ppid = self.op_parent(|parent| {
+            if let Some(parent) = parent {
+                parent.upgrade().map_or(0, |p| p.tid())
+            } else {
+                0
+            }
+        });
+        let tracerpid = 0; // 跟踪此进程的进程 PID（如果未被跟踪，则为 0）
+        let uid = self.uid();
+        let euid = self.euid();
+        let suid = self.suid();
+        let fsuid = self.fsuid();
+        let gid = self.gid();
+        let egid = self.egid();
+        let sgid = self.sgid();
+        let fsgid = self.fsgid();
+        let fdsize = self.fd_table().get_rlimit().rlim_cur as usize;
+        let mut groups = String::new();
+        self.op_sup_groups_mut(|sup_groups| {
+            for group in sup_groups.iter() {
+                groups.push_str(&format!("{} ", group));
+            }
+        });
+        let nstgid = self.tgid(); // pid 所属的每个 PID 命名空间中的线程组 ID
+        let nstpid = self.tid(); // pid 所属的每个 PID 命名空间中的线程 ID
+        let nspgid = self.pgid(); // pid 所属的每个 PID 命名空间中的进程组 ID
+        let nssid = self.tgid(); // pid 所属的每个 PID 命名空间中的会话 ID
+        let vmpeak = 3356; // 虚拟内存峰值（fake）需要遍历统计
+        let vmsize = 3356; // 虚拟内存大小（fake）
+        let vmlck = 0; // 锁定的虚拟内存大小（fake）
+        let vmpin = 0; // 锁定的物理内存大小（fake）
+        let vmhwm = 1076; // 常驻内存峰值（fake）
+        let vmrss = 1076; // 常驻内存大小（fake）请注意，此处的值是 RssAnon、RssFile 和 RssShmem 的总和
+        let rssanon = 92; // 匿名内存（fake）
+        let rssfile = 984; // 文件映射的常驻内存（fake）
+        let rssshmem = 0; // 共享内存的常驻内存（fake）
+        let vmdata = 3840; // 数据段大小（fake）
+        let vmstk = 2570; // 栈大小（fake）
+        let vmexe = 378; // 可执行文件大小（fake）
+        let vmlib = 993; // 共享库大小（fake）
+        let vmpte = 85; // 页表大小（fake）
+        let vmswap = 169; // 交换空间大小（fake）
+        let hugetlbpages = 0; // 巨页内存大小（fake）
+        let core_dumping = 0; // 核心转储大小（fake）
+        let thp_enabled = 1; // 透明大页是否启用（fake）
+        let threads = self.op_thread_group(|tg| tg.len());
+        let sigq = 1; // 信号队列大小（fake）
+        let sigpnd = self.mask(); // 信号掩码
+        let shdpnd = 0; // 共享信号掩码（fake）
+        let sigblk = 0; // 阻塞的信号掩码（fake）
+        let sigign = 0; // 忽略的信号掩码（fake）
+        let sigcatch = 0; // 捕获的信号掩码（fake）
+        let cap_inheritable = 0; // 可继承的能力（fake）
+        let cap_permitted = 0; // 允许的能力（fake）
+        let cap_effective = 0; // 有效的能力（fake）
+        let cap_bounding = 0x000001ffffffffff as i64; // 边界能力（fake）
+        let cap_ambient = 0; // 环境能力（fake）
+        let no_new_privs = 0; // 是否设置了 no_new_privs（fake）
+        let seccomp = 0; // seccomp 状态（fake）
+        let seccomp_filter = 0; // seccomp 过滤器（fake）
+        let speculation_store_bypass = "thread vulnerable".to_string();
+        let speculation_indirect_branch = "conditional enabled".to_string();
+        let cpus_allowed = 1; // 允许的 CPU 掩码（fake）
+        let cpus_allowed_list = "0".to_string(); // 允许的 CPU 列表（fake）
+        let mems_allowed = 1; // 允许的内存节点掩码（fake）
+        let mems_allowed_list = "0".to_string(); // 允许的内存节点列表（fake）
+        let voluntary_ctxt_switches = 0; // 自愿上下文切换次数（fake）
+        let nonvoluntary_ctxt_switches = 0; // 非自愿上下文切换次数（fake）
+
+        // 构造信息
+        write!(
+            info,
+            "\
+            Name:\t{}\n\
+            Umask:\t{:04o}\n\
+            State:\t{}\n\
+            Tgid:\t{}\n\
+            Ngid:\t{}\n\
+            Pid:\t{}\n\
+            PPid:\t{}\n\
+            TracerPid:\t{}\n\
+            Uid:\t{}\t{}\t{}\t{}\n\
+            Gid:\t{}\t{}\t{}\t{}\n\
+            FDSize:\t{}\n\
+            Groups:\t{}\n\
+            NStgid:\t{}\n\
+            NSpid:\t{}\n\
+            NSpgid:\t{}\n\
+            NSsid:\t{}\n\
+            VmPeak:\t{:>8} kB\n\
+            VmSize:\t{:>8} kB\n\
+            VmLck:\t{:>8} kB\n\
+            VmPin:\t{:>8} kB\n\
+            VmHWM:\t{:>8} kB\n\
+            VmRSS:\t{:>8} kB\n\
+            RssAnon:\t{:>8} kB\n\
+            RssFile:\t{:>8} kB\n\
+            RssShmem:\t{:>8} kB\n\
+            VmData:\t{:>8} kB\n\
+            VmStk:\t{:>8} kB\n\
+            VmExe:\t{:>8} kB\n\
+            VmLib:\t{:>8} kB\n\
+            VmPTE:\t{:>8} kB\n\
+            VmSwap:\t{:>8} kB\n\
+            HugetlbPages:\t{:>8} kB\n\
+            CoreDumping:\t{}\n\
+            THP_enabled:\t{}\n\
+            Threads:\t{}\n\
+            SigQ:\t{}/31760\n\
+            SigPnd:\t{:016x}\n\
+            ShdPnd:\t{:016x}\n\
+            SigBlk:\t{:016x}\n\
+            SigIgn:\t{:016x}\n\
+            SigCgt:\t{:016x}\n\
+            CapInh:\t{:016x}\n\
+            CapPrm:\t{:016x}\n\
+            CapEff:\t{:016x}\n\
+            CapBnd:\t{:016x}\n\
+            CapAmb:\t{:016x}\n\
+            NoNewPrivs:\t{}\n\
+            Seccomp:\t{}\n\
+            Seccomp_filters:\t{}\n\
+            Speculation_Store_Bypass:\t{}\n\
+            SpeculationIndirectBranch:\t{}\n\
+            Cpus_allowed:\t{:x}\n\
+            Cpus_allowed_list:\t{}\n\
+            Mems_allowed:\t{:x}\n\
+            Mems_allowed_list:\t{}\n\
+            voluntary_ctxt_switches:\t{}\n\
+            nonvoluntary_ctxt_switches:\t{}\n",
+            name,
+            umask,
+            state_str,
+            tgid,
+            ngid,
+            pid,
+            ppid,
+            tracerpid,
+            uid,
+            euid,
+            suid,
+            fsuid,
+            gid,
+            egid,
+            sgid,
+            fsgid,
+            fdsize,
+            groups.trim_end(),
+            nstgid,
+            nstpid,
+            nspgid,
+            nssid,
+            vmpeak,
+            vmsize,
+            vmlck,
+            vmpin,
+            vmhwm,
+            vmrss,
+            rssanon,
+            rssfile,
+            rssshmem,
+            vmdata,
+            vmstk,
+            vmexe,
+            vmlib,
+            vmpte,
+            vmswap,
+            hugetlbpages,
+            core_dumping,
+            thp_enabled,
+            threads,
+            sigq,
+            sigpnd,
+            shdpnd,
+            sigblk,
+            sigign,
+            sigcatch,
+            cap_inheritable,
+            cap_permitted,
+            cap_effective,
+            cap_bounding,
+            cap_ambient,
+            no_new_privs,
+            seccomp,
+            seccomp_filter,
+            speculation_store_bypass,
+            speculation_indirect_branch,
+            cpus_allowed,
+            cpus_allowed_list,
+            mems_allowed,
+            mems_allowed_list,
+            voluntary_ctxt_switches,
+            nonvoluntary_ctxt_switches,
+        )
+        .unwrap();
+
+        info
+    }
+
+    // Todo: 记录程序地址等信息，根据需要完善
+    pub fn stat(&self) -> String {
+        let tid = self.tid();
+        let name = self.exe_path.read();
+        let name = name.rsplit('/').next().unwrap_or("unknown");
+        let comm = format!("({})", name);
+
+        let status = self.status.lock();
+        let state_char = match *status {
+            TaskStatus::Running | TaskStatus::Ready => 'R',
+            TaskStatus::Interruptable => 'S',
+            TaskStatus::UnInterruptable => 'D',
+            TaskStatus::Zombie => 'Z',
+        };
+
+        let ppid = self.op_parent(|parent| {
+            if let Some(parent) = parent {
+                parent.upgrade().map_or(0, |p| p.tid())
+            } else {
+                0
+            }
+        });
+        let pgrp = self.pgid(); // 进程组 id
+        let session = self.tgid(); // 简化为 session = tgid
+        let tty_nr = 0; // 没有终端设备支持
+        let tpgid = 0; // 暂无前台进程组
+        let flags = 0; // 先设为 0
+
+        // 缺页统计等暂设为 0
+        let minflt = 0;
+        let cminflt = 0;
+        let majflt = 0;
+        let cmajflt = 0;
+
+        // CPU 时间统计
+        let time_stat = self.time_stat();
+        let utime = time_stat.user_time().timespec_to_ticks();
+        let stime = time_stat.sys_time().timespec_to_ticks();
+        let cutime = time_stat.child_user_system_time().0.timespec_to_ticks();
+        let cstime = time_stat.child_user_system_time().1.timespec_to_ticks();
+
+        // 其他字段（fake）
+        let priority = 99; // 优先级，暂设为 99
+        let nice = 0; // nice 值，暂设为 0（-19-20)
+        let num_threads = self.op_thread_group(|tg| tg.len());
+        let itrealvalue = 0; // 自 Linux 2.6.17 起，此字段不再维护，并被硬编码为 0。
+        let starttime = 0; // 系统启动后进程的启动时间，暂设为 0
+        let vsize = 114514; // 虚拟内存（fake）
+        let rss = 242; // 驻留集大小：进程在实际内存中拥有的页面数（fake）
+        let rsslim = self.rlimit.read()[5].rlim_cur; // 进程 rss 的当前软限制（以字节为单位）
+        let startcode = 0; // 程序文本可运行的地址
+        let endcode = 0; // 程序文本可运行的地址
+        let startstack = 0; // 用户栈的起始地址
+        let kstkesp = 0; // 内核栈指针
+        let kstkeip = 0; // 内核栈指令指针
+        let signal = 0; // 信号掩码，暂设为 0（已过时）
+        let blocked = 0; // 阻塞的信号掩码，暂设为 0（已过时）
+        let sigignore = 0; // 忽略的信号掩码，暂设为 0（已过时）
+        let sigcatch = 0; // 捕获的信号掩码，暂设为 0（已过时）
+        let wchan = 0; // 等待的事件，暂设为 0
+        let nswap = 0; // 交换次数，暂设为 0（不维护）
+        let cnswap = 0; // 子进程交换次数，暂设为 0（不维护）
+        let exit_signal = 17; // 退出信号
+        let processor = 0; // 假定当前 CPU
+        let rt_priority = 0; // 实时优先级，暂设为 0
+        let policy = 0; // 调度策略，暂设为 0
+        let delayacct_blkio_ticks = 0; // 延迟块 I/O ticks，暂设为 0
+        let guest_time = 0; // guest 时间，暂设为 0
+        let cguest_time = 0; // 子进程 guest 时间，暂设为 0
+        let start_data = 0; // 数据段起始地址
+        let end_data = 0; // 数据段结束地址
+        let start_brk = 0; // 程序 break 地址
+        let arg_start = 0; // 参数起始地址
+        let arg_end = 0; // 参数结束地址
+        let env_start = 0; // 环境变量起始地址
+        let env_end = 0; // 环境变量结束地址
+        let exit_code = self.exit_code();
+
+        // 拼接所有字段
+        format!(
+            "{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}\n",
+            tid, comm, state_char, ppid, pgrp, session, tty_nr, tpgid, flags,
+            minflt, cminflt, majflt, cmajflt,
+            utime, stime, cutime, cstime,
+            priority, nice, num_threads, itrealvalue, starttime,
+            vsize, rss,
+            rsslim, startcode, endcode, startstack, kstkesp, kstkeip,
+            signal, blocked, sigignore, sigcatch, wchan,
+            nswap, cnswap, exit_signal, processor, rt_priority,
+            policy, delayacct_blkio_ticks, guest_time, cguest_time,
+            start_data, end_data, start_brk,
+            arg_start, arg_end, env_start, env_end,
+            exit_code
+        )
+    }
 }
 
 /****************************** 辅助函数 ****************************************/
@@ -1064,7 +1435,7 @@ pub fn kernel_exit(task: Arc<Task>, exit_code: i32) {
 
     // 检验tid_address（线程异常退出不清理）（可能语义有问题，需要细确认）
     if !task.is_process() && exit_code != -1 {
-        if let Some(tidptr) = task.TAC() {
+        if let Some(tidptr) = task.tac() {
             // 防止地址不对齐的情况
             let content = [0u8; 8];
             log::info!("[kernel_exit] clear_child_tid: {:#x}", tidptr);
@@ -1122,7 +1493,7 @@ pub fn kernel_exit(task: Arc<Task>, exit_code: i32) {
         children.clear();
     });
     // 回收地址空间
-    if Arc::strong_count(&task.memory_set) == 1 {
+    if Arc::strong_count(&task.memory_set()) == 1 {
         log::warn!("[kernel_exit] Task{} memory_set recycle", task.tid());
         task.op_memory_set_mut(|mem| {
             mem.recycle_data_pages();

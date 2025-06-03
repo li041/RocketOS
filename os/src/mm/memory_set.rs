@@ -3,7 +3,9 @@ use core::{arch::asm, iter::Map, mem, ops::Range, usize};
 
 use super::{address::StepByOne, area::MapArea, shm::ShmSegment, VPNRange};
 use crate::drivers::get_dev_tree_size;
+use crate::fs::file;
 use crate::signal::Sig;
+use crate::syscall::errno;
 use crate::{
     arch::mm::{sfence_vma_vaddr, PTEFlags, PageTable, PageTableEntry},
     fs::{fdtable::FdFlags, file::OpenFlags},
@@ -576,10 +578,10 @@ impl MemorySet {
         if argv.len() > 0 {
             let file_name = &argv[0];
             // 文件后缀是.sh或者file_data是#!开头
-            if file_name.ends_with(".sh") || elf_data.starts_with(b"#!") {
-                let prepend_args = vec![String::from("./busybox"), String::from("sh")];
+            if file_name.ends_with(".sh") || elf_data.starts_with(b"#!"){
+                let prepend_args = vec![String::from("/musl/busybox"), String::from("sh")];
                 argv.splice(0..0, prepend_args);
-                if let Ok(busybox) = path_openat("./busybox", OpenFlags::empty(), AT_FDCWD, 0) {
+                if let Ok(busybox) = path_openat("/musl/busybox", OpenFlags::empty(), AT_FDCWD, 0) {
                     elf_data = busybox.read_all();
                     elf_file = busybox;
                 }
@@ -901,7 +903,7 @@ impl MemorySet {
         }
         self.areas.insert(map_area.vpn_range.get_start(), map_area);
     }
-    fn push_anoymous_area(&mut self, mut map_area: MapArea) {
+    pub fn push_anoymous_area(&mut self, mut map_area: MapArea) {
         map_area.map(&mut self.page_table);
         self.areas.insert(map_area.vpn_range.get_start(), map_area);
     }
@@ -1086,15 +1088,12 @@ impl MemorySet {
     /// 从尾部开始找, 因为动态分配的内存一般在最后
     /// 在原有的MapArea上增/删页, 并添加相关映射
     /// used by `sys_brk`
+    /// assert: 堆区域是连续的, 中间没有其他区域
     pub fn remap_area_with_start_vpn(&mut self, start_vpn: VirtPageNum, new_end_vpn: VirtPageNum) {
         log::trace!("[MemorySet::remap_area_with_start_vpn]",);
         if let Some(area) = self.areas.get_mut(&start_vpn) {
             let old_end_vpn = area.vpn_range.get_end();
             if old_end_vpn < new_end_vpn {
-                // let alloc_vpn_range = VPNRange::new(old_end_vpn, new_end_vpn);
-                // for vpn in alloc_vpn_range {
-                //     area.alloc_one_page_framed_private(&mut self.page_table, vpn);
-                // }
                 // 懒分配
             } else {
                 let dealloc_vpn_range = VPNRange::new(new_end_vpn, old_end_vpn);
@@ -1105,7 +1104,6 @@ impl MemorySet {
             area.vpn_range.set_end(new_end_vpn);
             return;
         }
-        // log::error!(
         log::error!(
             "[MemorySet::remap_area_with_start_vpn] can't find area with start_vpn: {:#x}",
             start_vpn.0
@@ -1311,7 +1309,6 @@ impl MemorySet {
                 "[handle_lazy_allocation_area] can't find area with vpn {:#x}",
                 vpn.0
             );
-            return Err(Sig::SIGSEGV);
         }
         self.areas.iter().for_each(|(vpn, area)| {
             log::error!("[handle_lazy_allocation_area] area: {:#x?}", area.vpn_range,);
@@ -1346,7 +1343,8 @@ impl MemorySet {
                         "[check_writable_vpn_range] vpn {:#x} not writable nor COW",
                         vpn.0
                     );
-                    return Err(Errno::EACCES);
+                    self.page_table.dump_all_user_mapping();
+                    return Err(Errno::EFAULT);
                 }
             }
 
@@ -1374,7 +1372,7 @@ impl MemorySet {
         log::trace!("[check_valid_user_vpn_range]");
         let mut current_vpn = vpn_range.get_start();
         let end_vpn = vpn_range.get_end();
-        
+
         while current_vpn < end_vpn {
             let mut found = false;
 
@@ -1496,15 +1494,6 @@ impl MemorySet {
         log::trace!("[handle_recoverable_page_fault]");
         let vpn = va.floor();
         let page_table = &mut self.page_table;
-        // #[cfg(target_arch = "loongarch64")]
-        // if vpn == VirtPageNum(0) {
-        //     // tls相关的缺页
-        //     let page = Page::new_framed(None);
-        //     let pte_flags = PTEFlags::from(MapPermission::R | MapPermission::W | MapPermission::U);
-        //     let ppn = page.ppn();
-        //     page_table.map(vpn, ppn, pte_flags);
-        //     return Ok(());
-        // }
         if let Some(pte) = page_table.find_pte(vpn) {
             if pte.is_cow() {
                 log::error!(
