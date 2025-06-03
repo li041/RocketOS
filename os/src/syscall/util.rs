@@ -392,8 +392,7 @@ pub fn sys_adjtimex(user_timex: *mut KernelTimex) -> SyscallRet {
     }
     log::error!("[sys_adjtimex] kernel_timex: {:?}", kernel_timex);
     let status = do_adjtimex(&mut kernel_timex)?;
-
-    let out_from = (&kernel_timex as *const KernelTimex);
+    let out_from = &kernel_timex as *const KernelTimex;
     copy_to_user(user_timex, out_from, 1)?;
     Ok(status as usize)
 }
