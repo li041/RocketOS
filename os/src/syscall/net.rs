@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-02 23:04:54
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-03 17:07:04
+ * @LastEditTime: 2025-06-03 17:53:37
  * @FilePath: /RocketOS_netperfright/os/src/syscall/net.rs
  * @Description: net syscall
  *
@@ -376,6 +376,11 @@ pub fn syscall_setsocketopt(
         Some(s) => s,
         None => return Err(Errno::ENOTSOCK),
     };
+    if socket.domain==Domain::AF_ALG {
+        if optlen%4!=0 {
+            return Err(Errno::EINVAL);
+        }
+    }
     let mut kernel_opt: Vec<u8> = vec![0; optlen];
 
     copy_from_user(optval, kernel_opt.as_mut_ptr(), optlen as usize);

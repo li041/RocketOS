@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-05-31 18:01:34
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-03 17:02:06
+ * @LastEditTime: 2025-06-03 17:48:22
  * @FilePath: /RocketOS_netperfright/os/src/net/alg.rs
  * @Description: 
  * 
@@ -164,10 +164,16 @@ pub fn encode_text(socket:&Socket,text:&[u8])->SyscallRet {
                 let truncated = &tag[..8];
                 log::error!("[encode_text] ciphertext is {:?}",truncated);
                 socket.set_ciphertext(truncated);
-                return Ok(truncated.len());
             }
         },
-        AlgType::Skcipher => todo!(),
+        AlgType::Skcipher => {
+            if socket_alg.get_name()=="cbc(aes-generic)"{
+                //拥有明文和密钥，加密
+                if text.len()!=16|| text.len()!=32{
+                    //不可加密，不设置密文
+                }
+            }
+        },
         AlgType::Aead => todo!(),
         AlgType::Rng => todo!(),
         AlgType::Akcipher => todo!(),

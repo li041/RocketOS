@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-03 16:40:04
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-03 17:02:59
+ * @LastEditTime: 2025-06-03 17:49:36
  * @FilePath: /RocketOS_netperfright/os/src/net/socket.rs
  * @Description: socket file
  * 
@@ -881,8 +881,15 @@ impl FileOp for Socket {
         }
         if self.domain==Domain::AF_ALG {
             let mut bind=self.socket_af_ciphertext.lock();
-            let ciphertext=bind.as_mut().unwrap();
+            let ciphertext=match bind.as_mut(){
+                Some(s) => s,
+                None => {
+                    return  Err(Errno::EINVAL);
+                },
+            };
             log::error!("[socket_read] ciphertext is {:?}",ciphertext);
+            //判断ciphertext
+
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     ciphertext.as_ptr(), 
