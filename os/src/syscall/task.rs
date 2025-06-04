@@ -10,7 +10,8 @@ use crate::futex::do_futex;
 use crate::syscall::errno::Errno;
 use crate::syscall::util::{CLOCK_MONOTONIC, CLOCK_REALTIME};
 use crate::task::{
-    add_group, get_scheduler_len, get_task, new_group, wait, wait_timeout, CloneFlags, Task,
+    add_group, dump_scheduler, get_scheduler_len, get_task, new_group, wait, wait_timeout,
+    CloneFlags, Task,
 };
 use crate::timer::{TimeSpec, TimeVal};
 use crate::{
@@ -475,77 +476,36 @@ pub fn sys_get_time(time_val_ptr: usize) -> SyscallRet {
     Ok(0)
 }
 
-// // 如果调用被信号处理程序中断，nanosleep()将返回 -1，
-// // 将 errno 设置为 EINTR，并将剩余时间写入 rem 指向的结构体中，除非 rem 为 NULL。
-// // Todo: 将剩余时间写入 rem 指向的结构体中
-// pub fn sys_nanosleep(time_val_ptr: usize) -> SyscallRet {
-//     log::info!("[sys_nanosleep] time_val_ptr: {:x}", time_val_ptr);
-//     let time_val_ptr = time_val_ptr as *const TimeSpec;
-//     let mut time_val: TimeSpec = TimeSpec::default();
-//     copy_from_user(time_val_ptr, &mut time_val as *mut TimeSpec, 1)?;
-//     wait_timeout(time_val);
-//     Ok(0)
-// }
-
-pub fn sys_nanosleep(time_val_ptr: usize) -> SyscallRet {
-    let time_val_ptr = time_val_ptr as *const TimeSpec;
+pub fn sys_nanosleep(time_val_ptr: usize, rem: usize) -> SyscallRet {
     let mut time_val: TimeSpec = TimeSpec::default();
-    copy_from_user(time_val_ptr, &mut time_val as *mut TimeSpec, 1)?;
+    copy_from_user(
+        time_val_ptr as *const TimeSpec,
+        &mut time_val as *mut TimeSpec,
+        1,
+    )?;
     let start_time = TimeSpec::new_machine_time();
     log::error!(
         "[sys_nanosleep] task{} sleep {:?}",
         current_task().tid(),
         time_val
     );
-    // Todo: 为防止无任务的情况，超时阻塞先用yield代替
-    loop {
-        if current_task().check_interrupt() {
-            log::error!(
-                "[sys_nanosleep] task{} wakeup by signal",
-                current_task().tid()
-            );
-            let remained_time = TimeSpec::new_machine_time() - start_time;
-            copy_to_user(time_val_ptr as *mut TimeSpec, &remained_time, 1)?;
-            return Err(Errno::EINTR);
-        }
-        let current_time = TimeSpec::new_machine_time();
-        if current_time >= time_val + start_time {
-            break;
-        }
-        yield_current_task(); // 返回时状态会变成running
-                              // 在yield回来之后设置成interruptable可以有效的避免任务状态被覆盖
-                              // 并且可以有效的保证收到信号的时候不会触发信号中断
-        current_task().set_interruptable();
+    if !time_val.timespec_valid_settod() {
+        return Err(Errno::EINVAL);
+    }
+    let ret = wait_timeout(time_val, -1);
+    if ret == -1 {
+        let remained_time = time_val - (TimeSpec::new_machine_time() - start_time);
+        log::error!(
+            "[sys_nanosleep] task{} wakeup by signal, remained time: {:?}",
+            current_task().tid(),
+            remained_time
+        );
+        copy_to_user(rem as *mut TimeSpec, &remained_time, 1)?;
+        current_task().cancel_restart();
+        return Err(Errno::EINTR);
     }
     Ok(0)
 }
-
-// pub fn sys_nanosleep(time_val_ptr: usize) -> SyscallRet {
-//     let time_val_ptr = time_val_ptr as *const TimeSpec;
-//     let mut time_val: TimeSpec = TimeSpec::default();
-//     copy_from_user(time_val_ptr, &mut time_val as *mut TimeSpec, 1)?;
-//     let start_time = TimeSpec::new_machine_time();
-//     log::error!(
-//         "[sys_nanosleep] task{} sleep {:?}",
-//         current_task().tid(),
-//         time_val
-//     );
-//     loop {
-//         if current_task().check_interrupt() {
-//             log::error!(
-//                 "[sys_nanosleep] task{} wakeup by signal",
-//                 current_task().tid()
-//             );
-//             return Err(Errno::EINTR);
-//         }
-//         let current_time = TimeSpec::new_machine_time();
-//         if current_time >= time_val + start_time {
-//             break;
-//         }
-//         yield_current_task();
-//     }
-//     Ok(0)
-// }
 
 pub const TIMER_ABSTIME: i32 = 0x01;
 pub fn sys_clock_nansleep(clock_id: usize, flags: i32, t: usize, remain: usize) -> SyscallRet {

@@ -38,7 +38,11 @@ use signal::{
     sys_rt_sigsuspend, sys_rt_sigtimedwait, sys_tgkill, sys_tkill,
 };
 use task::{
-    sys_acct, sys_clock_nansleep, sys_clone, sys_execve, sys_exit_group, sys_futex, sys_get_time, sys_getegid, sys_geteuid, sys_getgid, sys_getgroups, sys_getpgid, sys_getpid, sys_getppid, sys_getresgid, sys_getresuid, sys_gettid, sys_getuid, sys_nanosleep, sys_set_tid_address, sys_setfsgid, sys_setfsuid, sys_setgid, sys_setgroups, sys_setpgid, sys_setregid, sys_setresgid, sys_setresuid, sys_setreuid, sys_setsid, sys_setuid, sys_waitpid, sys_yield
+    sys_acct, sys_clock_nansleep, sys_clone, sys_execve, sys_exit_group, sys_futex, sys_get_time,
+    sys_getegid, sys_geteuid, sys_getgid, sys_getgroups, sys_getpgid, sys_getpid, sys_getppid,
+    sys_getresgid, sys_getresuid, sys_gettid, sys_getuid, sys_nanosleep, sys_set_tid_address,
+    sys_setfsgid, sys_setfsuid, sys_setgid, sys_setgroups, sys_setpgid, sys_setregid,
+    sys_setresgid, sys_setresuid, sys_setreuid, sys_setsid, sys_setuid, sys_waitpid, sys_yield,
 };
 use util::{
     sys_adjtimex, sys_clock_adjtime, sys_clock_getres, sys_clock_gettime, sys_getrusage,
@@ -298,7 +302,7 @@ pub fn syscall(
         SYSCALL_SET_ROBUST_LIST => sys_set_robust_list(a0, a1),
         SYSCALL_FUTEX => sys_futex(a0, a1 as i32, a2 as u32, a3, a4, a5 as u32),
         SYSCALL_GET_ROBUST_LIST => sys_get_robust_list(a0, a1, a2),
-        SYSCALL_NANOSLEEP => sys_nanosleep(a0),
+        SYSCALL_NANOSLEEP => sys_nanosleep(a0, a1),
         SYSCALL_SETITIMER => sys_setitimer(a0 as i32, a1 as *const ITimerVal, a2 as *mut ITimerVal),
         SYSCALL_CLOCK_GETTIME => sys_clock_gettime(a0, a1 as *mut TimeSpec),
         SYSCALL_CLOCK_GETRES => sys_clock_getres(a0, a1),

@@ -113,7 +113,6 @@ pub fn remove_group(task: &Arc<Task>) {
     PROCESS_GROUP_MANAGER.remove(task);
 }
 
-
 pub struct ProcessGroupManager(Mutex<BTreeMap<usize, Vec<Weak<Task>>>>);
 
 impl ProcessGroupManager {
@@ -136,7 +135,7 @@ impl ProcessGroupManager {
         }
         process.set_pgid(pgid);
         let mut inner = self.0.lock();
-        if let Some(process_group) = inner.get_mut(&pgid){
+        if let Some(process_group) = inner.get_mut(&pgid) {
             process_group.push(Arc::downgrade(process));
         } else {
             let mut group = Vec::new();
@@ -198,19 +197,25 @@ where
 }
 
 // 时间阻塞，当达到指定时间后自动唤醒
-// 返回值：如果为true代表任务超时唤醒，为false代表任务被其他事务唤醒
-pub fn wait_timeout(dur: timer::TimeSpec) -> bool {
+// 返回值：0：正常被唤醒； -1：被中断唤醒  -2：超时唤醒
+pub fn wait_timeout(dur: timer::TimeSpec, clock_id: i32) -> isize {
     let task = current_task();
     let tid = task.tid();
-    task.set_uninterruptable();
+    task.set_interruptable();
     // 超时后唤醒任务
-    let deadline = set_wait_alarm(dur, tid);
+    let deadline = set_wait_alarm(dur, tid, clock_id);
     WAIT_MANAGER.add(task);
-    log::warn!("[wait] task{} block(time)", tid);
     schedule();
-    log::warn!("[wait] task{} unblock(time)", current_task().tid());
+    let task = current_task();
+    if task.is_interrupted() {
+        return -1;
+    }
     let timeout = TimeSpec::new_machine_time() >= deadline;
-    timeout
+    if timeout {
+        log::warn!("[wait_timeout] task{} timeout", tid);
+        return -2; // 超时唤醒
+    }
+    return 0; // 正常被唤醒
 }
 
 /// 唤醒某一特定任务
@@ -366,8 +371,8 @@ pub const ITIMER_PROF: ClockId = 2;
 pub type AlarmEntry = (Tid, ClockId, Callback);
 
 /// 为任务设置超时阻塞时限
-pub fn set_wait_alarm(dur: timer::TimeSpec, tid: Tid) -> TimeSpec {
-    TIME_MANAGER.add_timer(dur, tid, -1, move || wakeup(tid))
+pub fn set_wait_alarm(dur: timer::TimeSpec, tid: Tid, clock_id: i32) -> TimeSpec {
+    TIME_MANAGER.add_timer(dur, tid, clock_id, move || wakeup(tid))
 }
 
 /// 取消任务的阻塞时限
@@ -472,7 +477,7 @@ impl TimeManager {
         let mut tids = vec![];
         // 第一步：先锁一次并记录所有要移除的键
         let mut guard = self.alarms.lock();
-        let keys_to_remove: vec::Vec<_> = guard.range(..&now).map(|(k, _)| k.clone()).collect();
+        let keys_to_remove: vec::Vec<_> = guard.range(..=&now).map(|(k, _)| k.clone()).collect();
         // 第二步：再移除这些键，收集对应的值
         for key in keys_to_remove {
             if let Some(entry) = guard.remove(&key) {

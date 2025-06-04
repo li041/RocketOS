@@ -86,4 +86,14 @@ impl Task {
         }
         false
     }
+
+    pub fn cancel_restart(&self) {
+        self.op_sig_pending_mut(|pending| {
+            pending.cancel_restart();
+        });
+    }
+
+    pub fn need_restart(&self) -> bool {
+        self.op_sig_pending_mut(|pending| pending.need_restart())
+    }
 }

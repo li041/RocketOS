@@ -34,7 +34,10 @@ use crate::{
             zero::ZERO,
         },
         fdtable::{FdEntry, FdFlags},
-        proc::pid::{record_target_pid, TARGERT_PID},
+        proc::{
+            cpuinfo::CPUINFO,
+            pid::{record_target_pid, TARGERT_PID},
+        },
         AT_FDCWD,
     },
     syscall::{errno::Errno, AT_SYMLINK_NOFOLLOW},
@@ -273,6 +276,11 @@ fn create_file_from_dentry(
             pid_stat.seek(0, super::uapi::Whence::SeekSet).unwrap();
             return Ok(pid_stat);
         }
+        if dentry.absolute_path == "/proc/cpuinfo" {
+            let cpuinfo: Arc<dyn FileOp> = CPUINFO.get().unwrap().clone();
+            cpuinfo.seek(0, super::uapi::Whence::SeekSet).unwrap();
+            return Ok(cpuinfo);
+        }
     }
 
     let file: Arc<dyn FileOp> = match file_type {
@@ -385,7 +393,13 @@ pub fn path_openat(
 //     1. nd.dentry即为父目录
 pub fn lookup_dentry(nd: &mut Nameidata) -> Arc<Dentry> {
     let segment = &nd.path_segments[nd.depth];
-    let absolute_path = format!("{}/{}", nd.dentry.absolute_path, segment);
+    let mut absolute_path = nd.dentry.absolute_path.clone();
+    if nd.path_segments.len() >= 2 && nd.path_segments[0] == "proc" && nd.path_segments[1] == "pid"
+    {
+        // 特殊处理/proc/pid目录
+        absolute_path += "/pid";
+    }
+    let absolute_path = format!("{}/{}", absolute_path, segment);
     log::debug!("[lookup_dentry] Looking up path: {}", absolute_path);
     // 尝试从 dcache 查找
     if let Some(dentry) = lookup_dcache_with_absolute_path(&absolute_path) {

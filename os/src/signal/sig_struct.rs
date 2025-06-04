@@ -14,6 +14,7 @@ pub struct SigPending {
     pub mask: SigSet,                 // 信号掩码
     pub info: BTreeMap<i32, SigInfo>, // 记录信息 key：信号值， value：信号信息
     pub interrupted: bool,            // 是否被信号中断
+    pub re_start: bool,               // 是否需要重启
 }
 
 impl SigPending {
@@ -23,6 +24,7 @@ impl SigPending {
             mask: SigSet::empty(),
             info: BTreeMap::new(),
             interrupted: false,
+            re_start: true, // 默认需要重启
         }
     }
 
@@ -99,7 +101,7 @@ impl SigPending {
     // 设定当前任务被信号中断
     pub fn set_interrupted(&mut self) {
         self.interrupted = true;
-    }   
+    }
 
     // 设定当前任务没有被信号中断
     pub fn set_uninterrupted(&mut self) {
@@ -109,6 +111,20 @@ impl SigPending {
     // 检查当前任务是否被信号中断
     pub fn is_interrupted(&self) -> bool {
         self.interrupted
+    }
+
+    // 阻止当前任务进行重启
+    pub fn cancel_restart(&mut self) {
+        self.re_start = false; // 设置为取消重启状态
+    }
+
+    // 判断当前任务是否需要重启
+    pub fn need_restart(&mut self) -> bool {
+        if !self.re_start {
+            self.re_start = true; // 如果之前是取消重启的状态，则恢复重启
+            return false;
+        }
+        self.re_start
     }
 }
 

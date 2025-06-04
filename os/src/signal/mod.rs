@@ -62,7 +62,10 @@ pub fn handle_signal() {
 
         // Todo: 中断处理，测试
         #[cfg(target_arch = "riscv64")]
-        if action.flags.contains(SigActionFlag::SA_RESTART) && task.is_interrupted() {
+        if action.flags.contains(SigActionFlag::SA_RESTART)
+            && task.is_interrupted()
+            && task.need_restart()
+        {
             // 回到用户调用ecall的指令
             log::warn!("[handle_signal] handle SA_RESTART");
             trap_cx.set_pc(trap_cx.sepc - 4);

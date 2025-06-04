@@ -15,7 +15,7 @@ use crate::{
     syscall::errno::Errno,
     task::{
         current_task, dump_scheduler, dump_wait_queue, for_each_task, get_stack_top_by_sp,
-        get_task, yield_current_task, INITPROC, INIT_PROC_PID,
+        get_task, wait_timeout, yield_current_task, INITPROC, INIT_PROC_PID,
     },
     timer::TimeSpec,
 };

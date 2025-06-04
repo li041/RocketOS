@@ -44,7 +44,7 @@ pub fn do_futex(
             let val3 = FUTEX_BITSET_MATCH_ANY;
             let mut timeout_buf = TimeSpec::default();
             // convert relative timeout to absolute timeout
-            let timeout: Option<TimeSpec> = if val2 != 0 {
+            let wait_time: Option<TimeSpec> = if val2 != 0 {
                 copy_from_user(
                     val2 as *const TimeSpec,
                     &mut timeout_buf as *mut TimeSpec,
@@ -54,18 +54,7 @@ pub fn do_futex(
             } else {
                 None
             };
-            let deadline: Option<TimeSpec> = if timeout.is_some() {
-                if flags & FLAGS_CLOCKRT != 0 {
-                    // convert relative timeout to absolute timeout
-                    Some(timeout.unwrap() + TimeSpec::new_machine_time())
-                } else {
-                    // convert relative timeout to absolute timeout
-                    Some(timeout.unwrap() + TimeSpec::new_machine_time())
-                }
-            } else {
-                None
-            };
-            futex_wait(uaddr.into(), flags, val, deadline, val3)
+            futex_wait(uaddr.into(), flags, val, wait_time, val3)
         }
         FUTEX_WAIT_BITSET => {
             let mut timeout_buf = TimeSpec::default();
