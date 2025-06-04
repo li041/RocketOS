@@ -17,7 +17,7 @@ use super::{
         pid::PID_STAT,
         status::STATUS,
     },
-    FileOld, Stdin, FS_BLOCK_SIZE,
+    tmp, FileOld, Stdin, FS_BLOCK_SIZE,
 };
 use crate::{
     ext4::{
@@ -25,7 +25,7 @@ use crate::{
         inode::{self, S_IFCHR, S_IFDIR, S_IFIFO, S_IFMT, S_IFREG},
     },
     fs::{
-        dentry::DentryFlags,
+        dentry::{dentry_check_open, DentryFlags},
         dev::{
             loop_device::{get_loop_device, LOOP_CONTROL},
             null::NULL,
@@ -35,6 +35,7 @@ use crate::{
         },
         fdtable::{FdEntry, FdFlags},
         proc::{
+            fd::{record_fd, FD_FILE},
             cpuinfo::CPUINFO,
             pid::{record_target_pid, TARGERT_PID},
             tainted::TAINTED,
@@ -159,9 +160,16 @@ pub fn open_last_lookups(
 
         // 创建匿名 inode，不插入 dentry
         let tmp_inode = dir_inode.tmpfile(mode as u16);
+        // 创建匿名dentry, 但不插入目录树
+        let tmp_dentry = Dentry::tmp(nd.dentry.clone(), tmp_inode.clone());
+        insert_dentry(tmp_dentry.clone());
 
         // 用 inode 创建文件对象（不绑定路径）
-        return Ok(Arc::new(File::new(Path::zero_init(), tmp_inode, flags)));
+        return Ok(Arc::new(File::new(
+            Path::new(nd.mnt.clone(), tmp_dentry),
+            tmp_inode,
+            flags,
+        )));
     }
 
     let mut follow_symlink = 0;
@@ -195,7 +203,7 @@ pub fn open_last_lookups(
                     }
                     let symlink_target = dentry.get_inode().get_link();
                     log::warn!(
-                        "Resolving symlink: {:?} -> {:?}",
+                        "[open_last_lookups] Resolving symlink: {:?} -> {:?}",
                         nd.path_segments[nd.depth],
                         symlink_target
                     );
@@ -209,6 +217,8 @@ pub fn open_last_lookups(
                     nd.depth += 1;
                     continue;
                 }
+
+                dentry_check_open(&dentry, flags, mode as u16)?;
 
                 dentry
             } else {
@@ -277,6 +287,10 @@ fn create_file_from_dentry(
             pid_stat.seek(0, super::uapi::Whence::SeekSet).unwrap();
             return Ok(pid_stat);
         }
+        if dentry.absolute_path.starts_with("/proc/self/fd/") {
+            // /proc/self/fd/XXX
+            return Ok(FD_FILE.get().unwrap().clone());
+        }
         if dentry.absolute_path == "/proc/sys/kernel/tainted" {
             // /proc/sys/kernel/tainted
             let tainted_file = TAINTED.get().unwrap().clone();
@@ -297,10 +311,10 @@ fn create_file_from_dentry(
             // 根据flags创建读/写端
             let inode = Arc::downcast(inode).unwrap();
             if flags.contains(OpenFlags::O_WRONLY) || flags.contains(OpenFlags::O_RDWR) {
-                Pipe::write_end(inode, flags, true)
+                Pipe::write_end(inode, flags, true)?
             } else {
                 // O_RDONLY = 0
-                Pipe::read_end(inode, flags, true)
+                Pipe::read_end(inode, flags, true)?
             }
         }
         S_IFCHR => {
@@ -311,7 +325,7 @@ fn create_file_from_dentry(
                     NULL.get().unwrap().clone()
                 } // /dev/null
                 (1, 5) => {
-                    assert!(dentry.absolute_path == "/dev/zero");
+                    // assert!(dentry.absolute_path == "/dev/zero");
                     ZERO.get().unwrap().clone()
                 } // /dev/zero
                 (5, 0) => {
@@ -362,7 +376,7 @@ fn create_file_from_dentry(
 // Todo: 增加权限检查
 /// 根据路径查找inode, 如果不存在, 则根据flags创建
 /// path可以是绝对路径或相对路径
-/// mode只在flags包含O_CREAT时有效
+/// mode在open时用于检查打开权限, 在create时用于设置文件的权限
 pub fn path_openat(
     path: &str,
     flags: OpenFlags,
@@ -398,6 +412,8 @@ pub fn path_openat(
 // 由上层调用者保证:
 //     1. nd.dentry即为父目录
 pub fn lookup_dentry(nd: &mut Nameidata) -> Arc<Dentry> {
+    // let segment = &nd.path_segments[nd.depth];
+    // let absolute_path = format!("{}/{}", nd.dentry.absolute_path, segment);
     let segment = &nd.path_segments[nd.depth];
     let mut absolute_path = nd.dentry.absolute_path.clone();
     if nd.path_segments.len() >= 2 && nd.path_segments[0] == "proc" && nd.path_segments[1] == "pid"
@@ -406,7 +422,7 @@ pub fn lookup_dentry(nd: &mut Nameidata) -> Arc<Dentry> {
         absolute_path += "/pid";
     }
     let absolute_path = format!("{}/{}", absolute_path, segment);
-    log::debug!("[lookup_dentry] Looking up path: {}", absolute_path);
+    log::info!("[lookup_dentry] Looking up path: {}", absolute_path);
     // 尝试从 dcache 查找
     if let Some(dentry) = lookup_dcache_with_absolute_path(&absolute_path) {
         return dentry;
@@ -456,15 +472,15 @@ pub fn filename_create(nd: &mut Nameidata, _lookup_flags: usize) -> Result<Arc<D
 }
 
 /// 根据路径查找inode, 如果不存在, 则返回error
-/// flags可能包含AT_SYMLINK_NOFOLLOW, 如果包含则不跟随符号链接
-pub fn filename_lookup(nd: &mut Nameidata, lookup_flags: i32) -> Result<Arc<Dentry>, Errno> {
+/// flags可能包含AT_SYMLINK_NOFOLLOW, 如果包含则路径最后一个组件不跟随符号链接
+pub fn filename_lookup(nd: &mut Nameidata, follow_symlink: bool) -> Result<Arc<Dentry>, Errno> {
     let mut error: i32;
     match link_path_walk(nd) {
         Ok(_) => {
             // 到达最后一个组件
-            let mut follow_symlink = 0;
+            let mut follow_symlink_cnt = 0;
             loop {
-                if follow_symlink > MAX_SYMLINK_DEPTH {
+                if follow_symlink_cnt > MAX_SYMLINK_DEPTH {
                     return Err(Errno::ELOOP); // 避免符号链接循环
                 }
                 let segment = nd.path_segments[nd.depth].as_str();
@@ -478,22 +494,24 @@ pub fn filename_lookup(nd: &mut Nameidata, lookup_flags: i32) -> Result<Arc<Dent
                     let dentry = lookup_dentry(nd);
                     if !dentry.is_negative() {
                         if dentry.is_symlink() {
-                            if lookup_flags & AT_SYMLINK_NOFOLLOW != 0 {
+                            if !follow_symlink {
                                 // 路径最后一个分量是符号链接, 但禁止跟随, 直接返回符号链接的dentry
                                 return Ok(dentry);
                             }
                             let symlink_target = dentry.get_inode().get_link(); // 读取符号链接目标
                             log::warn!(
-                                "Resolving symlink: {:?} -> {:?}",
+                                "[filename_lookup] Resolving symlink: {:?} -> {:?}",
                                 nd.path_segments[nd.depth],
                                 symlink_target
                             );
                             nd.resolve_symlink(&symlink_target);
-                            follow_symlink += 1;
+                            follow_symlink_cnt += 1;
                             continue;
                         }
                         // 如果不是最后一个组件, 则继续解析
                         if nd.depth != nd.path_segments.len() - 1 {
+                            // 更新nd.dentry
+                            nd.dentry = dentry.clone();
                             nd.depth += 1;
                             continue;
                         }
@@ -612,7 +630,7 @@ pub fn link_path_walk(nd: &mut Nameidata) -> Result<String, Errno> {
                 symlink_count += 1;
                 let symlink_target = dentry.get_inode().get_link(); // 读取符号链接目标
                 log::info!(
-                    "Resolving symlink: {:?} -> {:?}",
+                    "[link_path_walk] Resolving symlink: {:?} -> {:?}",
                     nd.path_segments[nd.depth],
                     symlink_target
                 );

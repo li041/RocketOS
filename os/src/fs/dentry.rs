@@ -2,6 +2,7 @@ use core::fmt::{Debug, Formatter};
 
 use alloc::{
     collections::vec_deque::VecDeque,
+    format,
     string::{String, ToString},
     sync::{Arc, Weak},
     vec::Vec,
@@ -15,9 +16,10 @@ use crate::{
     mutex::SpinNoIrqLock,
     syscall::errno::{Errno, SyscallRet},
     task::current_task,
+    timer::TimeSpec,
 };
 
-use super::inode::InodeOp;
+use super::{file::OpenFlags, inode::InodeOp, tmp};
 
 bitflags::bitflags! {
     /// 目前只支持type
@@ -105,11 +107,85 @@ pub fn dentry_check_access(
 
 // 由调用者保证:
 //    1. dentry不是负目录项
+/// mode是inode的mode
+pub fn dentry_check_open(dentry: &Dentry, flags: OpenFlags, mode: u16) -> Result<usize, Errno> {
+    log::debug!(
+        "[dentry_check_open] Checking open permissions for {}, flags: {:?}, mode: {:o}",
+        dentry.absolute_path,
+        flags,
+        mode
+    );
+    let task = current_task();
+    let (uid, gid) = (task.fsuid(), task.fsgid());
+    if flags.contains(OpenFlags::O_NOATIME) {
+        // root用户总是有权限
+        // 检查文件的所有者是否是当前用户
+        if uid != 0 && uid != dentry.get_inode().get_uid() {
+            log::error!(
+                "[dentry_check_open] O_NOATIME flag set, but current user {} is not the owner of {}",
+                uid,
+                dentry.absolute_path
+            );
+            return Err(Errno::EPERM);
+        }
+    }
+    if flags.contains(OpenFlags::O_CREAT) {
+        if flags.contains(OpenFlags::O_EXCL) {
+            // O_CREAT | O_EXCL: 文件已存在返回 EEXIST
+            log::error!(
+                "[dentry_check_open] O_CREAT | O_EXCL flags set, but {} already exists",
+                dentry.absolute_path
+            );
+            return Err(Errno::EEXIST);
+        }
+        if dentry.is_dir() {
+            // O_CREAT: 不能创建目录
+            log::error!(
+                "[dentry_check_open] O_CREAT flag set, but {} is a directory",
+                dentry.absolute_path
+            );
+            return Err(Errno::EISDIR);
+        }
+    }
+    if flags.contains(OpenFlags::O_DIRECTORY) {
+        // O_DIRECTORY: 只能打开目录
+        if !dentry.is_dir() {
+            log::error!(
+                "[dentry_check_open] O_DIRECTORY flag set, but {} is not a directory",
+                dentry.absolute_path
+            );
+            return Err(Errno::ENOTDIR);
+        }
+    }
+    if flags.contains(OpenFlags::O_WRONLY) || flags.contains(OpenFlags::O_RDWR) {
+        // O_WRONLY 或 O_RDWR: 需要写权限
+        if dentry.is_dir() {
+            log::error!(
+                "[dentry_check_open] O_WRONLY or O_RDWR flags set, but {} is a directory",
+                dentry.absolute_path
+            );
+            return Err(Errno::EISDIR);
+        }
+        if dentry_check_access(dentry, W_OK, true).is_err() {
+            log::error!(
+                "[dentry_check_open] Write access denied for {}, mode: {:o}, uid: {}, gid: {}",
+                dentry.absolute_path,
+                mode,
+                uid,
+                gid
+            );
+            return Err(Errno::EACCES);
+        }
+    }
+    Ok(0)
+}
+
+// 由调用者保证:
+//    1. dentry不是负目录项
 /// 要修改文件的所有者, 必须具备`CAP_CHOWN`能力(目前只支持root用户)
-pub fn dentry_chown(dentry: &Dentry, new_uid: u32, new_gid: u32) -> SyscallRet {
+pub fn chown(inode: &Arc<dyn InodeOp>, new_uid: u32, new_gid: u32) -> SyscallRet {
     let task = current_task();
     let (euid, egid) = (task.fsuid(), task.fsgid());
-    let inode = dentry.get_inode();
     let mut i_mode = inode.get_mode();
     log::info!(
         "[dentry_chown] euid: {}, egid: {}, new_uid: {}, new_gid: {}, i_mode: {:o}",
@@ -126,8 +202,7 @@ pub fn dentry_chown(dentry: &Dentry, new_uid: u32, new_gid: u32) -> SyscallRet {
             // 当super-user修改可执行文件的所有者时需要清除setuid和setgid位
             if i_mode & 0o111 != 0 {
                 log::warn!(
-                    "[dentry_chown] Root user is changing owner of executable file {}, clearing setuid/setgid bits",
-                    dentry.absolute_path
+                    "[dentry_chown] Root user is changing owner of executable file , clearing setuid/setgid bits",
                 );
                 // 如果是文件是non-group-executable, 则保留setgid位
                 if i_mode & 0o10 == 0 {
@@ -152,8 +227,7 @@ pub fn dentry_chown(dentry: &Dentry, new_uid: u32, new_gid: u32) -> SyscallRet {
         log::warn!("inode gid: {}", inode.get_gid());
         if euid != inode.get_uid() {
             log::error!(
-                "[dentry_check_chown] No permission to change ownership of {}, euid: {}, egid: {}",
-                dentry.absolute_path,
+                "[dentry_check_chown] No permission to change ownership, euid: {}, egid: {}",
                 euid,
                 egid
             );
@@ -197,7 +271,7 @@ pub struct DentryInner {
     // None 表示该 dentry 未关联 inode
     pub inode: Option<Arc<dyn InodeOp>>,
     // pub inode: Option<Arc<SpinNoIrqLock<OSInode>>>,
-    pub parent: Option<Weak<Dentry>>,
+    pub parent: Option<Arc<Dentry>>,
     // chrildren 是一个哈希表, 用于存储子目录/文件, name不是绝对路径
     pub children: HashMap<String, Weak<Dentry>>,
 }
@@ -216,7 +290,8 @@ impl DentryInner {
     pub fn new(parent: Option<Arc<Dentry>>, inode: Arc<dyn InodeOp>) -> Self {
         Self {
             inode: Some(inode),
-            parent: parent.map(|p| Arc::downgrade(&p)),
+            // parent: parent.map(|p| Arc::downgrade(&p)),
+            parent,
             children: HashMap::new(),
         }
     }
@@ -224,7 +299,8 @@ impl DentryInner {
     pub fn negative(parent: Option<Arc<Dentry>>) -> Self {
         Self {
             inode: None,
-            parent: parent.map(|p| Arc::downgrade(&p)),
+            // parent: parent.map(|p| Arc::downgrade(&p)),
+            parent,
             children: HashMap::new(),
         }
     }
@@ -257,6 +333,15 @@ impl Dentry {
             inner: SpinNoIrqLock::new(DentryInner::negative(parent)),
         })
     }
+    pub fn tmp(parent: Arc<Dentry>, inode: Arc<dyn InodeOp>) -> Arc<Self> {
+        let current_time = TimeSpec::new_wall_time();
+        let tmp_path = format!("/tmp/{}", current_time.nsec);
+        Arc::new(Self {
+            absolute_path: tmp_path,
+            flags: RwLock::new(DentryFlags::DCACHE_REGULAR_TYPE),
+            inner: SpinNoIrqLock::new(DentryInner::new(Some(parent), inode)),
+        })
+    }
     // // 上层调用者保证由负目录项调用
     // pub fn associate(&mut self, inode_num: usize, inode: Arc<dyn InodeOp>) {
     //     self.inner.lock().inode = Some(inode);
@@ -265,7 +350,9 @@ impl Dentry {
     pub fn is_negative(&self) -> bool {
         self.inner.lock().inode.is_none()
     }
-    /// 由上层调用者保证: 负目录项不能调用该函数
+    // pub fn check_perm(&self, mode: i32) -> Result<usize, Errno> {
+    // }
+    // 由上层调用者保证: 负目录项不能调用该函数
     pub fn can_search(&self) -> bool {
         let (euid, egid) = {
             let task = current_task();
@@ -331,7 +418,8 @@ impl Dentry {
         let target = Arc::as_ptr(self);
         let mut current = child.clone();
         loop {
-            let parent_opt = current.inner.lock().parent.as_ref().unwrap().upgrade();
+            // let parent_opt = current.inner.lock().parent.as_ref().unwrap().upgrade();
+            let parent_opt = current.inner.lock().parent.clone();
             match parent_opt {
                 Some(parent) => {
                     // 根目录的parent是自己
@@ -359,11 +447,22 @@ impl Dentry {
             .lock()
             .parent
             .clone()
-            .map(|p| p.upgrade().unwrap())
+            // .map(|p| p.upgrade().unwrap())
             .unwrap()
     }
+    // pub fn get_parent(&self) -> Arc<Dentry> {
+    //     // 首先尝试从缓存的父节点获取
+    //     if let Some(parent) = self.inner.lock().parent.clone() {
+    //         if let Some(strong_parent) = parent.upgrade() {
+    //             return strong_parent;
+    //         }
+    //     }
+    //     // 如果缓存中没有父节点，尝试从文件系统读取 ".."
+    //     unimplemented!()
+    // }
     pub fn set_parent(&self, parent: Arc<Dentry>) {
-        self.inner.lock().parent = Some(Arc::downgrade(&parent));
+        // self.inner.lock().parent = Some(Arc::downgrade(&parent));
+        self.inner.lock().parent = Some(parent);
     }
 }
 

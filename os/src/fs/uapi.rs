@@ -39,41 +39,31 @@ pub struct PollFd {
     pub revents: PollEvents,
 }
 
-/// sys_utimensat
-bitflags::bitflags! {
-    #[derive(Debug, Clone, Copy)]
-    pub struct UtimenatFlags: i32 {
-        // 如果路径是空字符串, 直接操作dirfd指向的file
-        const AT_EMPTY_PATH = 0x1000;
-        // 不跟随符号链接, 如果路径是符号链接，则操作会在链接本身上进行，而不是链接指向的目标。
-        const AT_SYMLINK_NOFOLLOW = 0x100;
-    }
-}
 
 /// sys_mknod
 pub struct DevT(pub u64);
 
 impl DevT {
     pub fn tty_devt() -> Self {
-        Self::makedev(5, 0)
+        Self::new_encode_dev(5, 0)
     }
     pub fn rtc_devt() -> Self {
-        Self::makedev(10, 0)
+        Self::new_encode_dev(10, 0)
     }
     pub fn null_devt() -> Self {
-        Self::makedev(1, 3)
+        Self::new_encode_dev(1, 3)
     }
     pub fn zero_devt() -> Self {
-        Self::makedev(1, 5)
+        Self::new_encode_dev(1, 5)
     }
     pub fn urandom_devt() -> Self {
-        Self::makedev(1, 9)
+        Self::new_encode_dev(1, 9)
     }
     pub fn loop_control_devt() -> Self {
-        Self::makedev(10, 237)
+        Self::new_encode_dev(10, 237)
     }
     pub fn loopx_devt(id: usize) -> Self {
-        Self::makedev(7, id as u32)
+        Self::new_encode_dev(7, id as u32)
     }
 }
 
@@ -81,20 +71,35 @@ impl DevT {
     pub fn new(dev: u64) -> Self {
         Self(dev)
     }
-    pub fn makedev(major: u32, minor: u32) -> Self {
+    pub fn new_encode_dev(major: u32, minor: u32) -> Self {
         Self(((major as u64) << 20) | (minor as u64 & 0xFFFFF))
     }
     /// 从dev_t中获取设备号
-    pub fn major(&self) -> u32 {
-        ((self.0 >> 20) & 0xfff) as u32
+    // pub fn major(&self) -> u32 {
+    //     ((self.0 >> 20) & 0xfff) as u32
+    // }
+    // pub fn minor(&self) -> u32 {
+    //     (self.0 & 0xfffff) as u32
+    // }
+    pub fn new_decode_dev(&self) -> (u32, u32) {
+        let major = ((self.0 >> 20) & 0xfff) as u32;
+        let minor = (self.0 & 0xfffff) as u32;
+        (major, minor)
     }
-    pub fn minor(&self) -> u32 {
-        (self.0 & 0xfffff) as u32
-    }
-    pub fn unpack(&self) -> (u32, u32) {
-        (self.major(), self.minor())
+    pub fn old_decode_dev(&self) -> (u32, u32) {
+        let major = ((self.0 >> 8) & 0xff) as u32;
+        let minor = (self.0 & 0xff) as u32;
+        (major, minor)
     }
 }
+
+pub fn convert_old_dev_to_new(dev: u64) -> DevT {
+    // 旧的设备号格式是 8 位主设备号和 8 位次设备号
+    let major = (dev >> 8) as u32 & 0xff;
+    let minor = (dev & 0xff) as u32;
+    DevT::new_encode_dev(major, minor)
+}
+
 impl From<DevT> for u64 {
     fn from(dev: DevT) -> Self {
         dev.0
@@ -121,7 +126,7 @@ pub enum Whence {
     SeekEnd = 2,
     // Todo:
     // SeekData = 3,
-    // SeekHold = 4,
+    // SeekHole = 4,
 }
 
 impl TryFrom<usize> for Whence {
@@ -246,5 +251,31 @@ impl TryFrom<i32> for Resource {
             15 => Ok(Resource::RTTIME),
             _ => Err("invalid resource"),
         }
+    }
+}
+
+/* linux/include/uapi/linux/falloc.h */
+// /// 保持文件大小不变
+// pub const FALLOC_FL_KEEP_SIZE: i32 = 0x01;
+// /// 打孔操作，释放文件中的空间, 但文件的大小不变, 必须与`FALLOC_FL_KEEP_SIZE`一起使用
+// pub const FALLOC_FL_PUNCH_HOLE: i32 = 0x02;
+// /// 预留的标志位, 暂未使用
+// pub const FALLOC_FL_NO_HIDE_STALE: i32 = 0x04; // 不隐藏旧数据
+// /// 折叠文件中的一段区域，相当于将该范围删除，然后将该区域后面的内容往前“搬”，覆盖被删区域，并缩小文件大小。不能跨越文件末尾（EOF），否则操作非法。
+// pub const FALLOC_FL_COLLAPSE_RANGE: i32 = 0x08; // 压缩范围，将指定范围内的数据删除并将后面的数据向前移动
+// pub const FALLOC_FL_ZERO_RANGE: i32 = 0x10; // 将指定范围内的数据清零
+// pub const FALLOC_FL_INSERT_RANGE: i32 = 0x20; // 插入范围，将指定范围内的数据向后移动
+// pub const FALLOC_FL_UNSHARE_RANGE: i32 = 0x40; // 取消共享范围，将指定范围内的数据从共享中分离出来
+
+bitflags::bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct FallocFlags: i32 {
+        const KEEP_SIZE = 0x1;
+        const PUNCH_HOLE = 0x2;
+        const NO_HIDE_STALE = 0x4;
+        const COLLAPSE_RANGE = 0x8;
+        const ZERO_RANGE = 0x10;
+        const INSERT_RANGE = 0x20;
+        const UNSHARE_RANGE = 0x40;
     }
 }

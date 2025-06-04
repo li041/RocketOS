@@ -2,7 +2,10 @@
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
+use alloc::vec::Vec;
+use universal_hash::typenum::bit;
 
+use crate::drivers::block;
 use crate::drivers::block::block_cache::get_block_cache;
 use crate::drivers::block::block_dev::BlockDevice;
 use crate::ext4::dentry::Ext4DirEntry;
@@ -456,10 +459,17 @@ impl<'a> Ext4Bitmap<'a> {
         }
         None
     }
-    pub fn alloc_contiguous(&mut self, bitmap_size: usize, count: usize) -> Option<usize> {
+    //尝试一次性分配 block_count 个连续块; 如果不能, 就返回够返回尽可能多的连续块
+    pub fn alloc_contiguous(
+        &mut self,
+        bitmap_size: usize,
+        max_count: usize,
+    ) -> Option<(usize, u32)> {
         let total_bits = bitmap_size * 8;
         let mut current_run = 0;
         let mut start_bit = 0;
+        let mut longest_run = 0;
+        let mut longest_start = 0;
 
         for bit in 0..total_bits {
             let byte_index = bit / 8;
@@ -470,24 +480,37 @@ impl<'a> Ext4Bitmap<'a> {
             }
 
             if self.bitmap[byte_index] & (1 << bit_index) == 0 {
-                // 空闲位
                 if current_run == 0 {
                     start_bit = bit;
                 }
                 current_run += 1;
-                if current_run == count {
-                    // 找到足够的连续空闲位，开始标记为已分配
-                    for b in start_bit..(start_bit + count) {
+                if current_run > longest_run {
+                    longest_run = current_run;
+                    longest_start = start_bit;
+                }
+                if current_run == max_count {
+                    // 找到了 max_count 个连续空闲位，立即返回
+                    for b in start_bit..(start_bit + max_count) {
                         let bi = b / 8;
                         let bj = b % 8;
                         self.bitmap[bi] |= 1 << bj;
                     }
                     // 如果分配的是 inode bitmap，要从 1 开始编号
-                    return Some(start_bit + 1);
+                    return Some((start_bit + 1, max_count as u32));
                 }
             } else {
                 current_run = 0;
             }
+        }
+
+        if longest_run > 0 {
+            // 标记 longest_run 这段为已分配
+            for b in longest_start..(longest_start + longest_run) {
+                let bi = b / 8;
+                let bj = b % 8;
+                self.bitmap[bi] |= 1 << bj;
+            }
+            return Some((longest_start + 1, longest_run as u32));
         }
 
         None
@@ -515,6 +538,38 @@ impl<'a> Ext4Bitmap<'a> {
                 block_offset,
                 self.bitmap.len()
             );
+        }
+    }
+    /// 释放连续的块
+    pub fn dealloc_contiguous(
+        &mut self,
+        start_block: usize,
+        mut block_count: usize,
+        bitmap_size: usize,
+    ) {
+        let mut byte_index = start_block / 8;
+        let mut bit_index = start_block % 8;
+        if byte_index < self.bitmap.len() {
+            // 检查是否在bitmap范围内
+            if byte_index + block_count < bitmap_size {
+                for _ in 0..block_count {
+                    self.bitmap[byte_index] &= !(1 << bit_index);
+                    if bit_index == 7 {
+                        // 移动到下一个字节
+                        byte_index += 1;
+                        bit_index = 0;
+                    } else {
+                        bit_index += 1;
+                    }
+                }
+            } else {
+                log::error!(
+                "Dealloc block out of range, start_block: {}, block_count: {}, bitmap length: {}",
+                start_block,
+                block_count,
+                self.bitmap.len()
+            );
+            }
         }
     }
 }
@@ -578,6 +633,40 @@ impl<'a> Ext4ExtentBlock<'a> {
             } else {
                 return None;
             }
+        }
+    }
+    /// 递归遍历整个 extent B+ 树，收集所有叶子节点的 Ext4Extent
+    pub fn iter_all_extents(
+        &mut self,
+        block_device: Arc<dyn BlockDevice>,
+        block_size: usize,
+        result: &mut Vec<Ext4Extent>,
+    ) {
+        let header = self.extent_header();
+
+        if header.depth > 0 {
+            // 当前是索引节点
+            unimplemented!("[Ext4ExtentBlock::iter_all_extents]Iterating over index nodes is not implemented yet");
+            // for idx in self.extent_idxs(&header) {
+            //     let child_block = idx.physical_leaf_block();
+
+            //     let mut child_block_ref = Ext4ExtentBlock::new(
+            //         get_block_cache(child_block, block_device.clone(), block_size)
+            //             .lock()
+            //             .get_mut(0),
+            //     );
+            //     child_block_ref.iter_all_extents(block_device.clone(), block_size, result);
+            // }
+        } else {
+            // 当前是叶子节点，收集 extent 列表
+            let header = self.extent_header();
+            let extents = unsafe {
+                core::slice::from_raw_parts(
+                    self.block.as_ptr().add(12) as *const Ext4Extent,
+                    header.entries as usize,
+                )
+            };
+            result.extend(extents);
         }
     }
     // 递归插入

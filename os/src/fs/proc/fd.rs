@@ -1,41 +1,107 @@
-use core::{default, mem, str};
+use core::{default, str, sync::atomic::AtomicUsize};
 
 use lazy_static::lazy_static;
 use spin::{lazy, mutex, Once, RwLock};
 
 use crate::{
-    ext4::inode::Ext4InodeDisk,
+    ext4::{
+        dentry,
+        inode::{Ext4Inode, Ext4InodeDisk},
+    },
     fs::{
+        dentry::{Dentry, DentryFlags},
         file::{FileOp, OpenFlags},
         inode::InodeOp,
         kstat::Kstat,
         path::Path,
         uapi::Whence,
+        FileOld,
     },
-    syscall::errno::{Errno, SyscallRet},
+    syscall::errno::SyscallRet,
+    task::current_task,
     timer::TimeSpec,
 };
 
-use alloc::sync::Arc;
+use alloc::{
+    format,
+    string::{String, ToString},
+    sync::Arc,
+};
 
-pub static TAINTED: Once<Arc<dyn FileOp>> = Once::new();
+pub static FD_FILE: Once<Arc<dyn FileOp>> = Once::new();
+pub static FD: AtomicUsize = AtomicUsize::new(0);
 
-pub struct TaintedInode {
-    pub inner: RwLock<TaintedInodeInner>,
+pub fn record_fd(fd: usize) {
+    FD.store(fd, core::sync::atomic::Ordering::SeqCst);
 }
-pub struct TaintedInodeInner {
+
+// 符号链接
+pub struct FdInode {
+    link: String,
+}
+impl FdInode {
+    pub fn new(link: String) -> Arc<Self> {
+        Arc::new(FdInode { link })
+    }
+}
+impl InodeOp for FdInode {
+    fn get_link(&self) -> String {
+        self.link.clone()
+    }
+}
+
+pub struct FdDirInode {
+    pub inner: RwLock<FdDirInodeInner>,
+}
+pub struct FdDirInodeInner {
     pub inode_on_disk: Ext4InodeDisk,
 }
 
-impl TaintedInode {
+impl FdDirInode {
     pub fn new(inode_on_disk: Ext4InodeDisk) -> Arc<Self> {
-        Arc::new(TaintedInode {
-            inner: RwLock::new(TaintedInodeInner { inode_on_disk }),
+        Arc::new(FdDirInode {
+            inner: RwLock::new(FdDirInodeInner { inode_on_disk }),
         })
     }
 }
 
-impl InodeOp for TaintedInode {
+impl InodeOp for FdDirInode {
+    fn can_lookup(&self) -> bool {
+        true
+    }
+    fn lookup<'a>(&'a self, name: &str, parent_entry: Arc<Dentry>) -> Arc<Dentry> {
+        let dentry: Arc<Dentry> = Dentry::negative(
+            format!("{}/{}", parent_entry.absolute_path, name),
+            Some(parent_entry.clone()),
+        );
+        let fd = match name.parse::<usize>() {
+            Ok(fd) => fd,
+            Err(_) => {
+                // 返回负目录项
+                return dentry;
+            }
+        };
+        let task = current_task();
+        match task.fd_table().get_file(fd) {
+            Some(file) => {
+                // 返回符号链接
+                let absolute_path = file.get_path().dentry.absolute_path.clone();
+                let fd_inode = FdInode::new(absolute_path);
+                // 关联到dentry
+                dentry.inner.lock().inode = Some(fd_inode.clone());
+                // 更新dentry flags, 去掉负目录项标志, 添加符号链接标志
+                dentry
+                    .flags
+                    .write()
+                    .update_type_from_negative(DentryFlags::DCACHE_SYMLINK_TYPE);
+                return dentry;
+            }
+            None => {
+                // 返回负目录项
+                return dentry;
+            }
+        };
+    }
     fn getattr(&self) -> Kstat {
         let mut kstat = Kstat::new();
         let inner_guard = self.inner.read();
@@ -95,60 +161,24 @@ impl InodeOp for TaintedInode {
     }
 }
 
-pub struct TaintedFile {
+pub struct FdFile {
     pub path: Arc<Path>,
     pub inode: Arc<dyn InodeOp>,
     pub flags: OpenFlags,
-    pub inner: RwLock<TaintedFileInner>,
 }
 
-pub struct TaintedFileInner {
-    pub offset: usize,
-}
-
-impl TaintedFile {
+impl FdFile {
     pub fn new(path: Arc<Path>, inode: Arc<dyn InodeOp>, flags: OpenFlags) -> Arc<Self> {
-        Arc::new(TaintedFile {
-            path,
-            inode,
-            flags,
-            inner: RwLock::new(TaintedFileInner { offset: 0 }),
-        })
+        Arc::new(FdFile { path, inode, flags })
     }
 }
 
-impl FileOp for TaintedFile {
+impl FileOp for FdFile {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
     fn get_inode(&self) -> Arc<dyn InodeOp> {
         self.inode.clone()
-    }
-    // Todo: 先fake
-    fn read(&self, buf: &mut [u8]) -> SyscallRet {
-        buf.fill(0);
-        return Ok(buf.len());
-    }
-    fn seek(&self, offset: isize, whence: Whence) -> SyscallRet {
-        let mut inner_guard = self.inner.write();
-        match whence {
-            crate::fs::uapi::Whence::SeekSet => {
-                if offset < 0 {
-                    return Err(Errno::EINVAL);
-                }
-                inner_guard.offset = offset as usize;
-            }
-            crate::fs::uapi::Whence::SeekCur => {
-                inner_guard.offset = inner_guard
-                    .offset
-                    .checked_add_signed(offset)
-                    .ok_or(Errno::EINVAL)?;
-            }
-            crate::fs::uapi::Whence::SeekEnd => {
-                unimplemented!("SeekEnd is not supported for pagemap");
-            }
-        }
-        Ok(inner_guard.offset)
-    }
-    fn readable(&self) -> bool {
-        true
     }
     fn get_flags(&self) -> OpenFlags {
         self.flags

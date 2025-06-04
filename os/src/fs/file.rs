@@ -12,7 +12,11 @@ use crate::{
     syscall::errno::{Errno, SyscallRet},
 };
 
-use super::{inode::InodeOp, path::Path, uapi::Whence};
+use super::{
+    inode::InodeOp,
+    path::Path,
+    uapi::{FallocFlags, Whence},
+};
 
 // 普通文件
 pub struct File {
@@ -74,7 +78,7 @@ pub trait FileOp: Any + Send + Sync {
     fn truncate(&self, _length: usize) -> SyscallRet {
         unimplemented!();
     }
-    fn fallocate(&self, _mode: i32, _offset: usize, _length: usize) -> SyscallRet {
+    fn fallocate(&self, _mode: FallocFlags, _offset: usize, _length: usize) -> SyscallRet {
         unimplemented!();
     }
     // Get the file offset
@@ -259,22 +263,23 @@ impl FileOp for File {
         self.inner_handler(|inner| inner.inode.truncate(length));
         Ok(0)
     }
-    fn fallocate(&self, _mode: i32, _offset: usize, _length: usize) -> SyscallRet {
+    fn fallocate(&self, _mode: FallocFlags, _offset: usize, _length: usize) -> SyscallRet {
         self.inner_handler(|inner| inner.inode.fallocate(_mode, _offset, _length))
     }
     fn get_offset(&self) -> usize {
         self.inner_handler(|inner| inner.offset)
     }
     // O_RDONLY = 0, 以只读方式打开文件, 具体的权限检查由VFS层完成
-    // Todo:
     fn readable(&self) -> bool {
-        // self.inner_handler(|inner| inner.flags & O_RDONLY != 0)
-        true
+        let inner_guard = self.inner.lock();
+        !inner_guard.flags.contains(OpenFlags::O_WRONLY)
+            && !inner_guard.flags.contains(OpenFlags::O_PATH)
     }
     fn writable(&self) -> bool {
         let inner_guard = self.inner.lock();
-        inner_guard.flags.contains(OpenFlags::O_WRONLY)
-            || inner_guard.flags.contains(OpenFlags::O_RDWR)
+        (inner_guard.flags.contains(OpenFlags::O_WRONLY)
+            || inner_guard.flags.contains(OpenFlags::O_RDWR))
+            && !inner_guard.flags.contains(OpenFlags::O_PATH)
     }
     fn r_ready(&self) -> bool {
         true
@@ -332,7 +337,9 @@ bitflags::bitflags! {
         const O_ASYNC       = 0o20000;
         const O_DIRECT      = 0o40000;
         const O_LARGEFILE   = 0o100000;
+        // 不更新访问时间, 调用进程需要有`CAP_FOWNER`权限或euid匹配file的Owner id
         const O_NOATIME     = 0o1000000;
+        // 打开一个文件但不获取对该文件的读写权限，而是仅获取对文件路径本身的一个引用
         const O_PATH        = 0o10000000;
         const O_TMPFILE     = 0o20200000;
     }
