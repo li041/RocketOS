@@ -2,14 +2,14 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-03 16:40:04
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-03 17:49:36
+ * @LastEditTime: 2025-06-04 10:50:20
  * @FilePath: /RocketOS_netperfright/os/src/net/socket.rs
  * @Description: socket file
  * 
  * Copyright (c) 2025 by peterluck2021@163.com, All Rights Reserved. 
  */
 
-use core::{cell::RefCell, f64::consts::E, net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6}, ptr::copy_nonoverlapping, sync::atomic::{AtomicBool, AtomicU64}};
+use core::{cell::RefCell, f64::consts::E, net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6}, ptr::copy_nonoverlapping, sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}};
 
 use alloc::{string::{String, ToString}, sync::Arc, task, vec::Vec};
 use alloc::vec;
@@ -24,6 +24,7 @@ use super::{add_membership, addr::{from_ipendpoint_to_socketaddr, UNSPECIFIED_EN
 /// Set O_NONBLOCK flag on the open fd
 pub const SOCK_NONBLOCK: usize = 0x800;
 pub const SOCK_CLOEXEC: usize = 0x80000;
+static AF_ALG_WRITE_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// Set FD_CLOEXEC flag on the new fd
 // pub const SOCK_CLOEXEC: usize = 0x80000;
 
@@ -416,7 +417,7 @@ impl Socket {
             .map_err(|_| Errno::EINVAL)?;
         tmp4.copy_from_slice(&buf[4..8]);
         let raw_db = u32::from_le_bytes(tmp4);
-        let db = if raw_db == 0 {
+        let db = if raw_db == 3 {
             None
         } else {
             Some(Database::try_from(raw_db).map_err(|_| Errno::EINVAL)?)
@@ -658,32 +659,10 @@ pub unsafe fn socket_address_from(addr: *const u8,len:usize, socket: &Socket) ->
     log::error!("[socket_address_from]:vpn is {:?}",VirtPageNum::from(addr as usize));
     let mut kernel_addr_from_user:Vec<u8>=vec![0;len];
     copy_from_user(addr,kernel_addr_from_user.as_mut_ptr(),len);
+    let family_bytes = [kernel_addr_from_user[0], kernel_addr_from_user[1]];
+    let family = Domain::try_from(u16::from_ne_bytes(family_bytes) as usize).unwrap();
+    log::error!("[socket_address_from] parsed sa_family = {:?}", family);
     match socket.domain {
-            // let raw_path = &kernel_addr_from_user[2..];
-            //     // 找到第一个 '\0'（C 字符串终结符）
-            //     let path_len = raw_path.iter().position(|&b| b == 0).unwrap_or(raw_path.len());
-            //     // 验证 UTF-8（可选，只是为了确保日志打印不出乱码）
-            //     if core::str::from_utf8(&raw_path[..path_len]).is_err() {
-            //         panic!()
-            //     }
-            //     log::error!(
-            //         "[socket_address_from] AF_UNIX: invalid UTF-8 in path {:?}",
-            //         &raw_path[..path_len]
-            //     );
-            //     // 用一个定长数组来存储 path
-            //     let mut sun_path = [0u8; 300];
-            //     sun_path[..path_len].copy_from_slice(&raw_path[..path_len]);
-            //     log::error!(
-            //         "[socket_address_from] AF_UNIX path (len={}): {:?}",
-            //         path_len,
-            //         &sun_path[..path_len]
-            //     );
-
-            //     //todo
-            //     return SocketAddr::(UnixSocketAddr {
-            //         path: sun_path,
-            //         len: path_len,
-            //     });
             //i这里的unix,af_alg无用
         Domain::AF_INET | Domain::AF_UNIX|Domain::AF_NETLINK|Domain::AF_UNSPEC |Domain::AF_ALG=> {
             let port = u16::from_be_bytes([
@@ -951,6 +930,8 @@ impl FileOp for Socket {
             //这里的buf只是纯粹的明文，直接加密
             log::error!("[socket_write_alg]:buf is {:?},buf len is{:?}",buf,buf.len());
             encode_text(self,  buf)?;
+            AF_ALG_WRITE_COUNT.fetch_add(1, Ordering::SeqCst);
+            log::error!("[socket_write] write count {:?}",AF_ALG_WRITE_COUNT);
             return Ok(buf.len());
         }
         //log::error!("[socket_write]:buf is {:?}",buf);

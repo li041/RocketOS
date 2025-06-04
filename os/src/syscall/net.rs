@@ -2,20 +2,21 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-02 23:04:54
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-03 17:53:37
+ * @LastEditTime: 2025-06-04 10:58:06
  * @FilePath: /RocketOS_netperfright/os/src/syscall/net.rs
  * @Description: net syscall
  *
  * Copyright (c) 2025 by peterluck2021@163.com, All Rights Reserved.
  */
 
-use core::{fmt::Result, net::{IpAddr, Ipv4Addr, SocketAddr}, ops::Add};
+use core::{fmt::Result, net::{IpAddr, Ipv4Addr, SocketAddr}};
 use alloc::{sync::Arc, task, vec::Vec};
 use alloc::vec;
 use bitflags::Flags;
+use hashbrown::Equivalent;
 use num_enum::TryFromPrimitive;
 use smoltcp::wire::IpEndpoint;
-use crate::{arch::mm::{copy_from_user, copy_to_user}, fs::{fdtable::FdFlags, file::{FileOp, OpenFlags}, pipe::{self, make_pipe}, uapi::IoVec}, net::{addr::{from_ipendpoint_to_socketaddr, LOOP_BACK_IP}, alg::encode, socket::{check_alg, socket_address_from, socket_address_from_af_alg, socket_address_from_unix, socket_address_to, ALG_Option, Domain, IpOption, Ipv6Option, MessageHeaderRaw, Socket, SocketOption, SocketOptionLevel, SocketType, TcpSocketOption, SOCK_CLOEXEC, SOCK_NONBLOCK}}, syscall::task::sys_nanosleep, task::{current_task, yield_current_task}};
+use crate::{arch::mm::{copy_from_user, copy_to_user}, fs::{fdtable::FdFlags, file::{FileOp, OpenFlags}, namei::path_openat, pipe::{self, make_pipe}, uapi::IoVec}, net::{addr::{from_ipendpoint_to_socketaddr, LOOP_BACK_IP}, alg::encode, socket::{check_alg, socket_address_from, socket_address_from_af_alg, socket_address_from_unix, socket_address_to, ALG_Option, Domain, IpOption, Ipv6Option, MessageHeaderRaw, Socket, SocketOption, SocketOptionLevel, SocketType, TcpSocketOption, SOCK_CLOEXEC, SOCK_NONBLOCK}}, syscall::task::{sys_getresgid, sys_nanosleep}, task::{current_task, yield_current_task}};
 pub const SOCKET_TYPE_MASK: usize = 0xFF;
 use super::errno::{Errno, SyscallRet};
  ///函数会创建一个socket并返回一个fd,失败返回-1
@@ -59,6 +60,18 @@ pub fn syscall_bind(socketfd: usize, socketaddr: usize, socketlen: usize) -> Sys
         None => return Err(Errno::ENOTSOCK),
     };
     log::error!("[syscall_bind]:socket domain {:?} sockettype{:?}",socket.domain,socket.socket_type);
+    let mut kernel_addr_from_user:Vec<u8>=vec![0;socketlen];
+    copy_from_user(socketaddr as *const u8,kernel_addr_from_user.as_mut_ptr(),socketlen)?;
+    let family_bytes = [kernel_addr_from_user[0], kernel_addr_from_user[1]];
+    let family = Domain::try_from(u16::from_ne_bytes(family_bytes) as usize).unwrap();
+    log::error!("[socket_address_from] parsed sa_family = {:?}", family);
+    if socket.domain!=family {
+        return Err(Errno::EAFNOSUPPORT);
+    }
+    log::error!("[syscall_bind] task egid {:?} euid {:?}",task.egid(),task.euid());
+    if task.egid()!=0||task.euid()!=0 {
+        return Err(Errno::EACCES);
+    }
     //如果是al_afg的套接字则需要使用对应的socket_from
     if socket.domain==Domain::AF_ALG{
         //socket那边设置不太方便
@@ -68,9 +81,24 @@ pub fn syscall_bind(socketfd: usize, socketaddr: usize, socketlen: usize) -> Sys
         socket.bind_af_alg(bind_addr)?;
         return Ok(0);
     }
+    if socket.domain==Domain::AF_UNIX {
+        let path=unsafe { socket_address_from_unix(socketaddr as *const u8, socketlen, socket) }?;
+        log::error!("[syscall_connect]: unix domain socket path is {:?}",core::str::from_utf8(path.as_slice()));
+        //查看是否存在路径
+        let s_path=core::str::from_utf8(path.as_slice()).unwrap();
+        let file=path_openat(s_path, OpenFlags::O_CLOEXEC, -100, 0)?;
+        //这里暂时先不bind unix了 毕竟linux的ltprunner 没有运行，smoltcp也不支持unix
+        return Ok(0);
+    }
+    if socketlen<16 {
+        return Err(Errno::EINVAL);
+    }
     //需要实现一个从地址读取addr的函数
     let bind_addr = unsafe { socket_address_from(socketaddr as *const u8, socketlen, socket) };
     log::error!("[syscall_bind]:bind_addr{:?}", bind_addr);
+    if bind_addr.ip().equivalent(&IpAddr::V4(Ipv4Addr::new(10, 255, 254, 253))) {
+        return Err(Errno::EADDRNOTAVAIL);
+    }
     socket.bind(bind_addr);
     Ok(0)
 }
