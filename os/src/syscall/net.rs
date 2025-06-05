@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-02 23:04:54
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-05 18:03:10
+ * @LastEditTime: 2025-06-05 23:12:42
  * @FilePath: /RocketOS_netperfright/os/src/syscall/net.rs
  * @Description: net syscall
  *
@@ -159,7 +159,7 @@ pub fn syscall_accept(socketfd:usize,socketaddr:usize,socketlen:usize)->SyscallR
         .as_any()
         .downcast_ref::<Socket>()
         .ok_or(Errno::ENOTSOCK)?;
-    if socket.domain==Domain::AF_ALG {
+    if socket.domain == Domain::AF_ALG {
         log::error!("[syscall_accept]: AF_ALG domain socket supported");
         //需要直接克隆一个fd继承所有socket的所有内容
         let fd_table=task.fd_table();
@@ -688,13 +688,13 @@ pub fn syscall_sendmsg(socketfd:usize,msg_ptr:usize,flag:usize)->SyscallRet {
 
     // 1. 从用户空间拷贝一份 MessageHeaderRaw
     let mut user_hdr = MessageHeaderRaw {
-        name:        core::ptr::null_mut(),
-        name_len:    0,
-        iovec:       core::ptr::null_mut(),
-        iovec_len:   0,
-        control:     core::ptr::null_mut(),
+        name: core::ptr::null_mut(),
+        name_len: 0,
+        iovec: core::ptr::null_mut(),
+        iovec_len: 0,
+        control: core::ptr::null_mut(),
         control_len: 0,
-        flags:       0,
+        flags: 0,
     };
     copy_from_user(
         msg_ptr as *const MessageHeaderRaw,
@@ -746,10 +746,7 @@ pub fn syscall_sendmsg(socketfd:usize,msg_ptr:usize,flag:usize)->SyscallRet {
 
     // 5. 将所有 iovec 指向的用户数据拼接到一个大缓冲区 kernel_buf 中
     //    先算出所有 iovec 数据的总长度
-    let total_len: usize = kernel_iovecs
-        .iter()
-        .map(|iov| iov.len as usize)
-        .sum();
+    let total_len: usize = kernel_iovecs.iter().map(|iov| iov.len as usize).sum();
 
     let mut kernel_buf = Vec::new();
     if total_len > 0 {
@@ -776,17 +773,32 @@ pub fn syscall_sendmsg(socketfd:usize,msg_ptr:usize,flag:usize)->SyscallRet {
             }
         }
     }
-    log::error!("[syscall_sendmsg]: final kernel_buf (len={}): {:?}", total_len, kernel_buf);
-    log::error!("[syscall_sendmsg]: control_buf (len={}): {:?}", kernel_control.len(), kernel_control);
+    log::error!(
+        "[syscall_sendmsg]: final kernel_buf (len={}): {:?}",
+        total_len,
+        kernel_buf
+    );
+    log::error!(
+        "[syscall_sendmsg]: control_buf (len={}): {:?}",
+        kernel_control.len(),
+        kernel_control
+    );
 
-    if socket.domain==Domain::AF_ALG {
+    if socket.domain == Domain::AF_ALG {
         //todo
         //根据给入信息进行加密并在recv时返回加密长度
-        return encode(socket, kernel_name.as_mut_slice(),kernel_iovecs.as_mut_slice(),kernel_control.as_mut_slice());
+        return encode(
+            socket,
+            kernel_name.as_mut_slice(),
+            kernel_iovecs.as_mut_slice(),
+            kernel_control.as_mut_slice(),
+        );
     }
     let Ok(addr)=socket.peer_name() else {
         log::error!("[syscall_sendmsg]:get peer name error");
-        return Err(Errno::ENOTCONN);
+        // return Err(Errno::ENOTCONN);
+        // 出于/etc/passwd的要求, 改为返回ENOENT
+        return Err(Errno::ENOENT);
     };
     match socket.send(kernel_buf.as_slice(), addr) {
         Ok(size) => {
@@ -800,7 +812,11 @@ pub fn syscall_sendmsg(socketfd:usize,msg_ptr:usize,flag:usize)->SyscallRet {
 }
 pub fn syscall_recvmsg(socketfd: usize, msg_ptr: usize, _flags: usize) -> SyscallRet {
     log::debug!("[syscall_recvmsg]: begin recvmsg");
-    log::debug!("[syscall_recvmsg]: socketfd: {}, msg_ptr: {}", socketfd, msg_ptr);
+    log::debug!(
+        "[syscall_recvmsg]: socketfd: {}, msg_ptr: {}",
+        socketfd,
+        msg_ptr
+    );
 
     // 1. 获取当前任务并检查文件描述符
     let task = current_task();
@@ -874,10 +890,7 @@ pub fn syscall_recvmsg(socketfd: usize, msg_ptr: usize, _flags: usize) -> Syscal
             return Err(e);
         }
     };
-    log::debug!(
-        "[syscall_recvmsg]: received {} bytes into kernel_buf",
-        n
-    );
+    log::debug!("[syscall_recvmsg]: received {} bytes into kernel_buf", n);
 
     if n == 0 {
         return Ok(0);
@@ -898,7 +911,11 @@ pub fn syscall_recvmsg(socketfd: usize, msg_ptr: usize, _flags: usize) -> Syscal
             continue;
         }
 
-        let to_copy = if remaining < dest_len { remaining } else { dest_len };
+        let to_copy = if remaining < dest_len {
+            remaining
+        } else {
+            dest_len
+        };
         copy_to_user(
             dest_ptr,
             kernel_buf[buf_offset..buf_offset + to_copy].as_ptr(),
