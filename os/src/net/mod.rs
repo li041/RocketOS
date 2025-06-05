@@ -228,7 +228,7 @@ impl<'a> SocketSetWrapper<'a> {
     //这里允许sockset承接任何socket
     pub fn add<T:AnySocket<'a>>(&self,socket:T)->SocketHandle {
         let handle=self.0.lock().add(socket);
-        // println!("[socketsetwrapper_add]:socket handle is {:?}",handle);
+        log::error!("[socketsetwrapper_add]:socket handle is {:?}",handle);
         handle
     }
     // pub fn bind_check() {

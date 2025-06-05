@@ -10,7 +10,7 @@ static LAST_DB: Mutex<Option<Database>> = Mutex::new(None);
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-06-01 12:06:27
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-04 10:46:29
+ * @LastEditTime: 2025-06-04 17:53:26
  * @FilePath: /RocketOS_netperfright/os/src/net/unix.rs
  * @Description: 
  * 
@@ -109,7 +109,8 @@ impl PasswdEntry {
         buf
     }
  pub fn passwd_lookup(socket: &Socket, buf_len: usize) -> Result<Vec<u8>, Errno> {
-    let nscdrequest = socket.socket_nscdrequest.lock().clone().unwrap();
+    
+    let nscdrequest=socket.socket_nscdrequest.lock().clone().unwrap();
     let key = nscdrequest.key;
     // if nscdrequest.req_type != RequestType::GetpwNam
     //     && nscdrequest.req_type != RequestType::GetpwUid

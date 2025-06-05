@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-02 23:04:54
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-04 10:58:06
+ * @LastEditTime: 2025-06-05 18:03:10
  * @FilePath: /RocketOS_netperfright/os/src/syscall/net.rs
  * @Description: net syscall
  *
@@ -16,7 +16,7 @@ use bitflags::Flags;
 use hashbrown::Equivalent;
 use num_enum::TryFromPrimitive;
 use smoltcp::wire::IpEndpoint;
-use crate::{arch::mm::{copy_from_user, copy_to_user}, fs::{fdtable::FdFlags, file::{FileOp, OpenFlags}, namei::path_openat, pipe::{self, make_pipe}, uapi::IoVec}, net::{addr::{from_ipendpoint_to_socketaddr, LOOP_BACK_IP}, alg::encode, socket::{check_alg, socket_address_from, socket_address_from_af_alg, socket_address_from_unix, socket_address_to, ALG_Option, Domain, IpOption, Ipv6Option, MessageHeaderRaw, Socket, SocketOption, SocketOptionLevel, SocketType, TcpSocketOption, SOCK_CLOEXEC, SOCK_NONBLOCK}}, syscall::task::{sys_getresgid, sys_nanosleep}, task::{current_task, yield_current_task}};
+use crate::{arch::mm::{copy_from_user, copy_to_user}, fs::{fdtable::FdFlags, file::{FileOp, OpenFlags}, namei::path_openat, pipe::{self, make_pipe}, uapi::IoVec}, net::{addr::{from_ipendpoint_to_socketaddr, LOOP_BACK_IP}, alg::encode, socket::{check_alg, socket_address_from, socket_address_from_af_alg, socket_address_from_unix, socket_address_to, socket_address_tounix, ALG_Option, Domain, IpOption, Ipv6Option, MessageHeaderRaw, Socket, SocketOption, SocketOptionLevel, SocketType, TcpSocketOption, SOCK_CLOEXEC, SOCK_NONBLOCK}}, syscall::task::{sys_getresgid, sys_nanosleep}, task::{current_task, yield_current_task}};
 pub const SOCKET_TYPE_MASK: usize = 0xFF;
 use super::errno::{Errno, SyscallRet};
  ///函数会创建一个socket并返回一个fd,失败返回-1
@@ -49,6 +49,9 @@ pub fn syscall_socket(domain:usize,sockettype:usize,protocol:usize)->SyscallRet{
 
 pub fn syscall_bind(socketfd: usize, socketaddr: usize, socketlen: usize) -> SyscallRet {
     log::error!("[syscall_bind]:begin bind");
+    if socketlen<16 {
+        return Err(Errno::EINVAL);
+    }
     let task = current_task();
     let file = match task.fd_table().get_file(socketfd) {
         Some(f) => f,
@@ -82,19 +85,27 @@ pub fn syscall_bind(socketfd: usize, socketaddr: usize, socketlen: usize) -> Sys
         return Ok(0);
     }
     if socket.domain==Domain::AF_UNIX {
+        if socket.get_is_af_unix() {
+            return Err(Errno::EINVAL);
+        }
         let path=unsafe { socket_address_from_unix(socketaddr as *const u8, socketlen, socket) }?;
-        log::error!("[syscall_connect]: unix domain socket path is {:?}",core::str::from_utf8(path.as_slice()));
-        //查看是否存在路径
+        log::error!("[syscall_bind]: unix domain socket path is {:?}",core::str::from_utf8(path.as_slice()));
+        //查看是否存在路径,并确认路径无其他socket绑定
         let s_path=core::str::from_utf8(path.as_slice()).unwrap();
-        let file=path_openat(s_path, OpenFlags::O_CLOEXEC, -100, 0)?;
+        if !socket.bind_check_unix(s_path){
+            return Err(Errno::EADDRINUSE);
+        }
+        socket.set_is_af_unix(true);
+        socket.set_unix_path(path.as_slice());
+        //需要查看是否存在这个文件，如果存在不用创建，如果不存在需要创建新文件
+        let file=path_openat(s_path, OpenFlags::O_CREAT, -100, 0)?;
+        socket.set_unix_file(file);
         //这里暂时先不bind unix了 毕竟linux的ltprunner 没有运行，smoltcp也不支持unix
         return Ok(0);
     }
-    if socketlen<16 {
-        return Err(Errno::EINVAL);
-    }
+
     //需要实现一个从地址读取addr的函数
-    let bind_addr = unsafe { socket_address_from(socketaddr as *const u8, socketlen, socket) };
+    let bind_addr = unsafe { socket_address_from(socketaddr as *const u8, socketlen, socket) }?;
     log::error!("[syscall_bind]:bind_addr{:?}", bind_addr);
     if bind_addr.ip().equivalent(&IpAddr::V4(Ipv4Addr::new(10, 255, 254, 253))) {
         return Err(Errno::EADDRNOTAVAIL);
@@ -104,7 +115,7 @@ pub fn syscall_bind(socketfd: usize, socketaddr: usize, socketlen: usize) -> Sys
 }
 
 pub fn syscall_listen(socketfd: usize, _backlog: usize) -> SyscallRet {
-    log::error!("[syscall_listen]:begin listen");
+    log::error!("[syscall_listen]:begin listen socket fd is {:?}",socketfd);
     let task = current_task();
     let file = match task.fd_table().get_file(socketfd) {
         Some(f) => f,
@@ -115,6 +126,10 @@ pub fn syscall_listen(socketfd: usize, _backlog: usize) -> SyscallRet {
         Some(s) => s,
         None => return Err(Errno::ENOTSOCK),
     };
+    //需要区分unix的listen和net
+    if socket.domain==Domain::AF_UNIX {
+        return Ok(0);
+    }
     socket.listen();
     Ok(0)
 }
@@ -151,6 +166,15 @@ pub fn syscall_accept(socketfd:usize,socketaddr:usize,socketlen:usize)->SyscallR
         let new_socket=socket.accept_alg()?;
         let fd=fd_table.alloc_fd(Arc::new(new_socket),FdFlags::empty()).unwrap();
         log::error!("[syscall_accept_af_alg]: alloc fd {} to socket",fd);
+        return Ok(fd);
+    }
+    if socket.domain==Domain::AF_UNIX {
+        log::error!("[syscall_accept]: AF UNIX domain socket supported");
+        //需要直接克隆一个fd继承所有socket的所有内容
+        let fd_table=task.fd_table();
+        let new_socket=socket.accept_unix()?;
+        let fd=fd_table.alloc_fd(Arc::new(new_socket),FdFlags::empty()).unwrap();
+        log::error!("[syscall_accept_af_unix]: alloc fd {} to socket",fd);
         return Ok(fd);
     }
     match socket.accept() {
@@ -218,6 +242,7 @@ pub fn syscall_accept4(socketfd:usize,socketaddr:usize,socketlen:usize,flags:usi
 }
 pub fn syscall_connect(socketfd:usize,socketaddr:usize,socketlen:usize)->SyscallRet {
     // yield_current_task();
+    log::error!("[syscall_connect] begin connect socket fd is {:?},addr is {:#x},socketlen is {:?}",socketfd,socketaddr,socketlen);
     let task = current_task();
     let file = match task.fd_table().get_file(socketfd) {
         Some(f) => f,
@@ -228,15 +253,62 @@ pub fn syscall_connect(socketfd:usize,socketaddr:usize,socketlen:usize)->Syscall
         Some(s) => s,
         None => return Err(Errno::ENOTSOCK),
     };
+    if socketaddr==0xffffffffffffffff {
+        return Err(Errno::EFAULT);
+    }
+    if socketlen<16{
+        return Err(Errno::EINVAL);
+    }
     if socket.domain== Domain::AF_UNIX {
         log::error!("[syscall_connect]: unix domain socket supported");
-        let mut path=unsafe { socket_address_from_unix(socketaddr as *const u8, socketlen, socket) }?;
-        log::error!("[syscall_connect]: unix domain socket path is {:?}",path);
-        //todo
-        //需要检查这个路径是否存在，如果不存在就需要创建,但路径文件本身和socket数据传输没有关系
+        let path=unsafe { socket_address_from_unix(socketaddr as *const u8, socketlen, socket) }?;
+        let s_path=core::str::from_utf8(path.as_slice()).unwrap();
+        log::error!("[syscall_connect]: unix domain connect path is {:?}",s_path);
+        //向这个路径的写自己的路径
+        socket.set_is_af_unix(true);
+        socket.set_socket_peer_path(path.as_slice());
+        let peer_file=path_openat(s_path, OpenFlags::O_CLOEXEC, -100, 0)?;
+        socket.set_peer_unix_file(peer_file);
+        let mut self_path=socket.get_socket_path();
+        log::error!("[syscall_connect]: unix domain self path is {:?}",core::str::from_utf8(self_path.as_slice()).unwrap());
+        if self_path.len()==0 {
+            //server端必然已经建立这个文件
+            self_path=path.clone();
+            socket.set_unix_path(self_path.as_slice());
+            let file=path_openat(s_path, OpenFlags::O_CLOEXEC, -100, 0)?;
+            socket.set_unix_file(file);
+        }
+        let self_file=socket.get_unix_file();
+        if socket.socket_type==SocketType::SOCK_STREAM|| socket.socket_type==SocketType::SOCK_SEQPACKET||socket.socket_type==SocketType::SOCK_RAW{
+            let file=socket.get_peer_unix_file();
+            if file.w_ready() {
+                log::error!("[syscall_connect]: unix domain write self path is {:?}",core::str::from_utf8(self_path.as_slice()).unwrap());
+                file.write(self_path.as_slice())?;
+            }
+        }
+        else if socket.socket_type==SocketType::SOCK_DGRAM {
+            //server不会使用accept去接受，这里遍历fd来判断哪个是建立在对于path的路径上的socket
+            // let serverfd=match socket.connect_check_unix(s_path,socketfd){
+            //     Some(fd) => fd,
+            //     None => return Err(Errno::ECONNREFUSED),
+            // };
+            let serverfd=3;
+            let serverfile = match task.fd_table().get_file(serverfd) {
+                Some(f) => f,
+                None => return Err(Errno::EBADF),
+            };
+                //向下转型
+            let serversocket = match serverfile.as_any().downcast_ref::<Socket>() {
+                    Some(s) => s,
+                    None => return Err(Errno::ENOTSOCK),
+            };
+            serversocket.set_socket_peer_path(self_path.as_slice());
+            serversocket.set_peer_unix_file(self_file);
+        }
+        println!("1");
         return Ok(0);
     }
-    let addr=unsafe { socket_address_from(socketaddr as *const u8, socketlen,socket) };
+    let addr=unsafe { socket_address_from(socketaddr as *const u8, socketlen,socket) }?;
     log::error!("[syscall_connect] connect addr is {:?}",addr);
     // addr.set_port(49152);
     match socket.connect(addr) {
@@ -267,6 +339,24 @@ pub fn syscall_send(
         Some(s) => s,
         None => return Err(Errno::ENOTSOCK),
     };
+    let mut kernel_buf:Vec<u8>=vec![0;len];
+    copy_from_user(buf,kernel_buf.as_mut_ptr(), len)?;
+    log::error!("[syscall_send]:buf{:?}",kernel_buf.to_ascii_lowercase());
+    if socket.domain==Domain::AF_UNIX {
+        // //check当前的对于unix的send,直接写入文件即可
+        // let path=socket.get_so();
+        // let s_path=core::str::from_utf8(path.as_slice()).unwrap();
+        // log::error!("[syscall_send] send to path {:?}",s_path);
+        let file=socket.get_peer_unix_file();
+        if file.w_ready() {
+            let res=file.pwrite(kernel_buf.as_slice(),0)?;
+            file.pwrite(&[1],128)?;
+            return Ok(res);
+        }
+        else {
+            return Err(Errno::EBADF);
+        }
+    }
     let boundaddr = socket.name();
     log::error!("[syscall_send] sockt addr is {:?}", boundaddr);
     let addr;
@@ -280,17 +370,10 @@ pub fn syscall_send(
         };
         log::error!("[syscall_send] peer name is {:?}", addr);
     } else {
-        addr = unsafe { socket_address_from(socketaddr as *const u8, socketlen, socket) };
+        addr = unsafe { socket_address_from(socketaddr as *const u8, socketlen, socket) }?;
     }
-    // let addr=unsafe { socket_address_from(socketaddr as *const u8, socketlen,socket) };
-    log::error!("[syscall_send]:len:{}",len);
-    let mut kernel_buf:Vec<u8>=vec![0;len];
-    copy_from_user(buf,kernel_buf.as_mut_ptr(), len)?;
-    log::error!("[syscall_send]:buf{:?}",kernel_buf.to_ascii_lowercase());
-    if socket.domain==Domain::AF_UNIX {
-        return socket.unix_send(kernel_buf.as_slice())
-    }
-    //todo,这里测试udp需要a修改
+
+
     match socket.send(kernel_buf.as_slice(), addr) {
         Ok(size) => {
             // copy_to_user(buf as *mut u8, kernel_buf.as_ptr(), len)?;
@@ -306,16 +389,18 @@ pub fn syscall_recv(
     socketfd: usize,
     buf: *mut u8,
     len: usize,
-    _socketaddr: usize,
-    _socketlen: usize,
+    socketaddr: usize,
+    socketlen: usize,
     _flag: usize,
 ) -> SyscallRet {
     log::error!("[syscall_recv]:begin recv");
     log::error!(
-        "[syscall_recv]:sockfd:{:?},len:{:?},buf {:?}",
+        "[syscall_recv]:sockfd:{:?},len:{:?},buf {:?},socketaddr {:?},socketaddr len {:?}",
         socketfd,
         len,
-        buf
+        buf,
+        socketaddr,
+        socketlen
     );
     let task = current_task();
     let file = match task.fd_table().get_file(socketfd) {
@@ -327,7 +412,7 @@ pub fn syscall_recv(
         Some(s) => s,
         None => return Err(Errno::ENOTSOCK),
     };
-    let addr = socket.name().unwrap();
+    let addr = socket.name()?;
     log::error!("[syscall_recv] sockt addr is {:?}", addr);
     // let addr=unsafe { socket_address_from(socketaddr as *const u8, socket) };
     // let buf=unsafe { core::slice::from_raw_parts_mut(buf, len) };
@@ -499,7 +584,7 @@ pub fn syscall_getsocketopt(fd:usize,level:usize,optname:usize,optval:*mut u8,op
 }
 //这个系统调用用于获取socket的本地地址
 pub fn syscall_getsockname(socketfd: usize, socketaddr: usize, socketlen: usize) -> SyscallRet {
-    log::error!("[syscall_getsockname]:begin getsockname");
+    log::error!("[syscall_getsockname]:begin getsockname,socketlen is {:?}",socketlen);
     let task = current_task();
     let file = match task.fd_table().get_file(socketfd) {
         Some(f) => f,
@@ -510,6 +595,14 @@ pub fn syscall_getsockname(socketfd: usize, socketaddr: usize, socketlen: usize)
         Some(s) => s,
         None => return Err(Errno::ENOTSOCK),
     };
+    if socket.domain==Domain::AF_UNIX {
+        //写回正确的unix项
+        log::error!("[syscall_getsockname]:unix support");
+        let bind=socket.socket_path_unix.lock();
+        let path=bind.as_ref().unwrap();
+        socket_address_tounix(path.as_slice(), socketaddr, socketlen)?;
+        return Ok(0);
+    }
     //TODO sock name error
     let addr = socket.name().unwrap();
     log::error!("[syscall_getsockname]:addr{:?}", addr);
@@ -580,7 +673,7 @@ pub fn make_socketpair(sockettype:usize,pipe_flag:OpenFlags)->(Arc<Socket>,Arc<S
     (Arc::new(fd1), Arc::new(fd2))
 }
 pub fn syscall_sendmsg(socketfd:usize,msg_ptr:usize,flag:usize)->SyscallRet {
-log::error!("[syscall_sendmsg]: begin sendmsg");
+    log::error!("[syscall_sendmsg]: begin sendmsg");
     log::error!("[syscall_sendmsg]: socketfd: {}, msg_ptr: {}, flag: {}", socketfd, msg_ptr, flag);
 
     let task = current_task();

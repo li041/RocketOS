@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-05-31 18:01:34
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-03 17:48:22
+ * @LastEditTime: 2025-06-04 16:58:31
  * @FilePath: /RocketOS_netperfright/os/src/net/alg.rs
  * @Description: 
  * 
@@ -46,6 +46,7 @@ pub struct SockAddrAlg {
      pub salg_mask:   u32,
      pub salg_name:   [u8; 64],
      //linux中没有将密钥存入这里而是不同加密方法对应一个结构体，感觉有点复杂，这里就直接存在这了
+     //一般在setoptz中使用
      pub salg_key:    [u8; 100],
 }
 impl SockAddrAlg {
