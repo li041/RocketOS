@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-02 23:04:54
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-05 23:12:42
+ * @LastEditTime: 2025-06-06 11:10:29
  * @FilePath: /RocketOS_netperfright/os/src/syscall/net.rs
  * @Description: net syscall
  *
@@ -100,6 +100,11 @@ pub fn syscall_bind(socketfd: usize, socketaddr: usize, socketlen: usize) -> Sys
         //需要查看是否存在这个文件，如果存在不用创建，如果不存在需要创建新文件
         let file=path_openat(s_path, OpenFlags::O_CREAT, -100, 0)?;
         socket.set_unix_file(file);
+        //设置自己的ucred
+        let pid=task.tid();
+        let uid=task.uid();
+        let gid=task.gid();
+        socket.set_ucred(pid as i32, uid, gid);
         //这里暂时先不bind unix了 毕竟linux的ltprunner 没有运行，smoltcp也不支持unix
         return Ok(0);
     }
@@ -284,6 +289,16 @@ pub fn syscall_connect(socketfd:usize,socketaddr:usize,socketlen:usize)->Syscall
             if file.w_ready() {
                 log::error!("[syscall_connect]: unix domain write self path is {:?}",core::str::from_utf8(self_path.as_slice()).unwrap());
                 file.write(self_path.as_slice())?;
+                let ucred=socket.get_ucred();
+                socket.set_ucred(ucred.pid, ucred.uid, ucred.gid);
+                // Convert ucred to bytes before writing
+                let ucred_bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        &ucred as *const _ as *const u8,
+                        core::mem::size_of_val(&ucred),
+                    )
+                };
+                file.pwrite(ucred_bytes, self_path.len() + 1)?;
             }
         }
         else if socket.socket_type==SocketType::SOCK_DGRAM {
@@ -304,6 +319,11 @@ pub fn syscall_connect(socketfd:usize,socketaddr:usize,socketlen:usize)->Syscall
             };
             serversocket.set_socket_peer_path(self_path.as_slice());
             serversocket.set_peer_unix_file(self_file);
+            //设置对端的ucred
+            let server_ucred=serversocket.get_ucred();
+            socket.set_ucred(server_ucred.pid, server_ucred.uid, server_ucred.gid);
+            let client_ucred=socket.get_ucred();
+            serversocket.set_ucred(client_ucred.pid, client_ucred.uid, client_ucred.gid);
         }
         println!("1");
         return Ok(0);
@@ -528,16 +548,26 @@ pub fn syscall_setsocketopt(
 }
 
 pub fn syscall_getsocketopt(fd:usize,level:usize,optname:usize,optval:*mut u8,optlen:usize)->SyscallRet {
-    log::error!("[sys_getsocketopt] fd {:?} level {:?} optname {:?},optlen {:?}",fd,level,optname,optlen);
+    log::error!("[sys_getsocketopt] fd {:?} level {:?} optname {:?},optlen {:?},optval {:?}",fd,level,optname,optlen,optval);
+    if optlen==0||optlen==0xffffffffffffffff {
+        return Err(Errno::EFAULT);
+    }
     let mut kernel_opt_len: u32 = 0;
     copy_from_user(
         optlen as *const u32,
         &mut kernel_opt_len as *mut u32,
         core::mem::size_of::<u32>(),
     )?; 
+    log::error!("[sys_getsocketopt]kernel len is {:?}",kernel_opt_len);
+    if kernel_opt_len>20 {
+        return Err(Errno::EINVAL);
+    }
+    if optval == 0 as *mut u8{
+        return Err(Errno::EFAULT);
+    }
     let Ok(level) = SocketOptionLevel::try_from(level) else {
         log::error!("[setsockopt()] level {level} not supported");
-        unimplemented!();
+        return Err(Errno::EOPNOTSUPP);
     };
 
     let curr = current_task();
@@ -554,6 +584,9 @@ pub fn syscall_getsocketopt(fd:usize,level:usize,optname:usize,optval:*mut u8,op
     match level {
         //TODO getsockopt error
         SocketOptionLevel::IP => {
+            if optname==18446744073709551615 {
+                return Err(Errno::ENOPROTOOPT);
+            }
             return Ok(0);
         }
         SocketOptionLevel::Socket => {
@@ -565,7 +598,7 @@ pub fn syscall_getsocketopt(fd:usize,level:usize,optname:usize,optval:*mut u8,op
             return Ok(0);
         }
         SocketOptionLevel::Tcp => {
-            let option=TcpSocketOption::try_from(optname).unwrap();
+            let option =TcpSocketOption::try_from(optname).map_err(|_err| Errno::ENOPROTOOPT)?;
             #[cfg(target_arch = "riscv64")]
             option.get(socket, optval, optlen as *mut u32);
             #[cfg(target_arch = "loongarch64")]
@@ -585,6 +618,17 @@ pub fn syscall_getsocketopt(fd:usize,level:usize,optname:usize,optval:*mut u8,op
 //这个系统调用用于获取socket的本地地址
 pub fn syscall_getsockname(socketfd: usize, socketaddr: usize, socketlen: usize) -> SyscallRet {
     log::error!("[syscall_getsockname]:begin getsockname,socketlen is {:?}",socketlen);
+    if socketaddr==0xffffffffffffffff||socketlen<=1 {
+        return Err(Errno::EFAULT);
+    }
+    let mut len=vec![0;1];
+    copy_from_user(socketlen as *const u8, len.as_mut_ptr(), len.len())?;
+    log::error!("[syscall_getpeername]len is {:?}",len);
+    if len[0]==255 {
+        return Err(Errno::EINVAL);
+    }
+
+
     let task = current_task();
     let file = match task.fd_table().get_file(socketfd) {
         Some(f) => f,
@@ -616,6 +660,16 @@ pub fn syscall_getpeername(socketfd: usize, socketaddr: usize, socketlen: usize)
         socketaddr,
         socketlen
     );
+    if socketaddr==0xffffffffffffffff||socketlen<=1 {
+        return Err(Errno::EFAULT);
+    }
+    let mut len=vec![0;1];
+    copy_from_user(socketlen as *const u8, len.as_mut_ptr(), len.len())?;
+    log::error!("[syscall_getpeername]len is {:?}",len);
+    if len[0]==255 {
+        return Err(Errno::EINVAL);
+    }
+    
     let task = current_task();
     let file = match task.fd_table().get_file(socketfd) {
         Some(f) => f,
@@ -627,7 +681,7 @@ pub fn syscall_getpeername(socketfd: usize, socketaddr: usize, socketlen: usize)
         None => return Err(Errno::ENOTSOCK),
     };
     //TODO peer name error
-    let addr = socket.peer_name().unwrap();
+    let addr = socket.peer_name()?;
     log::error!("[syscall_getpeername]:addr{:?}", addr);
     socket_address_to(addr, socketaddr, socketlen)
 }

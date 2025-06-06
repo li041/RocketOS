@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-03 16:40:04
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-05 18:02:50
+ * @LastEditTime: 2025-06-06 11:07:32
  * @FilePath: /RocketOS_netperfright/os/src/net/socket.rs
  * @Description: socket file
  * 
@@ -68,6 +68,18 @@ pub enum SocketInner {
     Udp(UdpSocket),
 }
 
+#[derive(Clone, Copy,Debug)]
+#[repr(C)]
+pub struct UCred {
+    /// 进程 ID
+    pub pid: i32,
+    /// 用户 ID
+    pub uid: u32,
+    /// 组 ID
+    pub gid: u32,
+}
+
+
 ///包装内部不同协议
 pub struct Socket{
     //封装协议类
@@ -94,6 +106,9 @@ pub struct Socket{
     pub socket_file_unix:Mutex<Option<Arc<dyn FileOp>>>,
     pub socket_peer_file_unix:Mutex<Option<Arc<dyn FileOp>>>,
     pub socket_peer_path_unix:Mutex<Option<Vec<u8>>>,
+    //unix connect时会保存对端的Ucred信息，用于getsockopt时写回
+    pub socket_ucred:Mutex<Option<UCred>>,
+    pub socket_peer_ucred:Mutex<Option<UCred>>,
     //密文
     pub socket_af_ciphertext:Mutex<Option<Vec<u8>>>,
     //unix发送的send内容，往往用于passwd,group的euid,
@@ -108,7 +123,25 @@ unsafe impl Send for Socket {
 unsafe  impl Sync for Socket {
     
 }
+impl UCred {
+    /// 从一个长度 >=12 的字节 slice 中「后 12 字节」解析出 UCred
+    fn from_last_bytes(buf: &[u8]) -> Result<Self, Errno> {
+        if buf.len() < 12 {
+            return Err(Errno::EINVAL);
+        }
+        let start = buf.len() - 12;
+        // 拆出最后 12 字节
+        let pid_bytes = [buf[start], buf[start + 1], buf[start + 2], buf[start + 3]];
+        let uid_bytes = [buf[start + 4], buf[start + 5], buf[start + 6], buf[start + 7]];
+        let gid_bytes = [buf[start + 8], buf[start + 9], buf[start + 10], buf[start + 11]];
 
+        let pid = i32::from_ne_bytes(pid_bytes);
+        let uid = u32::from_ne_bytes(uid_bytes);
+        let gid = u32::from_ne_bytes(gid_bytes);
+
+        Ok(UCred { pid, uid, gid })
+    }
+}
 impl Socket {
     // fn nagle_enabled(&self)->bool {
     //     match &self.inner {
@@ -154,6 +187,39 @@ impl Socket {
     fn set_congestion(&self,congestion:String) {
         *self.congestion.lock()=congestion;
     }
+    pub fn set_ucred(&self,pid:i32,uid:u32,gid:u32) {
+        let cred=UCred{
+            pid:pid,
+            uid:uid,
+            gid:gid,
+        };
+        *self.socket_ucred.lock()=Some(cred);
+    }
+    pub fn get_ucred(&self)->UCred {
+        match  self.socket_ucred.lock().clone(){
+            Some(u) => u,
+            None => {
+                let task=current_task();
+                let ucred=UCred{
+                    pid:task.tid() as i32,
+                    uid:task.uid(),
+                    gid:task.gid(),
+                };
+                return ucred;
+            },
+        }
+    }
+    pub fn set_peer_ucred(&self,pid:i32,uid:u32,gid:u32) {
+        let cred=UCred{
+            pid:pid,
+            uid:uid,
+            gid:gid,
+        };
+        *self.socket_peer_ucred.lock()=Some(cred);
+    }
+    pub fn get_peer_ucred(&self)->UCred {
+        self.socket_peer_ucred.lock().clone().unwrap()
+    }
     pub fn set_is_af_unix(&self,flag:bool) {
         self.isaf_unix.store(flag, Ordering::Release);
     }
@@ -195,7 +261,9 @@ impl Socket {
             socket_path_unix:Mutex::new(None),
             socket_peer_path_unix:Mutex::new(None),
             socket_file_unix:Mutex::new(None),
-            socket_peer_file_unix:Mutex::new(None)
+            socket_peer_file_unix:Mutex::new(None),
+            socket_ucred:Mutex::new(None),
+            socket_peer_ucred:Mutex::new(None),
         }
            
     }
@@ -423,6 +491,8 @@ impl Socket {
                         socket_peer_path_unix:Mutex::new(None),
                         socket_file_unix:Mutex::new(None),
                         socket_peer_file_unix:Mutex::new(None),
+                        socket_ucred:Mutex::new(None),
+                        socket_peer_ucred:Mutex::new(None),
                         
                     },from_ipendpoint_to_socketaddr(remote_addr)))
                 }
@@ -467,6 +537,8 @@ impl Socket {
             socket_peer_path_unix:Mutex::new(None),
             socket_file_unix:Mutex::new(None),
             socket_peer_file_unix:Mutex::new(None),
+            socket_ucred:Mutex::new(None),
+            socket_peer_ucred:Mutex::new(None),
             
         })
     }
@@ -482,7 +554,7 @@ impl Socket {
             return Err(Errno::EOPNOTSUPP);
         }
         //连接方式是让peer将路径写入自己的路径中，所以在自己路径中读取即可
-        let mut peer_path: Vec<u8>=vec![0;100];
+        let mut peer_path: Vec<u8>=vec![0;120];
 
         let binding = self.get_socket_path();
         let s_path=core::str::from_utf8(binding.as_slice()).unwrap();
@@ -504,10 +576,17 @@ impl Socket {
             }
         }
         let file=self.get_unix_file();
-        let tmp: Vec<u8>=vec![0;100];
+        let tmp: Vec<u8>=vec![0;120];
         file.pwrite(tmp.as_slice(), 0)?;
         log::error!("[Socket_accept_unix] peer path is {:?}",peer_path);
+        let peer_ucred=UCred::from_last_bytes(peer_path.as_slice())?;
+        self.set_peer_ucred(peer_ucred.pid, peer_ucred.uid, peer_ucred.gid);
+        log::error!("[accept_unix] accept peer ucred is {:?}",peer_ucred);
+        //截取路径
+        let path_len = peer_path.len().saturating_sub(size_of::<UCred>()+1);
+        peer_path.truncate(path_len);
         let s_peer=core::str::from_utf8(peer_path.as_slice()).unwrap();
+        log::error!("[accept_unix] accept peer path is {:?} ",s_peer);
         let peer_file=path_openat(s_peer, OpenFlags::O_CLOEXEC, -100, 0)?;
         Ok(Socket {
             dont_route:false,
@@ -529,6 +608,9 @@ impl Socket {
             socket_nscdrequest: Mutex::new(None),
             socket_file_unix:Mutex::new(self.socket_file_unix.lock().clone()),
             socket_peer_file_unix:Mutex::new(Some(peer_file)),
+            //todo
+            socket_ucred:Mutex::new(self.socket_ucred.lock().clone()),
+            socket_peer_ucred:Mutex::new(self.socket_peer_ucred.lock().clone()),
         })
     }
 
@@ -1401,6 +1483,7 @@ pub enum SocketOption {
     SO_KEEPALIVE = 9,
     SO_RCVTIMEO = 20,
     SO_SNDTIMEO = 21,
+    SO_PEERCRED=17
 }
 #[derive(TryFromPrimitive, PartialEq)]
 #[repr(usize)]
@@ -1409,6 +1492,7 @@ pub enum TcpSocketOption {
     TCP_NODELAY = 1, // disable nagle algorithm and flush
     TCP_MAXSEG = 2,
     TCP_INFO = 11,
+    SO_OOBINLINE=10,
     TCP_CONGESTION = 13,
 }
 
@@ -1477,89 +1561,93 @@ impl SocketOption {
     pub fn set(&self,socket: &Socket,opt:&[u8])->SyscallRet{
         match self {
             SocketOption::SO_REUSEADDR => {
-                //设置是否重复使用地址
-                if opt.len()<4 {
-                    panic!("[socketoption_set]:the opt len is not enough");
-                    //一个地址长度都不够
-                    // return None;
-                }
-                let addr=i32::from_ne_bytes(<[u8;4]>::try_from(&opt[0..4]).unwrap());
-                log::error!("[set_reuse_addr] reuse addr is {:?}",addr);
-                socket.set_reuse_addr(addr!=0);
-                Ok(0)
-            },
-            SocketOption::SO_ERROR => {
-                panic!("can't set SO_ERROR");
-            },
-            SocketOption::SO_DONTROUTE => {
-                if opt.len()<4 {
-                    panic!("[socketoption_set]:the opt len is not enough");
-                }
-                let addr=i32::from_ne_bytes(<[u8;4]>::try_from(&opt[0..4]).unwrap());
-                socket.set_reuse_addr(addr != 0);
-                // socket.reuse_addr = opt_value != 0;
-                Ok(0)
-            },
-            SocketOption::SO_SNDBUF =>{
-                //设置最大发送报文大小
-                if opt.len()<4 {
-                    panic!("[socketoption_set]:the opt len is not enough");
-                }
-                let len=i32::from_ne_bytes(<[u8; 4]>::try_from(&opt[0..4]).unwrap());
-                socket.set_send_buf_size(len as u64);
-                // socket.reuse_addr = opt_value != 0;
-                Ok(0)
-            },
-            SocketOption::SO_RCVBUF => {
-                if opt.len()<4 {
-                    panic!("[socketoption_set]:the opt len is not enough");
-                }
-                let len=u32::from_ne_bytes(<[u8;4]>::try_from(&opt[0..4]).unwrap());
-                socket.set_recv_buf_size(len as u64);
-                // socket.reuse_addr = opt_value != 0;
-                Ok(0)
-            },
-            SocketOption::SO_KEEPALIVE => {
-                if opt.len() < 4 {
-                    panic!("can't read a int from socket opt value");
-                }
-                let len=u32::from_ne_bytes(<[u8;4]>::try_from(&opt[0..4]).unwrap());
-                let interval=if len!=0 {
-                    Some(smoltcp::time::Duration::from_secs(45))
-                }else{
-                    None
-                };
-                match &socket.inner {
-                    SocketInner::Tcp(s) => s.with_socket_mut(|s| match s {
-                        Some(s) => s.set_keep_alive(interval),
-                        None => log::warn!(
-                            "[setsockopt()] set keep-alive for tcp socket not created, ignored"
-                        ),
-                    }),
-                    SocketInner::Udp(udp_socket) => {
-                        panic!("current not support udp keepalive");
+                        //设置是否重复使用地址
+                        if opt.len()<4 {
+                            panic!("[socketoption_set]:the opt len is not enough");
+                            //一个地址长度都不够
+                            // return None;
+                        }
+                        let addr=i32::from_ne_bytes(<[u8;4]>::try_from(&opt[0..4]).unwrap());
+                        log::error!("[set_reuse_addr] reuse addr is {:?}",addr);
+                        socket.set_reuse_addr(addr!=0);
+                        Ok(0)
                     },
-                }
-                socket.set_recv_buf_size(len as u64);
-                Ok(0)
-            },
+            SocketOption::SO_ERROR => {
+                        panic!("can't set SO_ERROR");
+                    },
+            SocketOption::SO_DONTROUTE => {
+                        if opt.len()<4 {
+                            panic!("[socketoption_set]:the opt len is not enough");
+                        }
+                        let addr=i32::from_ne_bytes(<[u8;4]>::try_from(&opt[0..4]).unwrap());
+                        socket.set_reuse_addr(addr != 0);
+                        // socket.reuse_addr = opt_value != 0;
+                        Ok(0)
+                    },
+            SocketOption::SO_SNDBUF =>{
+                        //设置最大发送报文大小
+                        if opt.len()<4 {
+                            panic!("[socketoption_set]:the opt len is not enough");
+                        }
+                        let len=i32::from_ne_bytes(<[u8; 4]>::try_from(&opt[0..4]).unwrap());
+                        socket.set_send_buf_size(len as u64);
+                        // socket.reuse_addr = opt_value != 0;
+                        Ok(0)
+                    },
+            SocketOption::SO_RCVBUF => {
+                        if opt.len()<4 {
+                            panic!("[socketoption_set]:the opt len is not enough");
+                        }
+                        let len=u32::from_ne_bytes(<[u8;4]>::try_from(&opt[0..4]).unwrap());
+                        socket.set_recv_buf_size(len as u64);
+                        // socket.reuse_addr = opt_value != 0;
+                        Ok(0)
+                    },
+            SocketOption::SO_KEEPALIVE => {
+                        if opt.len() < 4 {
+                            panic!("can't read a int from socket opt value");
+                        }
+                        let len=u32::from_ne_bytes(<[u8;4]>::try_from(&opt[0..4]).unwrap());
+                        let interval=if len!=0 {
+                            Some(smoltcp::time::Duration::from_secs(45))
+                        }else{
+                            None
+                        };
+                        match &socket.inner {
+                            SocketInner::Tcp(s) => s.with_socket_mut(|s| match s {
+                                Some(s) => s.set_keep_alive(interval),
+                                None => log::warn!(
+                                    "[setsockopt()] set keep-alive for tcp socket not created, ignored"
+                                ),
+                            }),
+                            SocketInner::Udp(udp_socket) => {
+                                panic!("current not support udp keepalive");
+                            },
+                        }
+                        socket.set_recv_buf_size(len as u64);
+                        Ok(0)
+                    },
             SocketOption::SO_RCVTIMEO => {
-                if opt.len()!=size_of::<TimeSpec>(){
-                    panic!("can't read a timeval from socket opt value");
-                }
-                // println!("[setsocketoption]set socket option so recvtimeo");
-                let timeout=unsafe { *(opt.as_ptr() as *const TimeSpec) };
-                socket.set_recv_timeout(if timeout.nsec==0&&timeout.sec==0 {
-                    None
-                }else {
-                    Some(timeout)
-                });
+                        if opt.len()!=size_of::<TimeSpec>(){
+                            panic!("can't read a timeval from socket opt value");
+                        }
+                        // println!("[setsocketoption]set socket option so recvtimeo");
+                        let timeout=unsafe { *(opt.as_ptr() as *const TimeSpec) };
+                        socket.set_recv_timeout(if timeout.nsec==0&&timeout.sec==0 {
+                            None
+                        }else {
+                            Some(timeout)
+                        });
                 
-                Ok(0)
+                        Ok(0)
                 
-            },
+                    },
             SocketOption::SO_SNDTIMEO => {
-                panic!("can't set SO_ERROR");
+                        panic!("can't set SO_ERROR");
+                    },
+            SocketOption::SO_PEERCRED => {
+                //todo,getsockopt里面没有设置这个
+                Ok(0)
             },
         }
     }
@@ -1570,125 +1658,166 @@ impl SocketOption {
         log::error!("[get_socket_option]buf_len is {:?}",buf_len);
         match self {
             SocketOption::SO_REUSEADDR => {
-                let value: i32 = if socket.get_reuse_addr() { 1 } else { 0 };
+                        let value: i32 = if socket.get_reuse_addr() { 1 } else { 0 };
 
-                if buf_len < 4 {
-                    panic!("can't write a int to socket opt value");
-                }
+                        if buf_len < 4 {
+                            panic!("can't write a int to socket opt value");
+                        }
 
-                unsafe {
-                    #[cfg(target_arch = "riscv64")]
-                    copy_nonoverlapping(&value.to_ne_bytes() as *const u8, opt_value, 4);
-                    #[cfg(target_arch = "loongarch64")]
-                    copy_to_user(opt_value, &value.to_ne_bytes() as *const u8 , 4);
-                    *opt_len = 4;
-                }
-            }
+                        unsafe {
+                            #[cfg(target_arch = "riscv64")]
+                            copy_nonoverlapping(&value.to_ne_bytes() as *const u8, opt_value, 4);
+                            #[cfg(target_arch = "loongarch64")]
+                            copy_to_user(opt_value, &value.to_ne_bytes() as *const u8 , 4);
+                            *opt_len = 4;
+                        }
+                    }
             SocketOption::SO_DONTROUTE => {
-                if buf_len < 4 {
-                    panic!("can't write a int to socket opt value");
-                }
+                        if buf_len < 4 {
+                            panic!("can't write a int to socket opt value");
+                        }
 
-                let size: i32 = if socket.dont_route { 1 } else { 0 };
+                        let size: i32 = if socket.dont_route { 1 } else { 0 };
 
-                unsafe {
-                    #[cfg(target_arch = "riscv64")]
-                    copy_nonoverlapping(&size.to_ne_bytes() as *const u8, opt_value, 4);
-                    #[cfg(target_arch = "loongarch64")]
-                    copy_to_user(opt_value, &size.to_ne_bytes() as *const u8 , 4);
-                    *opt_len = 4;
-                }
-            }
+                        unsafe {
+                            #[cfg(target_arch = "riscv64")]
+                            copy_nonoverlapping(&size.to_ne_bytes() as *const u8, opt_value, 4);
+                            #[cfg(target_arch = "loongarch64")]
+                            copy_to_user(opt_value, &size.to_ne_bytes() as *const u8 , 4);
+                            *opt_len = 4;
+                        }
+                    }
             SocketOption::SO_SNDBUF => {
-                // if buf_len < 4 {
-                //     panic!("can't write a int to socket opt value");
-                // }
+                        // if buf_len < 4 {
+                        //     panic!("can't write a int to socket opt value");
+                        // }
 
-                let size: i32 = socket.get_send_buf_size() as i32;
+                        let size: i32 = socket.get_send_buf_size() as i32;
 
-                unsafe {
-                    #[cfg(target_arch = "loongarch64")]
-                    copy_to_user(opt_value, &size.to_ne_bytes() as *const u8 , 4);
-                    #[cfg(target_arch = "riscv64")]
-                    copy_nonoverlapping(&size.to_ne_bytes() as *const u8, opt_value, 4);
-                    *opt_len = 4;
-                }
-            }
+                        unsafe {
+                            #[cfg(target_arch = "loongarch64")]
+                            copy_to_user(opt_value, &size.to_ne_bytes() as *const u8 , 4);
+                            #[cfg(target_arch = "riscv64")]
+                            copy_nonoverlapping(&size.to_ne_bytes() as *const u8, opt_value, 4);
+                            *opt_len = 4;
+                        }
+                    }
             SocketOption::SO_RCVBUF => {
-                // if buf_len < 4 {
-                //     panic!("can't write a int to socket opt value");
-                // }
+                        // if buf_len < 4 {
+                        //     panic!("can't write a int to socket opt value");
+                        // }
 
-                let size: i32 = socket.get_recv_buf_size() as i32;
+                        let size: i32 = socket.get_recv_buf_size() as i32;
+
+                        unsafe {
+                            #[cfg(target_arch = "riscv64")]
+                            copy_nonoverlapping(&size.to_ne_bytes() as *const u8, opt_value, 4);
+                            #[cfg(target_arch = "loongarch64")]
+                            copy_to_user(opt_value, &size.to_ne_bytes() as *const u8 , 4);
+                            *opt_len = 4;
+                        }
+                    }
+            SocketOption::SO_KEEPALIVE => {
+                        if buf_len < 4 {
+                            panic!("can't write a int to socket opt value");
+                        }
+
+                        let keep_alive: i32 =match &socket.inner {
+                            SocketInner::Udp(_) => {
+                                panic!("[getsockopt()] get SO_KEEPALIVE on udp socket, returning false");
+                                0
+                            }
+                            SocketInner::Tcp(s) => s.with_socket(|s|{
+                                if s.keep_alive().is_some() {
+                                    1
+                                }
+                                else {
+                                    0
+                                }
+                            }),
+                        };
+
+                        unsafe {
+                             #[cfg(target_arch = "riscv64")]
+                            copy_nonoverlapping(&keep_alive.to_ne_bytes() as *const u8, opt_value, 4);
+                            #[cfg(target_arch = "loongarch64")]
+                            copy_to_user(opt_value, &keep_alive.to_ne_bytes() as *const u8 , 4);
+                            *opt_len = 4;
+                        }
+                    }
+            SocketOption::SO_RCVTIMEO => {
+                        if buf_len < size_of::<TimeSpec>() {
+                            panic!("can't write a timeval to socket opt value");
+                        }
+
+                        unsafe {
+                            match socket.get_recv_timeout() {
+                                Some(time) =>{
+                                    #[cfg(target_arch = "riscv64")]
+                                    copy_nonoverlapping(
+                                    (&time) as *const TimeSpec,
+                                    opt_value as *mut TimeSpec,
+                                    1,
+                                    );
+                                    #[cfg(target_arch = "loongarch64")]
+                                    copy_to_user(opt_value as *mut TimeSpec, &time as *const TimeSpec, size_of::<TimeSpec>());
+                                }, 
+                                None => {
+                                    #[cfg(target_arch = "riscv64")]
+                                    copy_nonoverlapping(&0u8 as *const u8, opt_value, size_of::<TimeSpec>());
+                                    #[cfg(target_arch = "loongarch64")]
+                                    copy_to_user(opt_value, &0u8 as *const u8 , size_of::<TimeSpec>());
+                                }
+                            }
+
+                            *opt_len = size_of::<TimeSpec>() as u32;
+                        }
+                    }
+            SocketOption::SO_ERROR => {
+                    }
+            SocketOption::SO_SNDTIMEO => {
+                        panic!("unimplemented!")
+                    }
+            SocketOption::SO_PEERCRED => {
+                // 首先准备好 UCred 结构体的大小
+                let needed = core::mem::size_of::<UCred>(); // 12 字节 (i32 + u32 + u32)
+                if buf_len < needed {
+                    panic!("can't write ucred to socket opt value: buffer too small");
+                }
+
+                // 假设 socket.get_peer_ucred() 返回一个 UCred { pid: i32, uid: u32, gid: u32 }
+                let peer_ucred = socket.get_peer_ucred();
+
+                // 按照 “pid | uid | gid” 顺序把各字段转换为本机字节序的 4 字节数组
+                let pid_bytes = peer_ucred.pid.to_ne_bytes(); // [u8; 4]
+                let uid_bytes = peer_ucred.uid.to_ne_bytes(); // [u8; 4]
+                let gid_bytes = peer_ucred.gid.to_ne_bytes(); // [u8; 4]
 
                 unsafe {
                     #[cfg(target_arch = "riscv64")]
-                    copy_nonoverlapping(&size.to_ne_bytes() as *const u8, opt_value, 4);
-                    #[cfg(target_arch = "loongarch64")]
-                    copy_to_user(opt_value, &size.to_ne_bytes() as *const u8 , 4);
-                    *opt_len = 4;
-                }
-            }
-            SocketOption::SO_KEEPALIVE => {
-                if buf_len < 4 {
-                    panic!("can't write a int to socket opt value");
-                }
+                    {
+                        // RISC-V64 下直接用 core::ptr::copy_nonoverlapping 向 opt_value 写入
+                        use core::ptr::copy_nonoverlapping;
 
-                let keep_alive: i32 =match &socket.inner {
-                    SocketInner::Udp(_) => {
-                        panic!("[getsockopt()] get SO_KEEPALIVE on udp socket, returning false");
-                        0
-                    }
-                    SocketInner::Tcp(s) => s.with_socket(|s|{
-                        if s.keep_alive().is_some() {
-                            1
-                        }
-                        else {
-                            0
-                        }
-                    }),
-                };
-
-                unsafe {
-                     #[cfg(target_arch = "riscv64")]
-                    copy_nonoverlapping(&keep_alive.to_ne_bytes() as *const u8, opt_value, 4);
-                    #[cfg(target_arch = "loongarch64")]
-                    copy_to_user(opt_value, &keep_alive.to_ne_bytes() as *const u8 , 4);
-                    *opt_len = 4;
-                }
-            }
-            SocketOption::SO_RCVTIMEO => {
-                if buf_len < size_of::<TimeSpec>() {
-                    panic!("can't write a timeval to socket opt value");
-                }
-
-                unsafe {
-                    match socket.get_recv_timeout() {
-                        Some(time) =>{
-                            #[cfg(target_arch = "riscv64")]
-                            copy_nonoverlapping(
-                            (&time) as *const TimeSpec,
-                            opt_value as *mut TimeSpec,
-                            1,
-                            );
-                            #[cfg(target_arch = "loongarch64")]
-                            copy_to_user(opt_value as *mut TimeSpec, &time as *const TimeSpec, size_of::<TimeSpec>());
-                        }, 
-                        None => {
-                            #[cfg(target_arch = "riscv64")]
-                            copy_nonoverlapping(&0u8 as *const u8, opt_value, size_of::<TimeSpec>());
-                            #[cfg(target_arch = "loongarch64")]
-                            copy_to_user(opt_value, &0u8 as *const u8 , size_of::<TimeSpec>());
-                        }
+                        // 写入 pid (偏移 0..4)
+                        copy_nonoverlapping(pid_bytes.as_ptr(), opt_value, 4);
+                        // 写入 uid (偏移 4..8)
+                        copy_nonoverlapping(uid_bytes.as_ptr(), opt_value.add(4), 4);
+                        // 写入 gid (偏移 8..12)
+                        copy_nonoverlapping(gid_bytes.as_ptr(), opt_value.add(8), 4);
                     }
 
-                    *opt_len = size_of::<TimeSpec>() as u32;
+                    #[cfg(target_arch = "loongarch64")]
+                    {
+                        // LoongArch64 下用 copy_to_user 向 opt_value 写入
+                        copy_to_user(opt_value,         pid_bytes.as_ptr(), 4);
+                        copy_to_user(opt_value.add(4),  uid_bytes.as_ptr(), 4);
+                        copy_to_user(opt_value.add(8),  gid_bytes.as_ptr(), 4);
+                    }
+
+                    // 最后把写入的长度写回给用户
+                    *opt_len = needed as u32;
                 }
-            }
-            SocketOption::SO_ERROR => {
-            }
-            SocketOption::SO_SNDTIMEO => {
-                panic!("unimplemented!")
             }
         }
     }
@@ -1704,21 +1833,24 @@ impl TcpSocketOption {
         
         match self {
             TcpSocketOption::TCP_NODELAY => {
-                if opt.len()<4 {
-                    panic!("can't read a int from socket opt value");
-                }
-                let opt_value=u32::from_be_bytes(<[u8;4]>::try_from(&opt[0..4]).unwrap());
-                socket.set_nagle_enabled(opt_value==0);
-                Ok(0)
-            },
+                        if opt.len()<4 {
+                            panic!("can't read a int from socket opt value");
+                        }
+                        let opt_value=u32::from_be_bytes(<[u8;4]>::try_from(&opt[0..4]).unwrap());
+                        socket.set_nagle_enabled(opt_value==0);
+                        Ok(0)
+                    },
             TcpSocketOption::TCP_MAXSEG => {
-                unimplemented!()
-            },
+                        unimplemented!()
+                    },
             TcpSocketOption::TCP_INFO => {
-                Ok(0)
-            },
+                        Ok(0)
+                    },
             TcpSocketOption::TCP_CONGESTION => {
-                rawsocket.set_congestion(String::from_utf8(Vec::from(opt)).unwrap());
+                        rawsocket.set_congestion(String::from_utf8(Vec::from(opt)).unwrap());
+                        Ok(0)
+                    },
+            TcpSocketOption::SO_OOBINLINE => {
                 Ok(0)
             },
         }
@@ -1732,47 +1864,50 @@ impl TcpSocketOption {
         let buf_len=unsafe { *opt_len };
         match self {
             TcpSocketOption::TCP_NODELAY =>{
-                if buf_len<4 {
-                    panic!("can't read a int from socket opt value");
-                }
-                let value: i32 = if socket.nagle_enabled() { 0 } else { 1 };
+                        if buf_len<4 {
+                            panic!("can't read a int from socket opt value");
+                        }
+                        let value: i32 = if socket.nagle_enabled() { 0 } else { 1 };
 
-                let value = value.to_ne_bytes();
+                        let value = value.to_ne_bytes();
 
-                unsafe {
-                    #[cfg(target_arch = "riscv64")]
-                    copy_nonoverlapping(&value as *const u8, opt_addr, 4);
-                    #[cfg(target_arch = "loongarch64")]
-                    copy_to_user(opt_addr, &value as *const u8, 4);
-                    *opt_len = 4;
-                }
-            },
+                        unsafe {
+                            #[cfg(target_arch = "riscv64")]
+                            copy_nonoverlapping(&value as *const u8, opt_addr, 4);
+                            #[cfg(target_arch = "loongarch64")]
+                            copy_to_user(opt_addr, &value as *const u8, 4);
+                            *opt_len = 4;
+                        }
+                    },
             TcpSocketOption::TCP_MAXSEG => {
-                let len = size_of::<usize>();
+                        let len = size_of::<usize>();
 
-                let value: usize = 1500;
+                        let value: usize = 1500;
 
-                unsafe {
-                    #[cfg(target_arch = "riscv64")]
-                    copy_nonoverlapping(&value as *const usize as *const u8, opt_addr, len);
-                    #[cfg(target_arch = "loongarch64")]
-                    copy_to_user(opt_addr, &value as *const usize as *const u8, len);
-                    *opt_len = len as u32;
-                };
-            },
+                        unsafe {
+                            #[cfg(target_arch = "riscv64")]
+                            copy_nonoverlapping(&value as *const usize as *const u8, opt_addr, len);
+                            #[cfg(target_arch = "loongarch64")]
+                            copy_to_user(opt_addr, &value as *const usize as *const u8, len);
+                            *opt_len = len as u32;
+                        };
+                    },
             TcpSocketOption::TCP_INFO => {
-            },
+                    },
             TcpSocketOption::TCP_CONGESTION => {
-                let bytes = rawsocket.get_congestion();
-                let bytes = bytes.as_bytes();
+                        let bytes = rawsocket.get_congestion();
+                        let bytes = bytes.as_bytes();
 
-                unsafe {
-                    #[cfg(target_arch = "riscv64")]
-                    copy_nonoverlapping(bytes.as_ptr(), opt_addr, bytes.len());
-                    #[cfg(target_arch = "loongarch64")]
-                    copy_to_user(opt_addr, bytes.as_ptr(), bytes.len());
-                    *opt_len = bytes.len() as u32;
-                };
+                        unsafe {
+                            #[cfg(target_arch = "riscv64")]
+                            copy_nonoverlapping(bytes.as_ptr(), opt_addr, bytes.len());
+                            #[cfg(target_arch = "loongarch64")]
+                            copy_to_user(opt_addr, bytes.as_ptr(), bytes.len());
+                            *opt_len = bytes.len() as u32;
+                        };
+                    },
+            TcpSocketOption::SO_OOBINLINE => {
+
             },
         }
     }

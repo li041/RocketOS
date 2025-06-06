@@ -91,6 +91,8 @@ pub enum Errno {
     ELOOP = -40,
     /// 对非套接字执行套接字操作
     ENOTSOCK = -88,
+    
+    ENOPROTOOPT=-92,
     /// 操作不支持（如对普通文件调用套接字操作）
     EOPNOTSUPP = -95,
     // address family 不支持
