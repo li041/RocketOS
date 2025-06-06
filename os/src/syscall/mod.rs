@@ -326,11 +326,7 @@ pub fn syscall(
         SYSCALL_RT_SIGACTION => sys_rt_sigaction(a0 as i32, a1, a2),
         SYSCALL_RT_SIGPROCMASK => sys_rt_sigprocmask(a0, a1, a2),
         SYSCALL_RT_SIGPENDING => sys_rt_sigpending(a0),
-        SYSCALL_RT_SIGTIMEDWAIT => sys_rt_sigtimedwait(
-            a0 as *const SigSet,
-            a1 as *const SigInfo,
-            a2 as *const TimeSpec,
-        ),
+        SYSCALL_RT_SIGTIMEDWAIT => sys_rt_sigtimedwait(a0, a1, a2),
         //SYSCALL_RT_SIGQUEUEINFO => sys_rt_sigqueueinfo(),
         SYSCALL_RT_SIGRETURN => sys_rt_sigreturn(),
         SYACALL_SETREGRID => sys_setregid(a0 as i32, a1 as i32),

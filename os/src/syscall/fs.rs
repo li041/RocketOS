@@ -18,7 +18,7 @@ use crate::fs::uapi::{DevT, PollEvents, PollFd, RenameFlags, StatFs, UtimenatFla
 use crate::mm::{MapType, VPNRange, VirtAddr, VirtPageNum};
 use crate::signal::{Sig, SigSet};
 use crate::syscall::errno::Errno;
-use crate::task::yield_current_task;
+use crate::task::{wait, yield_current_task};
 use crate::timer::TimeSpec;
 use crate::{
     ext4::inode::S_IFDIR,
@@ -1063,66 +1063,74 @@ pub fn sys_ppoll(
     }
     drop(task);
 
-    let mut poll_fds: Vec<PollFd> = vec![PollFd::default(); nfds];
-    copy_from_user(fds, poll_fds.as_mut_ptr(), nfds)?;
-    for poll_fd in poll_fds.iter_mut() {
-        poll_fd.revents = PollEvents::empty();
-    }
-    let mut done;
-    loop {
-        done = 0;
-        let task = current_task();
-        for i in 0..nfds {
-            let poll_fd = &mut poll_fds[i];
-            if poll_fd.fd < 0 {
-                continue;
-            } else {
-                if let Some(file) = task.fd_table().get_file(poll_fd.fd as usize) {
-                    let mut trigger = 0;
-                    if file.hang_up() {
-                        poll_fd.revents |= PollEvents::HUP;
-                        trigger = 1;
-                    }
-                    if poll_fd.events.contains(PollEvents::IN) && file.r_ready() {
-                        poll_fd.revents |= PollEvents::IN;
-                        trigger = 1;
-                    }
-                    if poll_fd.events.contains(PollEvents::OUT) && file.w_ready() {
-                        poll_fd.revents |= PollEvents::OUT;
-                        trigger = 1;
-                    }
-                    done += trigger;
+    // Todo: 把fd的监听改成阻塞
+    if !fds.is_null() {
+        let mut poll_fds: Vec<PollFd> = vec![PollFd::default(); nfds];
+        copy_from_user(fds, poll_fds.as_mut_ptr(), nfds)?;
+        for poll_fd in poll_fds.iter_mut() {
+            poll_fd.revents = PollEvents::empty();
+        }
+        let mut done;
+        loop {
+            done = 0;
+            let task = current_task();
+            for i in 0..nfds {
+                let poll_fd = &mut poll_fds[i];
+                if poll_fd.fd < 0 {
+                    continue;
                 } else {
-                    // pollfd的fd字段大于0, 但是对应文件描述符并没有打开, 设置pollfd.revents为POLLNVAL
-                    poll_fd.revents |= PollEvents::INVAL;
-                    log::error!("[sys_ppoll] invalid fd: {}", poll_fd.fd);
+                    if let Some(file) = task.fd_table().get_file(poll_fd.fd as usize) {
+                        let mut trigger = 0;
+                        if file.hang_up() {
+                            poll_fd.revents |= PollEvents::HUP;
+                            trigger = 1;
+                        }
+                        if poll_fd.events.contains(PollEvents::IN) && file.r_ready() {
+                            poll_fd.revents |= PollEvents::IN;
+                            trigger = 1;
+                        }
+                        if poll_fd.events.contains(PollEvents::OUT) && file.w_ready() {
+                            poll_fd.revents |= PollEvents::OUT;
+                            trigger = 1;
+                        }
+                        done += trigger;
+                    } else {
+                        // pollfd的fd字段大于0, 但是对应文件描述符并没有打开, 设置pollfd.revents为POLLNVAL
+                        poll_fd.revents |= PollEvents::INVAL;
+                        log::error!("[sys_ppoll] invalid fd: {}", poll_fd.fd);
+                    }
                 }
             }
-        }
-        if done > 0 {
-            log::error!("[sys_ppoll] done: {}", done);
-            break;
-        }
-        if timeout == 0 {
-            // timeout为0表示立即返回, 即使没有fd准备好
-            break;
-        } else if timeout > 0 {
-            if get_time_ms() > timeout as usize {
-                // 超时了, 返回
+            if done > 0 {
+                log::error!("[sys_ppoll] done: {}", done);
                 break;
             }
+            if timeout == 0 {
+                // timeout为0表示立即返回, 即使没有fd准备好
+                break;
+            } else if timeout > 0 {
+                if get_time_ms() > timeout as usize {
+                    // 超时了, 返回
+                    break;
+                }
+            }
+            drop(task);
+            yield_current_task();
         }
-        drop(task);
-        yield_current_task();
-    }
-    // 写回用户空间
-    copy_to_user(fds, poll_fds.as_ptr(), nfds).unwrap();
-    // 恢复origin sigmask
-    if sigmask != 0 {
-        let task = current_task();
-        task.op_sig_pending_mut(|sig_pending| sig_pending.mask = origin_sigset);
-    }
-    Ok(done)
+        // 写回用户空间
+        copy_to_user(fds, poll_fds.as_ptr(), nfds).unwrap();
+        // 恢复origin sigmask
+        if sigmask != 0 {
+            let task = current_task();
+            task.op_sig_pending_mut(|sig_pending| sig_pending.mask = origin_sigset);
+        }
+        Ok(done)
+    } else { 
+        // 不监听fd，只是为了等待信号
+        wait();
+        log::error!("[sys_ppoll] wakeup by signal");
+        return Err(Errno::EINTR);
+    } 
 }
 
 pub fn sys_readlinkat(dirfd: i32, pathname: *const u8, buf: *mut u8, bufsiz: usize) -> SyscallRet {
@@ -1540,6 +1548,11 @@ pub fn sys_copy_file_range(
         len,
         flags
     );
+
+    if len >= 0x1000000000000 {
+        log::error!("[sys_copy_file_range] len is too large");
+        return Err(Errno::EINVAL);
+    }
 
     let task = current_task();
     let in_file = task.fd_table().get_file(in_fd);

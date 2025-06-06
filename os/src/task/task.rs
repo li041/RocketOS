@@ -39,7 +39,7 @@ use crate::{
         self, add_task,
         context::write_task_cx,
         current_task, dump_scheduler, dump_wait_queue,
-        manager::{add_group, cancel_wait_alarm, delete_wait, new_group, register_task},
+        manager::{add_group, cancel_wait_alarm, delete_wait, new_group, register_task, remove_group},
         wakeup, INITPROC,
     },
     timer::{ITimerVal, TimeVal},
@@ -449,11 +449,13 @@ impl Task {
 
         // 向任务管理器注册新任务（不是调度器）
         register_task(&task);
-        // 向父进程添加子进程
+        
         if task.is_process() {
+            // 向父进程中记录子进程，向父进程组中添加子进程
             self.add_child(task.clone());
+            add_group(task.pgid(), &task);
         } else {
-            // 线程的父进程为当前任务的父进程
+            // 线程的父进程为当前任务的父进程，对于线程任务不加入进程组
             self.op_parent(|parent| {
                 if let Some(parent) = parent {
                     parent.upgrade().unwrap().add_child(task.clone());
@@ -463,8 +465,6 @@ impl Task {
 
         // 向线程组添加子进程 （包括当前任务为进程的情况）
         task.op_thread_group_mut(|tg| tg.add(task.tid(), Arc::downgrade(&task)));
-        // 向父进程组添加子进程
-        add_group(task.pgid(), &task);
 
         // 更新子进程的trap_cx
         let mut trap_cx = get_trap_context(&task);
@@ -495,16 +495,6 @@ impl Task {
         log::info!("[kernel_clone] task{}-sp:\t{:x}", task.tid(), task.kstack());
         log::info!("[kernel_clone] task{}-tgid:\t{:x}", task.tid(), task.tgid());
         log::info!("[kernel_clone] task{}-pgid:\t{:x}", task.tid(), task.pgid());
-
-        // ToOptimize: 把这边输出删了
-        let strong_count = Arc::strong_count(&task);
-        if strong_count == 2 {
-            log::info!("[kernel_clone] strong_count:\t{}", strong_count);
-        } else
-        // 未加入调度器理论引用计数为 2
-        {
-            log::error!("[kernel_clone] strong_count:\t{}", strong_count);
-        }
         log::info!("[kernel_clone] task{} clone complete!", self.tid());
 
         Ok(task)
@@ -535,6 +525,7 @@ impl Task {
                 MapPermission::R | MapPermission::X | MapPermission::U,
                 None,
                 0,
+                false,
             ),
             None,
             0,
@@ -605,15 +596,6 @@ impl Task {
             self.tid(),
             self.kstack()
         );
-
-        let strong_count = Arc::strong_count(&self);
-        if strong_count == 3 {
-            log::info!("[kernel_execve] strong_count:\t{}", strong_count);
-        } else
-        // 理论为3(sys_exec一个，children一个， processor一个)
-        {
-            log::error!("[kernel_execve] strong_count:\t{}", strong_count)
-        }
     }
 
     pub fn kernel_execve_lazily(
@@ -644,6 +626,7 @@ impl Task {
                 MapPermission::R | MapPermission::X | MapPermission::U,
                 None,
                 0,
+                false,
             ),
             None,
             0,
@@ -712,15 +695,6 @@ impl Task {
             self.tid(),
             self.kstack()
         );
-
-        let strong_count = Arc::strong_count(&self);
-        if strong_count == 3 {
-            log::info!("[kernel_execve] strong_count:\t{}", strong_count);
-        } else
-        // 理论为3(sys_exec一个，children一个， processor一个)
-        {
-            log::error!("[kernel_execve] strong_count:\t{}", strong_count)
-        }
     }
 
     // 判断当前任务是否为进程
@@ -1534,6 +1508,7 @@ pub fn kernel_exit(task: Arc<Task>, exit_code: i32) {
                 wakeup(parent.tid());
             }
         });
+        remove_group(&task);
     }
     // 注销任务
     unregister_task(task.tid());

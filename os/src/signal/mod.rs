@@ -62,21 +62,24 @@ pub fn handle_signal() {
 
         // Todo: 中断处理，测试
         #[cfg(target_arch = "riscv64")]
-        if action.flags.contains(SigActionFlag::SA_RESTART)
+        if task.can_restart()   // 优先判断是否可以重启以恢复原有状态
+            && action.flags.contains(SigActionFlag::SA_RESTART)
             && task.is_interrupted()
-            && task.need_restart()
         {
             // 回到用户调用ecall的指令
             log::warn!("[handle_signal] handle SA_RESTART");
-            trap_cx.set_pc(trap_cx.sepc - 4);
+            trap_cx.set_sepc(trap_cx.sepc - 4);
             trap_cx.restore_a0(); // 从last_a0中恢复a0
         }
 
         // 回到用户调用ecall的指令
         #[cfg(target_arch = "loongarch64")]
-        if action.flags.contains(SigActionFlag::SA_RESTART) && task.is_interrupted() {
+        if task.can_restart()   // 优先判断是否可以重启以恢复原有状态
+            && action.flags.contains(SigActionFlag::SA_RESTART)
+            && task.is_interrupted()
+        {
             log::warn!("[handle_signal] handle SA_RESTART");
-            trap_cx.set_pc(trap_cx.era - 4);
+            trap_cx.set_sepc(trap_cx.era - 4);
             trap_cx.restore_a0(); // 从last_a0中恢复a0
         }
 
@@ -86,6 +89,10 @@ pub fn handle_signal() {
         //log::info!("[handle_signal] kstack_top: {:x}", kstack);
         // 非用户定义
         if !action.is_user() {
+            if action.sa_handler == SIG_IGN {
+                log::warn!("[handle_signal] Ignoring signal: {:?}", sig);
+                break;
+            }
             match sig.get_default_type() {
                 ActionType::Ignore => {}
                 ActionType::Term => terminate(task, sig),
@@ -175,7 +182,7 @@ pub fn handle_signal() {
             // 修改sepc,ra,sp,a0
             trap_cx.set_ra(sigreturn_trampoline as usize);
             trap_cx.set_sp(user_sp);
-            trap_cx.set_pc(action.sa_handler);
+            trap_cx.set_sepc(action.sa_handler);
             trap_cx.set_a0(sig.raw() as usize);
             log::info!("[handle_signal] ra = {:x}", sigreturn_trampoline as usize);
             log::info!("[handle_signal] user stack = {:x}", user_sp);

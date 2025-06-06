@@ -155,6 +155,20 @@ impl ProcessGroupManager {
             .unwrap()
             .retain(|task| task.upgrade().map_or(false, |t| !Arc::ptr_eq(process, &t)))
     }
+    
+    pub fn dump_group(&self) {
+        log::info!("[ProcessGroupManager] dump process groups:");
+        for (pgid, group) in self.0.lock().iter() {
+            log::info!("Process Group ID: {}", pgid);
+            for task in group {
+                if let Some(task) = task.upgrade() {
+                    log::info!("  Task ID: {}", task.tid());
+                } else {
+                    log::info!("Task has been dropped");
+                }
+            }
+        }
+    }
 }
 
 /************************************** 阻塞管理器 **************************************/
@@ -171,30 +185,31 @@ pub fn wait() -> isize {
     schedule(); // 调度其他任务
     let task = current_task();
     if task.is_interrupted() {
+        task.set_uninterruptable();
         return -1;
     }
     return 0;
 }
 
 // 条件阻塞，只有当满足条件时才会被唤醒
-pub fn wait_event<F>(name: &String, condition: F)
-where
-    F: Fn() -> bool,
-{
-    // loop作用：防止被唤醒到被调度这段期间条件再次失效
-    loop {
-        // 检查条件是否满足
-        if condition() {
-            break;
-        }
-        // 条件不满足，加入阻塞队列
-        let task = current_task();
-        task.set_uninterruptable();
-        WAIT_MANAGER.add_cond(name, task);
-        log::warn!("[wait_event] task{} cond_block", current_task().tid());
-        schedule();
-    }
-}
+// pub fn wait_event<F>(name: &String, condition: F)
+// where
+//     F: Fn() -> bool,
+// {
+//     // loop作用：防止被唤醒到被调度这段期间条件再次失效
+//     loop {
+//         // 检查条件是否满足
+//         if condition() {
+//             break;
+//         }
+//         // 条件不满足，加入阻塞队列
+//         let task = current_task();
+//         task.set_uninterruptable();
+//         WAIT_MANAGER.add_cond(name, task);
+//         log::warn!("[wait_event] task{} cond_block", current_task().tid());
+//         schedule();
+//     }
+// }
 
 // 时间阻塞，当达到指定时间后自动唤醒
 // 返回值：0：正常被唤醒； -1：被中断唤醒  -2：超时唤醒
@@ -228,22 +243,22 @@ pub fn wakeup(tid: Tid) {
 }
 
 // 唤醒条件阻塞队列中的一个任务（FIFO顺序）
-pub fn wake_cond_one(name: &String) {
-    if let Some(task) = WAIT_MANAGER.fetch_cond(name) {
-        log::warn!("[wake_cond_one] task{} cond_unblock", task.tid());
-        task.set_ready();
-        add_task(task);
-    }
-}
+// pub fn wake_cond_one(name: &String) {
+//     if let Some(task) = WAIT_MANAGER.fetch_cond(name) {
+//         log::warn!("[wake_cond_one] task{} cond_unblock", task.tid());
+//         task.set_ready();
+//         add_task(task);
+//     }
+// }
 
-// 唤醒条件阻塞队列中的所有任务
-pub fn wake_cond_all(name: &String) {
-    while let Some(task) = WAIT_MANAGER.fetch_cond(name) {
-        log::warn!("[wake_cond_one] task{} cond_unblock", task.tid());
-        task.set_ready();
-        add_task(task);
-    }
-}
+// // 唤醒条件阻塞队列中的所有任务
+// pub fn wake_cond_all(name: &String) {
+//     while let Some(task) = WAIT_MANAGER.fetch_cond(name) {
+//         log::warn!("[wake_cond_one] task{} cond_unblock", task.tid());
+//         task.set_ready();
+//         add_task(task);
+//     }
+// }
 
 // 将任务从阻塞队列中移除（用于线程异常退出）
 pub fn delete_wait(tid: Tid) {
@@ -251,99 +266,47 @@ pub fn delete_wait(tid: Tid) {
     WAIT_MANAGER.delete(tid);
 }
 
-// 申请一个条件阻塞队列
-pub fn alloc_wait_queue(name: &String) {
-    WAIT_MANAGER.alloc_cond_queue(name);
-}
+// // 申请一个条件阻塞队列
+// pub fn alloc_wait_queue(name: &String) {
+//     WAIT_MANAGER.alloc_cond_queue(name);
+// }
 
-// 释放一个条件阻塞队列
-pub fn dealloc_wait_queue(name: &String) {
-    WAIT_MANAGER.dealloc_cond_queue(name);
-}
+// // 释放一个条件阻塞队列
+// pub fn dealloc_wait_queue(name: &String) {
+//     WAIT_MANAGER.dealloc_cond_queue(name);
+// }
 
 // 打印所有阻塞队列中的内容
 pub fn dump_wait_queue() -> () {
-    for (name, que) in WAIT_MANAGER.wait_queue.lock().iter() {
-        log::error!("dump wait queue: {}", name);
-        que.dump_queue();
-    }
+    let que = WAIT_MANAGER.wait_queue.lock();
+    que.dump_queue();
 }
 
 pub struct WaitManager {
     // 阻塞队列
-    // 其中使用"basic"来当做任务阻塞队列，创建条件队列请使用别的名字
-    pub wait_queue: Mutex<HashMap<String, WaitQueue>>,
-    // 反向映射表
-    pub registry: Mutex<HashMap<Tid, String>>,
+    pub wait_queue: Mutex<WaitQueue>,
 }
 
 impl WaitManager {
-    // 创建一个新的阻塞队列(初始带有一个basic队列当作任务阻塞队列)
+    // 创建一个新的阻塞队列
     fn init() -> Self {
-        let mut wait_queue = HashMap::new();
-        wait_queue.insert("basic".to_string(), WaitQueue::new());
+        let wait_queue = WaitQueue::new();
         WaitManager {
             wait_queue: Mutex::new(wait_queue),
-            registry: Mutex::new(HashMap::new()),
         }
     }
 
-    // 创建新的条件队列
-    fn alloc_cond_queue(&self, name: &String) {
-        let mut queue = self.wait_queue.lock();
-        if queue.get(name).is_none() {
-            queue.insert(name.to_string(), WaitQueue::new());
-        }
-    }
-
-    // 释放条件队列
-    fn dealloc_cond_queue(&self, name: &String) {
-        let mut queue = self.wait_queue.lock();
-        queue.remove(name);
-    }
-
-    // 向basic队列中添加一个任务
+    // 向阻塞队列中添加一个任务
     fn add(&self, task: Arc<Task>) {
         let mut queue = self.wait_queue.lock();
-        let mut registry = self.registry.lock();
-        registry.insert(task.tid(), "basic".to_string());
-        queue.get_mut("basic").unwrap().add(task);
-    }
-
-    // 向条件队列中添加一个任务
-    fn add_cond(&self, name: &String, task: Arc<Task>) {
-        let mut queue = self.wait_queue.lock();
-        let mut registry = self.registry.lock();
-        if let Some(cond_que) = queue.get_mut(name) {
-            registry.insert(task.tid(), name.to_string());
-            cond_que.add(task);
-        } else {
-            log::error!("[add_cond] queue {} not found", name);
-        }
-    }
-
-    // 从条件队列中首部取出一个任务
-    fn fetch_cond(&self, name: &String) -> Option<Arc<Task>> {
-        let mut queue = self.wait_queue.lock();
-        if let Some(cond_que) = queue.get_mut(name) {
-            if let Some(task) = cond_que.fetch() {
-                return Some(task);
-            }
-        }
-        None
+        queue.add(task);
     }
 
     // 从阻塞队列中取出特定任务
     fn remove(&self, tid: Tid) -> Result<Arc<Task>, ()> {
         let mut queue = self.wait_queue.lock();
-        let mut registry = self.registry.lock();
-        if let Some(name) = registry.get(&tid) {
-            if let Some(cond_que) = queue.get_mut(name) {
-                if let Ok(task) = cond_que.remove(tid) {
-                    registry.remove(&task.tid());
-                    return Ok(task);
-                }
-            }
+        if let Ok(task) = queue.remove(tid) {
+            return Ok(task);
         }
         Err(())
     }
@@ -351,12 +314,7 @@ impl WaitManager {
     // 从阻塞队列中删除特定任务
     fn delete(&self, tid: Tid) {
         let mut queue = self.wait_queue.lock();
-        let registry = self.registry.lock();
-        if let Some(name) = registry.get(&tid) {
-            if let Some(cond_que) = queue.get_mut(name) {
-                cond_que.remove(tid);
-            }
-        }
+        queue.remove(tid);
     }
 }
 

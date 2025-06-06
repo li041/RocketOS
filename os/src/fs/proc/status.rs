@@ -132,13 +132,21 @@ impl FileOp for StatusFile {
     }
     fn read(&self, buf: &mut [u8]) -> SyscallRet {
         let task_info = current_task().info();
-        let len = task_info.len();
-        if self.inner.read().offset >= len {
+        let info_bytes = task_info.as_bytes();
+        let info_len = info_bytes.len();
+        // 当前偏移
+        let offset = self.inner.read().offset;
+        if offset >= info_len {
             return Ok(0);
         }
-        buf[..len].copy_from_slice(task_info.as_bytes());
-        self.add_offset(len);
-        Ok(len)
+        // 计算还能读多少
+        let remain = info_len - offset;
+        let copy_len = core::cmp::min(buf.len(), remain);
+        // 拷贝从 offset 开始的数据
+        buf[..copy_len].copy_from_slice(&info_bytes[offset..offset + copy_len]);
+        // 更新偏移
+        self.add_offset(copy_len);
+        Ok(copy_len)
     }
     fn seek(&self, offset: isize, whence: Whence) -> SyscallRet {
         let mut inner_guard = self.inner.write();

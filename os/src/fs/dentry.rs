@@ -265,7 +265,7 @@ impl Dentry {
     pub fn is_negative(&self) -> bool {
         self.inner.lock().inode.is_none()
     }
-    // 由上层调用者保证: 负目录项不能调用该函数
+    /// 由上层调用者保证: 负目录项不能调用该函数
     pub fn can_search(&self) -> bool {
         let (euid, egid) = {
             let task = current_task();

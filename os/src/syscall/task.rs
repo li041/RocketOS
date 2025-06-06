@@ -7,11 +7,12 @@ use crate::arch::trap::context::{dump_trap_context, get_trap_context, save_trap_
 use crate::ext4::fs;
 use crate::fs::file::OpenFlags;
 use crate::futex::do_futex;
+use crate::signal::Sig;
 use crate::syscall::errno::Errno;
 use crate::syscall::util::{CLOCK_MONOTONIC, CLOCK_REALTIME};
 use crate::task::{
-    add_group, dump_scheduler, get_scheduler_len, get_task, new_group, wait, wait_timeout,
-    CloneFlags, Task,
+    add_group, dump_scheduler, get_group, get_scheduler_len, get_task, new_group, wait,
+    wait_timeout, CloneFlags, Task,
 };
 use crate::timer::{TimeSpec, TimeVal};
 use crate::{
@@ -323,106 +324,142 @@ pub fn sys_exit_group(exit_code: i32) -> SyscallRet {
 }
 
 pub fn sys_waitpid(pid: isize, exit_code_ptr: usize, option: i32) -> SyscallRet {
-    log::trace!("[sys_waitpid]");
-    let option = WaitOption::from_bits(option).unwrap();
     log::warn!(
         "[sys_waitpid] pid: {}, exit_code_ptr: {:x}, option: {:?}",
         pid,
         exit_code_ptr,
         option,
     );
-    log::error!("current_task: {}", current_task().tid());
+    // option 必须合法
+    if option < 0 {
+        return Err(Errno::EINVAL);
+    }
+
+    // 检查进程组是否存在（pid < 0 表示等待某个 pgid）
+    if pid < 0 {
+        get_group(-pid as usize).ok_or(Errno::ESRCH)?;
+    }
+
+    let wait_option = WaitOption::from_bits(option).unwrap_or_else(|| {
+        log::error!("[sys_waitpid] Invalid wait option: {}", option);
+        WaitOption::empty()
+    });
+
     let cur_task = current_task();
     loop {
-        let mut first = true;
-        let mut target_task: Option<Arc<Task>> = None;
-        // 神奇小咒语
-        log::trace!(
-            "[sys_waitpid] pid: {}, target_task: {:?}, first: {}",
-            pid,
-            target_task,
-            first,
-        );
         // 先检查当前进程是否存在满足目标子进程
-        cur_task.op_children_mut(|children| {
-            if children.is_empty() {
-                return;
-            }
-            for child in children.values() {
-                if pid == -1 && first {
-                    target_task = Some(child.clone());
-                    first = false;
-                } else if pid == 0 && child.pgid() == cur_task.pgid() && first {
-                    // pid为0, 则等待当前进程组的任意子进程
-                    target_task = Some(child.clone());
-                    first = false;
-                } else if pid > 0 && pid as usize == child.tid() {
-                    // pid大于0, 则等待指定pid的子进程
-                    target_task = Some(child.clone());
-                    return;
-                } else if pid < -1 && (-pid) as usize == child.pgid() {
-                    // pid小于-1, 则等待指定pgid的子进程
-                    target_task = Some(child.clone());
-                    return;
-                } else if pid as usize == child.tgid() {
-                    target_task = Some(child.clone());
-                } else if pid == -1 && child.is_zombie() {
-                    target_task = Some(child.clone());
-                    return;
-                } else if pid == 0 && child.is_zombie() && child.pgid() == cur_task.pgid() {
-                    // pid为0, 则等待当前进程组的任意子进程
-                    target_task = Some(child.clone());
-                    return;
-                }
-            }
-        });
-        if let Some(wait_task) = target_task {
-            log::error!(
-                "cur_task: {}, wait_task: {}",
-                cur_task.tid(),
-                wait_task.tid()
-            );
-            // 目标子进程已死
-            if wait_task.is_zombie() {
-                cur_task.remove_child_task(wait_task.tid());
-                debug_assert_eq!(Arc::strong_count(&wait_task), 1);
-                let found_pid = wait_task.tgid() as i32;
-                // 写入exit_code
-                // Todo: 需要对地址检查
-                log::warn!(
-                    "[sys_waitpid] child {} exit with code {}, exit_code_ptr: {:x}",
-                    found_pid,
-                    wait_task.exit_code(),
-                    exit_code_ptr
+        let target_task = select_task(pid);
+
+        // 存在目标进程
+        match target_task {
+            Some(child) => {
+                let tid = child.tid();
+                let tgid = child.tgid();
+
+                log::error!(
+                    "[sys_waitpid] cur_task: {}, target_child: {}",
+                    cur_task.tid(),
+                    tid
                 );
-                // exit_code_ptr为空, 表示不关心子进程的退出状态
-                if exit_code_ptr != 0 {
-                    copy_to_user(
-                        exit_code_ptr as *mut i32,
-                        &wait_task.exit_code() as *const i32,
-                        1,
-                    )?;
+
+                // 如果子进程已经退出，直接回收资源并返回
+                if child.is_zombie() {
+                    cur_task.remove_child_task(tid);
+                    debug_assert_eq!(Arc::strong_count(&child), 1);
+
+                    let code = child.exit_code();
+                    log::warn!(
+                        "[sys_waitpid] child {} exited with code: {}",
+                        tid,
+                        code,
+                    );
+
+                    if exit_code_ptr != 0 {
+                        // 将 exit_code 写入用户空间
+                        if let Err(e) =
+                            copy_to_user(exit_code_ptr as *mut i32, &code as *const i32, 1)
+                        {
+                            log::warn!("[sys_waitpid] failed to copy exit_code to user: {:?}", e);
+                            return Err(e);
+                        }
+                    }
+
+                    return Ok(tgid);
                 }
-                return Ok(found_pid as usize);
-            }
-            // 如果目标子进程未死亡
-            else {
-                drop(wait_task);
-                if option.contains(WaitOption::WNOHANG) {
-                    return Ok(0);
-                } else {
-                    if wait() == -1 {
-                        log::error!("[sys_waitpid] wait interrupted");
-                        return Err(Errno::EINTR);
-                    };
+
+                // 子进程未退出
+                if wait_option.contains(WaitOption::WNOHANG) {
+                    return Ok(0); // 非阻塞返回
+                }
+
+                // 阻塞等待被中断时，需要判断是否继续等待
+                if wait() == -1 {
+                    log::warn!("[sys_waitpid] wait interrupted");
+                    // 如果因为 SIGCHLD 被中断，继续 loop 检查
+                    if let Some(_sig) = cur_task
+                        .op_sig_pending_mut(|pending| pending.find_signal(Sig::SIGCHLD.into()))
+                    {
+                        cur_task.set_uninterrupted();
+                        continue;
+                    }
+                    return Err(Errno::EINTR);
                 }
             }
-        }
-        // 不存在目标进程
-        else {
-            return Err(Errno::ECHILD);
+
+            None => {
+                // 没有任何符合条件的子进程
+                return Err(Errno::ECHILD);
+            }
         }
     }
+}
+
+// 用于waitpid选择目标任务
+fn select_task(pid: isize) -> Option<Arc<Task>> {
+    let mut target_task: Option<Arc<Task>> = None;
+    let cur_task = current_task();
+
+    cur_task.op_children_mut(|children| {
+        for child in children.values() {
+            log::error!(
+                "child: {}, pid: {}, pgid: {}, tgid: {}, is_zombie: {}",
+                child.tid(),
+                pid,
+                child.pgid(),
+                child.tgid(),
+                child.is_zombie()
+            );
+            let matches = match pid {
+                -1 => child.is_zombie(), // 等待任意僵尸子进程
+                0 => child.is_zombie() && child.pgid() == cur_task.pgid(), // 当前进程组的僵尸子进程
+                p if p > 0 => child.tgid() == p as usize, // 等待 tid 为 pid 的子进程
+                p if p < -1 => child.pgid() == (-p) as usize, // 等待 pgid 为 -pid 的子进程
+                _ => false,
+            };
+
+            if matches {
+                target_task = Some(child.clone());
+                return; // 找到第一个符合条件的立即返回
+            }
+        }
+
+        // 如果找不到符合条件的僵尸子进程，也可以选择任意一个非僵尸子进程（作为 fallback）
+        if pid == -1 || pid == 0 {
+            for child in children.values() {
+                let fallback = match pid {
+                    -1 => true,
+                    0 => child.pgid() == cur_task.pgid(),
+                    _ => false,
+                };
+                if fallback {
+                    target_task = Some(child.clone());
+                    break;
+                }
+            }
+        }
+    });
+
+    target_task
 }
 
 pub fn sys_futex(
@@ -433,7 +470,7 @@ pub fn sys_futex(
     uaddr2: usize,
     val3: u32,
 ) -> SyscallRet {
-    log::info!(
+    log::error!(
         "[sys_futex] uaddr: {:x}, futex_op: {}, val: {}, val2: {:x}, uaddr2: {:x}, val3: {}",
         uaddr,
         futex_op,

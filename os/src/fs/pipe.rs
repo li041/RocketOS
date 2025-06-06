@@ -457,6 +457,9 @@ impl FileOp for Pipe {
     fn get_flags(&self) -> OpenFlags {
         self.flags
     }
+    fn set_flags(&self, _flags: OpenFlags) {
+        log::warn!("[Pipe::set_flags] not implemented");
+    }
 }
 
 impl Drop for Pipe {
