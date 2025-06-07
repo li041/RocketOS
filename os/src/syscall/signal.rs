@@ -230,7 +230,49 @@ pub fn sys_rt_sigsuspend(mask: usize) -> SyscallRet {
         });
         drop(task);
         unsafe {
-            asm!("j __return_to_user");
+            asm!(
+                "lla t0, __return_to_user",  // 加载地址到寄存器 t0
+                "jr t0",                      // 跳转到 t0 指向的位置
+                options(noreturn)
+            );
+        }
+    }
+
+    #[cfg(target_arch = "loongarch64")]
+    {
+        let mut trap_cx = get_trap_context(&task);
+        let new_sp = get_stack_top_by_sp(task.kstack()) - core::mem::size_of::<TrapContext>();
+        
+        // 设置信号返回值为 -4
+        trap_cx.set_a0((usize::MAX - 3) as usize);
+
+        save_trap_context(&task, trap_cx);
+
+        unsafe {
+            // LoongArch 汇编：切换 sp 到新的 TrapContext 栈顶
+            asm!("move $sp, {}", in(reg) new_sp);
+        }
+
+        // 调用信号处理
+        handle_signal();
+
+        // 恢复原始掩码，这里暂不支持嵌套信号
+        task.op_sig_pending_mut(|pending| {
+            log::warn!("[sys_rt_sigsuspend] Force mask setting");
+            pending.change_mask(origin_mask);
+            log::error!("[sys_rt_sigsuspend] restore mask: {:?}", pending.mask);
+            pending.cancel_restore_mask();
+        });
+
+        drop(task);
+
+        unsafe {
+            // LoongArch 跳转回用户态
+            asm!(
+                "la.global $t0, __return_to_user", // 加载地址到 t0
+                "jr $t0",                          // 跳转到 __return_to_user
+                options(noreturn)
+            );
         }
     }
     return Err(Errno::EINTR); // 不会运行到这里，最终由sigreturn返回
