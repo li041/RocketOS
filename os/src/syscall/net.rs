@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-02 23:04:54
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-06 11:10:29
+ * @LastEditTime: 2025-06-07 10:06:34
  * @FilePath: /RocketOS_netperfright/os/src/syscall/net.rs
  * @Description: net syscall
  *
@@ -19,6 +19,32 @@ use smoltcp::wire::IpEndpoint;
 use crate::{arch::mm::{copy_from_user, copy_to_user}, fs::{fdtable::FdFlags, file::{FileOp, OpenFlags}, namei::path_openat, pipe::{self, make_pipe}, uapi::IoVec}, net::{addr::{from_ipendpoint_to_socketaddr, LOOP_BACK_IP}, alg::encode, socket::{check_alg, socket_address_from, socket_address_from_af_alg, socket_address_from_unix, socket_address_to, socket_address_tounix, ALG_Option, Domain, IpOption, Ipv6Option, MessageHeaderRaw, Socket, SocketOption, SocketOptionLevel, SocketType, TcpSocketOption, SOCK_CLOEXEC, SOCK_NONBLOCK}}, syscall::task::{sys_getresgid, sys_nanosleep}, task::{current_task, yield_current_task}};
 pub const SOCKET_TYPE_MASK: usize = 0xFF;
 use super::errno::{Errno, SyscallRet};
+bitflags::bitflags! {
+    /// `recv`/`send` flags (from `<sys/socket.h>`).
+    pub struct MsgFlags: u32 {
+        const MSG_OOB         = 0x01;        // Process out-of-band data.
+        const MSG_PEEK        = 0x02;        // Peek at incoming messages.
+        const MSG_DONTROUTE   = 0x04;        // Don’t use local routing.
+        const MSG_CTRUNC      = 0x08;        // Control data lost before delivery.
+        const MSG_PROXY       = 0x10;        // Supply or ask second address.
+        const MSG_TRUNC       = 0x20;
+        const MSG_DONTWAIT    = 0x40;        // Nonblocking IO.
+        const MSG_EOR         = 0x80;        // End of record.
+        const MSG_WAITALL     = 0x100;       // Wait for a full request.
+        const MSG_FIN         = 0x200;
+        const MSG_SYN         = 0x400;
+        const MSG_CONFIRM     = 0x800;       // Confirm path validity.
+        const MSG_RST         = 0x1000;
+        const MSG_ERRQUEUE    = 0x2000;      // Fetch message from error queue.
+        const MSG_NOSIGNAL    = 0x4000;      // Do not generate SIGPIPE.
+        const MSG_MORE        = 0x8000;      // Sender will send more.
+        const MSG_WAITFORONE  = 0x10000;     // Wait for at least one packet.
+        const MSG_BATCH       = 0x40000;     // sendmmsg: more messages coming.
+        const MSG_ZEROCOPY    = 0x4000000;   // Use user data in kernel path.
+        const MSG_FASTOPEN    = 0x20000000;  // Send data in TCP SYN.
+        const MSG_CMSG_CLOEXEC= 0x40000000;  // Set CLOEXEC on SCM_RIGHTS fds.
+    }
+}
  ///函数会创建一个socket并返回一个fd,失败返回-1
  /// domain: 展示使用的
  /// flag:usize sockettype
@@ -411,7 +437,7 @@ pub fn syscall_recv(
     len: usize,
     socketaddr: usize,
     socketlen: usize,
-    _flag: usize,
+    flag: usize,
 ) -> SyscallRet {
     log::error!("[syscall_recv]:begin recv");
     log::error!(
@@ -432,6 +458,11 @@ pub fn syscall_recv(
         Some(s) => s,
         None => return Err(Errno::ENOTSOCK),
     };
+    if buf as usize ==0xffffffffffffffff {
+        return Err(Errno::EFAULT);
+    }
+    //check flag is valid
+    
     let addr = socket.name()?;
     log::error!("[syscall_recv] sockt addr is {:?}", addr);
     // let addr=unsafe { socket_address_from(socketaddr as *const u8, socket) };
