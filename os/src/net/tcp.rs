@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-03-30 16:26:09
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-05 17:59:12
+ * @LastEditTime: 2025-06-07 20:16:25
  * @FilePath: /RocketOS_netperfright/os/src/net/tcp.rs
  * @Description: tcp file 
  * 
@@ -556,6 +556,9 @@ impl TcpSocket {
                     socket.close();
                     Ok(0)
                 }
+                else if socket.recv_queue()==0{
+                    Ok(0)
+                }
                 else{
                     Err(Errno::EAGAIN)
                 }
@@ -591,7 +594,8 @@ impl TcpSocket {
                     // println!("connecting closed");
                     socket.close();
                     Ok(0)
-                } else {
+                }
+                else {
                     // no more data
                     if get_time() as u64 > expire_at {
                         Err(Errno::ETIMEDOUT)
@@ -617,7 +621,7 @@ impl TcpSocket {
             SOCKET_SET.with_socket_mut::<_,tcp::Socket,_>(handle, |socket|{
                 if !socket.is_active() || !socket.may_send() {
                     // closed by remote
-                    panic!("socket send() failed");
+                    Err(Errno::EPIPE)
                 }
                 else if socket.can_send() {
                     // log::error!("[Tcp_socket]:send_buf:{:?}",buf);

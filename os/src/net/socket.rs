@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-03 16:40:04
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-06 11:07:32
+ * @LastEditTime: 2025-06-07 22:25:11
  * @FilePath: /RocketOS_netperfright/os/src/net/socket.rs
  * @Description: socket file
  * 
@@ -97,6 +97,8 @@ pub struct Socket{
     recvtimeout:Mutex<Option<TimeSpec>>,
     dont_route:bool,
     pub buffer:Option<Arc<Pipe>>,
+    //用于send中flag为msg_more时存储，否则为none
+    pub pend_send:Mutex<Option<Vec<u8>>>,
     isaf_alg:AtomicBool,
     isaf_unix:AtomicBool,
     //只有在isaf_alg为true时才有意义，socketbind时将加密算法存入其中
@@ -187,6 +189,28 @@ impl Socket {
     fn set_congestion(&self,congestion:String) {
         *self.congestion.lock()=congestion;
     }
+    pub fn set_pend_send(&self, buf: &[u8]) {
+        // 锁住 mutex，得到 &mut Option<Vec<u8>>
+        let mut guard = self.pend_send.lock();
+        match &mut *guard {
+            Some(vec) => {
+                // 已有 Vec，就追加
+                vec.extend_from_slice(buf);
+            }
+            None => {
+                // 之前没 Vec，就新建一个并插入
+                let mut new_vec = Vec::with_capacity(buf.len());
+                new_vec.extend_from_slice(buf);
+                *guard = Some(new_vec);
+            }
+        }
+    }
+    pub fn is_pend_send(&self)->bool {
+        self.pend_send.lock().is_none()
+    }
+    pub fn get_pend_send(&self)->Vec<u8> {
+        self.pend_send.lock().clone().unwrap()
+    }
     pub fn set_ucred(&self,pid:i32,uid:u32,gid:u32) {
         let cred=UCred{
             pid:pid,
@@ -253,6 +277,7 @@ impl Socket {
             recvtimeout:Mutex::new(None),
             congestion: Mutex::new(String::from("reno")),
             buffer: None, 
+            pend_send:Mutex::new(None),
             isaf_alg: AtomicBool::new(false),
             isaf_unix:AtomicBool::new(false),
             socket_af_alg: Mutex::new(None),
@@ -482,6 +507,7 @@ impl Socket {
                         recv_buf_size: AtomicU64::new(64*1024),
                         congestion: Mutex::new(String::from("reno")),
                         buffer: None,
+                        pend_send:Mutex::new(None),
                         isaf_alg: AtomicBool::new(false),
                         isaf_unix:AtomicBool::new(false),
                         socket_af_alg: Mutex::new(None),
@@ -528,6 +554,7 @@ impl Socket {
             recv_buf_size: AtomicU64::new(64*1024),
             congestion: Mutex::new(String::from("reno")),
             buffer: None,
+            pend_send:Mutex::new(None),
             isaf_alg: AtomicBool::new(true),
             isaf_unix:AtomicBool::new(false),
             socket_af_alg: Mutex::new(self.socket_af_alg.lock().clone()),
@@ -558,6 +585,7 @@ impl Socket {
 
         let binding = self.get_socket_path();
         let s_path=core::str::from_utf8(binding.as_slice()).unwrap();
+        let mut count=0;
         loop {
             let file=path_openat(s_path, OpenFlags::O_CLOEXEC, -100, 0)?;
             if file.r_ready() {
@@ -565,6 +593,9 @@ impl Socket {
                 if peer_path[..n].iter().all(|&b| b == 0) {
                     log::error!("[Socket_accept_unix] wait for connect");
                     yield_current_task();
+                    if count>50 {
+                        return Err(Errno::ETIMEDOUT);
+                    }
                 }
                 else {
                     peer_path.truncate(n);
@@ -574,6 +605,7 @@ impl Socket {
             else {
                 yield_current_task();
             }
+            count+=1;
         }
         let file=self.get_unix_file();
         let tmp: Vec<u8>=vec![0;120];
@@ -599,6 +631,7 @@ impl Socket {
             recv_buf_size: AtomicU64::new(64*1024),
             congestion: Mutex::new(String::from("reno")),
             buffer: None,
+            pend_send:Mutex::new(None),
             isaf_alg: AtomicBool::new(false),
             isaf_unix:AtomicBool::new(true),
             socket_af_alg: Mutex::new(None),
@@ -658,7 +691,7 @@ impl Socket {
             SocketInner::Tcp(tcp_socket) => {
                 if tcp_socket.is_closed() {
                     log::error!("[Socket_send]:The local socket has been closed");
-                    // panic!()
+                    return  Err(Errno::EPIPE);
                 }
                 //accept时已经有remote_addr并写入了
                 tcp_socket.send(buf)
@@ -981,14 +1014,15 @@ pub unsafe fn socket_address_from(addr: *const u8,len:usize, socket: &Socket) ->
     let addr = addr as *const u8;
     log::error!("[socket_address_from]addr is {:?}",addr);
     log::error!("[socket_address_from]:vpn is {:?}",VirtPageNum::from(addr as usize));
+    if addr as usize==0xffffffffffffffff {
+        return  Err(Errno::EFAULT);
+    }
     let mut kernel_addr_from_user:Vec<u8>=vec![0;len];
-    copy_from_user(addr,kernel_addr_from_user.as_mut_ptr(),len);
+    copy_from_user(addr,kernel_addr_from_user.as_mut_ptr(),len)?;
     let family_bytes = [kernel_addr_from_user[0], kernel_addr_from_user[1]];
-    let family = match Domain::try_from(u16::from_ne_bytes(family_bytes) as usize) {
-        Ok(f) => f,
-        Err(_) => return Err(Errno::EAFNOSUPPORT),
-    };
-    log::error!("[socket_address_from] parsed sa_family = {:?}", family);
+    if family_bytes[0]==47 {
+        return Err(Errno::EAFNOSUPPORT);
+    }
     match socket.domain {
             //i这里的unix,af_alg无用
         Domain::AF_INET | Domain::AF_UNIX|Domain::AF_NETLINK|Domain::AF_UNSPEC |Domain::AF_ALG=> {
@@ -1383,6 +1417,7 @@ impl FileOp for Socket {
         log::error!("[sokcet_readable]:poll readable");
         if self.domain==Domain::AF_UNIX {
             //这里将寻找的文件中内容返回给进程
+            log::error!("[sokcet_readable]:unix socket readable");
             return true
         }
         // yield_current_task();

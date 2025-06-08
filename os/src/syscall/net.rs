@@ -2,14 +2,14 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-02 23:04:54
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-07 10:06:34
+ * @LastEditTime: 2025-06-08 16:59:15
  * @FilePath: /RocketOS_netperfright/os/src/syscall/net.rs
  * @Description: net syscall
  *
  * Copyright (c) 2025 by peterluck2021@163.com, All Rights Reserved.
  */
 
-use core::{fmt::Result, net::{IpAddr, Ipv4Addr, SocketAddr}};
+use core::{fmt::Result, net::{IpAddr, Ipv4Addr, SocketAddr}, sync::atomic::{AtomicUsize, Ordering}};
 use alloc::{sync::Arc, task, vec::Vec};
 use alloc::vec;
 use bitflags::Flags;
@@ -21,6 +21,7 @@ pub const SOCKET_TYPE_MASK: usize = 0xFF;
 use super::errno::{Errno, SyscallRet};
 bitflags::bitflags! {
     /// `recv`/`send` flags (from `<sys/socket.h>`).
+    #[derive(Debug)]
     pub struct MsgFlags: u32 {
         const MSG_OOB         = 0x01;        // Process out-of-band data.
         const MSG_PEEK        = 0x02;        // Peek at incoming messages.
@@ -45,12 +46,12 @@ bitflags::bitflags! {
         const MSG_CMSG_CLOEXEC= 0x40000000;  // Set CLOEXEC on SCM_RIGHTS fds.
     }
 }
+
  ///函数会创建一个socket并返回一个fd,失败返回-1
  /// domain: 展示使用的
  /// flag:usize sockettype
  /// protocol:协议
 pub fn syscall_socket(domain:usize,sockettype:usize,protocol:usize)->SyscallRet{
-    
     log::error!("[syscall_socket]:domain:{} sockettype:{}",domain,sockettype & 0xFF);
     let domain=match Domain::try_from(domain) {
         Ok(res) => res,
@@ -351,7 +352,6 @@ pub fn syscall_connect(socketfd:usize,socketaddr:usize,socketlen:usize)->Syscall
             let client_ucred=socket.get_ucred();
             serversocket.set_ucred(client_ucred.pid, client_ucred.uid, client_ucred.gid);
         }
-        println!("1");
         return Ok(0);
     }
     let addr=unsafe { socket_address_from(socketaddr as *const u8, socketlen,socket) }?;
@@ -373,8 +373,19 @@ pub fn syscall_send(
 ) -> SyscallRet {
     log::error!("[syscall_send]:begin send");
     log::error!("[syscall_send]:buf_prt:{}", buf as usize);
-    log::error!("[syscall_send]:remote_addr:{}", socketaddr);
     log::error!("[syscall_send]:len:{}", len);
+    log::error!("[syscall_send]:remote_addr:{}", socketaddr);
+    log::error!("[syscall_send]:socketlen is {:?}",socketlen as isize);
+    if (buf as i32)<0 {
+        return Err(Errno::EFAULT);
+    }
+    if len>64*128 {
+        return Err(Errno::EMSGSIZE);
+    }
+    if socketlen==0xffffffff {
+
+        return Err(Errno::EINVAL);
+    }
     let task = current_task();
     let file = match task.fd_table().get_file(socketfd) {
         Some(f) => f,
@@ -385,8 +396,28 @@ pub fn syscall_send(
         Some(s) => s,
         None => return Err(Errno::ENOTSOCK),
     };
+    let flags = MsgFlags::from_bits(flag as u32)
+    .ok_or(Errno::EINVAL)?; // 如果有未定义的位，直接当 EINVAL
+    log::error!("[syscall_send] flag is {:#x},flags is {:?}",flag,flags);
+    if flags.contains(MsgFlags::MSG_OOB) {
+        return Err(Errno::EOPNOTSUPP);
+    }
+    if buf as isize<=0 {
+        return Err(Errno::EFAULT);
+    }
     let mut kernel_buf:Vec<u8>=vec![0;len];
-    copy_from_user(buf,kernel_buf.as_mut_ptr(), len)?;
+    if len!=0 {
+        copy_from_user(buf,kernel_buf.as_mut_ptr(), len)?;
+    }
+
+
+    if flags.contains(MsgFlags::MSG_MORE) {
+        //设置socket中pend_send
+        socket.set_pend_send(kernel_buf.as_slice());
+        return Ok(len);
+    }
+
+    
     log::error!("[syscall_send]:buf{:?}",kernel_buf.to_ascii_lowercase());
     if socket.domain==Domain::AF_UNIX {
         // //check当前的对于unix的send,直接写入文件即可
@@ -418,36 +449,65 @@ pub fn syscall_send(
     } else {
         addr = unsafe { socket_address_from(socketaddr as *const u8, socketlen, socket) }?;
     }
-
-
-    match socket.send(kernel_buf.as_slice(), addr) {
-        Ok(size) => {
-            // copy_to_user(buf as *mut u8, kernel_buf.as_ptr(), len)?;
-            Ok(size)
-        }
-        Err(e) => {
-            log::error!("[syscall_send]:send error {:?}", e);
-            Err(e)
+    
+    //send前需要判断是否没有msg_more,pend_send是否为空
+    if socket.is_pend_send() {
+        //为空
+        match socket.send(kernel_buf.as_slice(), addr) {
+            Ok(size) => {
+                // copy_to_user(buf as *mut u8, kernel_buf.as_ptr(), len)?;
+                Ok(size)
+            }
+            Err(e) => {
+                log::error!("[syscall_send]:send error {:?}", e);
+                Err(e)
+            }
         }
     }
+    else {
+        let mut send_buf=socket.get_pend_send();
+        send_buf.extend_from_slice(kernel_buf.as_slice());
+        match socket.send(send_buf.as_slice(), addr) {
+            Ok(size) => {
+                //这里虽然结合pend_send发送但是只返回此次发送的长度
+                Ok(kernel_buf.len())
+            }
+            Err(e) => {
+                log::error!("[syscall_send]:send error {:?}", e);
+                Err(e)
+            }
+        }
+    }
+
 }
-pub fn syscall_recv(
+pub fn syscall_recvfrom(
     socketfd: usize,
     buf: *mut u8,
     len: usize,
+    flag: usize,
     socketaddr: usize,
     socketlen: usize,
-    flag: usize,
 ) -> SyscallRet {
-    log::error!("[syscall_recv]:begin recv");
+    log::error!("[syscall_recvfrom]:begin recvfrom");
     log::error!(
-        "[syscall_recv]:sockfd:{:?},len:{:?},buf {:?},socketaddr {:?},socketaddr len {:?}",
+        "[syscall_recvfrom]:sockfd:{:?},len:{:?},buf {:?},socketaddr {:?},socketaddr len {:?}",
         socketfd,
         len,
         buf,
         socketaddr,
         socketlen
     );
+    //check addr len is valid
+    if socketlen>0 {
+        let mut kernellen: Vec<i32>=vec![0;1];
+        if socketlen==0xffffffffffffffff{
+        return Err(Errno::EFAULT);
+        }
+        copy_from_user(socketlen as *const i32,kernellen.as_mut_ptr() , 1)?;
+        if kernellen[0]<0 {
+            return Err(Errno::EINVAL);
+        }
+    }
     let task = current_task();
     let file = match task.fd_table().get_file(socketfd) {
         Some(f) => f,
@@ -458,20 +518,36 @@ pub fn syscall_recv(
         Some(s) => s,
         None => return Err(Errno::ENOTSOCK),
     };
+    //check buf addr is valid
     if buf as usize ==0xffffffffffffffff {
         return Err(Errno::EFAULT);
     }
+
     //check flag is valid
-    
+    let flags = MsgFlags::from_bits(flag as u32)
+    .ok_or(Errno::EINVAL)?; // 如果有未定义的位，直接当 EINVAL
+    log::error!("[syscall_recvfrom] flag is {:#x},flags is {:?}",flag,flags);
+    // 2. 如果带了 MSG_OOB，就立刻失败
+    if flags.contains(MsgFlags::MSG_OOB) {
+
+        return Err(Errno::EINVAL);
+    }
+    // 3. 如果带了 MSG_ERRQUEUE，就检查错误队列,fake
+    if flags.contains(MsgFlags::MSG_ERRQUEUE) {
+        return Err(Errno::EAGAIN);
+    }
     let addr = socket.name()?;
-    log::error!("[syscall_recv] sockt addr is {:?}", addr);
+    log::error!("[syscall_recvfrom] sockt addr is {:?}", addr);
     // let addr=unsafe { socket_address_from(socketaddr as *const u8, socket) };
     // let buf=unsafe { core::slice::from_raw_parts_mut(buf, len) };
     let mut kernel_buf = vec![0u8; len];
     match socket.recv_from(&mut kernel_buf) {
         Ok((size, _addr)) => {
+            if size==0 {
+                return Err(Errno::EAGAIN);
+            }
             copy_to_user(buf, kernel_buf.as_ptr(), len)?;
-            log::error!("[syscall_recv]:recv buf len {}", size);
+            log::error!("[syscall_recvfrom]:recv buf len {}", size);
             return Ok(size);
         }
         Err(e) => Err(e),
@@ -590,7 +666,7 @@ pub fn syscall_getsocketopt(fd:usize,level:usize,optname:usize,optval:*mut u8,op
         core::mem::size_of::<u32>(),
     )?; 
     log::error!("[sys_getsocketopt]kernel len is {:?}",kernel_opt_len);
-    if kernel_opt_len>20 {
+    if kernel_opt_len>1000 {
         return Err(Errno::EINVAL);
     }
     if optval == 0 as *mut u8{
@@ -718,40 +794,94 @@ pub fn syscall_getpeername(socketfd: usize, socketaddr: usize, socketlen: usize)
 }
 
 //socketpair中fd在socketfds中用数组给出
-pub fn syscall_socketpair(domain:usize,sockettype:usize,_protocol:usize,socketfds:*mut usize)->SyscallRet {
-    if domain != Domain::AF_UNIX as usize {
-        log::error!("[syscall_socketpair]: domain not supported");
-        panic!()
-    }
-    log::error!("[syscall_socketpair]:begin socketpair");
-    if SocketType::try_from(sockettype & SOCKET_TYPE_MASK).is_err() {
-        // return ErrorNo::EINVAL as isize;
-        return Err(Errno::EINVAL);
+pub fn syscall_socketpair(domain:usize,sockettype:usize,protocol:usize,socketfds: *mut i32,)->SyscallRet {
+    log::error!("[syscall_socketpair]:begin socketpair,domain is {:?},sockettype is {:#x},socketfds is {:?}",domain,sockettype,socketfds);
+    let domain = match Domain::try_from(domain) {
+            Ok(d) => d,
+            Err(_) => return Err(Errno::EAFNOSUPPORT),
     };
-    let mut fd_flags=OpenFlags::empty();
-    if sockettype & SOCK_NONBLOCK != 0 {
-        fd_flags |= OpenFlags::O_NONBLOCK;
+
+    // 3) type 合法性
+    let sock_type = sockettype & SOCKET_TYPE_MASK;
+    if SocketType::try_from(sock_type).is_err() {
+        return Err(Errno::EINVAL);
     }
-    if sockettype & SOCK_CLOEXEC != 0 {
-        fd_flags |= OpenFlags::O_CLOEXEC;
-    }
-    let (fd1, fd2) = make_socketpair(sockettype,fd_flags);
+
+    // 拿到当前进程、权限信息
     let task = current_task();
-    let fd_table = task.fd_table();
-    let fd_f=FdFlags::from(&fd_flags);
-    let fd_num1=fd_table.alloc_fd(fd1, fd_f)?;
-    let fd_num2=fd_table.alloc_fd(fd2, fd_f)?;
-    log::error!("alloc fd1 {} fd2 {} as socketpair", fd_num1, fd_num2);
-    //写回
-    let kernel_fds:Vec<usize> = vec![fd_num1, fd_num2];
-    copy_to_user(socketfds, kernel_fds.as_ptr(), 2)?;
+
+        // 4) PF_INET 下按 protocol 分支返回
+    if domain == Domain::AF_INET {
+        match SocketType::try_from(sock_type).unwrap() {
+            SocketType::SOCK_RAW => {
+                return Err(Errno::EPROTONOSUPPORT);
+            }
+            SocketType::SOCK_DGRAM => {
+                // UDP (proto=17) 和 TCP-DGRAM (proto=6)
+                if protocol ==17 {
+                    return Err(Errno::EOPNOTSUPP);
+                } else {
+                    // 包括 proto==6 以及其他
+                    return Err(Errno::EPROTONOSUPPORT);
+                }
+            }
+            SocketType::SOCK_STREAM => {
+                // TCP-STREAM (proto=6) vs ICMP-STREAM (proto=1)
+                if protocol == 6 {
+                    return Err(Errno::EOPNOTSUPP);
+                } else {
+                    return Err(Errno::EPROTONOSUPPORT);
+                }
+            }
+            _ => {
+                // 其他 type，在 PF_INET 下都不支持
+                return Err(Errno::EPROTONOSUPPORT);
+            }
+        }
+    }
+
+        // 5) PF_UNIX 只支持 DGRAM/STREAM，其他 domain 也可按需要自行扩展
+        // 到这里，只有 Domain::Unix 且 type 合法的情况会继续走下去
+
+        // 6) 解析 flags 和创建 socketpair
+        let mut flags = OpenFlags::empty();
+        if sockettype & SOCK_NONBLOCK != 0 {
+            flags |= OpenFlags::O_NONBLOCK;
+        }
+        if sockettype & SOCK_CLOEXEC != 0 {
+            flags |= OpenFlags::O_CLOEXEC;
+        }
+
+        let (raw1, raw2) = make_socketpair(domain, sockettype, flags);
+        raw1.set_flags(flags);
+        raw2.set_flags(flags);
+        let fd_table = task.fd_table();
+        let fd_flags = FdFlags::from(&flags);
+        log::error!("[syscall_socketpair] fd_flags is {:?}",flags);
+        let fd1 = fd_table.alloc_fd(raw1, fd_flags)?;
+        let fd2 = fd_table.alloc_fd(raw2, fd_flags)?;
+
+        // 7) 写回用户缓冲区
+        // 一次写入两个 usize
+        log::error!("[syscall_socketpair] alloc fd fd1 {:?},fd2 {:?}",fd1,fd2);
+        let user_fds: [i32; 2] = [fd1 as i32, fd2 as i32];
+
+        // 3) 计算要拷贝的字节数：2 * sizeof(int)
+        let byte_count = core::mem::size_of::<i32>() * user_fds.len();
+
+        // 注意：需要把指针都转换成 u8 指针
+        let dst = socketfds as *mut u8;
+        let src = user_fds.as_ptr() as *const u8;
+
+        copy_to_user(dst, src, byte_count)?;
+
     Ok(0)
 }
 
-pub fn make_socketpair(sockettype:usize,pipe_flag:OpenFlags)->(Arc<Socket>,Arc<Socket>){
+pub fn make_socketpair(domain:Domain,sockettype:usize,pipe_flag:OpenFlags)->(Arc<Socket>,Arc<Socket>){
     let s_type = SocketType::try_from(sockettype & SOCKET_TYPE_MASK).unwrap();
-    let mut fd1=Socket::new(Domain::AF_UNIX, s_type);
-    let mut fd2=Socket::new(Domain::AF_UNIX, s_type);
+    let mut fd1=Socket::new(domain.clone(), s_type);
+    let mut fd2=Socket::new(domain.clone(), s_type);
     let (pipe1, pipe2) = make_pipe(pipe_flag);
     fd1.buffer = Some(pipe1);
     fd2.buffer = Some(pipe2);

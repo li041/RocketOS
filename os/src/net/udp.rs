@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-02 12:09:33
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-05 15:55:37
+ * @LastEditTime: 2025-06-07 12:25:23
  * @FilePath: /RocketOS_netperfright/os/src/net/udp.rs
  * @Description: udp socket
  * 
@@ -188,13 +188,7 @@ use super::SOCKET_SET;
                 log::error!("[udp_recv_from] recv error {:?}",e);
                 match e {
                     udp::RecvError::Exhausted => {
-                        let task = current_task();
-                        if task.exe_path().contains("netperf") {
-                            Err(Errno::EINTR)
-                        }
-                        else {
-                            Err(Errno::EAGAIN)
-                        }
+                        Err(Errno::EAGAIN)
                     },
                     udp::RecvError::Truncated => Err(Errno::EAGAIN)
                 }
@@ -210,7 +204,7 @@ use super::SOCKET_SET;
             Err(e) => {
                 log::error!("[recv_from_timeout]:recv error {:?}",e);
                 if get_time() > expire_at {
-                    Err(Errno::EAGAIN)
+                    Err(Errno::EINVAL)
                 } else {
                     Err(Errno::EAGAIN)
                 }

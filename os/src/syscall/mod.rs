@@ -25,7 +25,7 @@ use mm::{
     sys_munmap, sys_shmat, sys_shmctl, sys_shmdt, sys_shmget,
 };
 use net::{
-    syscall_accept, syscall_accept4, syscall_bind, syscall_connect, syscall_getpeername, syscall_getsocketopt, syscall_getsockname, syscall_listen, syscall_recv, syscall_recvmsg, syscall_send, syscall_sendmsg, syscall_setsocketopt, syscall_shutdown, syscall_socket, syscall_socketpair
+    syscall_accept, syscall_accept4, syscall_bind, syscall_connect, syscall_getpeername, syscall_getsocketopt, syscall_getsockname, syscall_listen, syscall_recvfrom, syscall_recvmsg, syscall_send, syscall_sendmsg, syscall_setsocketopt, syscall_shutdown, syscall_socket, syscall_socketpair
 };
 use sched::{
     sys_sched_getaffinity, sys_sched_getparam, sys_sched_getscheduler, sys_sched_setscheduler,
@@ -376,7 +376,7 @@ pub fn syscall(
         SYSCALL_ACCEPT => syscall_accept(a0, a1, a2),
         SYSCALL_ACCEPT4 => syscall_accept4(a0, a1, a2,a3),
         SYSCALL_SENDTO => syscall_send(a0, a1 as *const u8, a2, a3, a4, a5),
-        SYSCALL_RECVFROM => syscall_recv(a0, a1 as *mut u8, a2, a3, a4, a5),
+        SYSCALL_RECVFROM => syscall_recvfrom(a0, a1 as *mut u8, a2, a3, a4, a5),
         SYSCALL_SHUTDOWN => syscall_shutdown(a0, a1),
         SYSCALL_PRLIMIT => sys_prlimit64(a0, a1 as i32, a2 as *const RLimit, a3 as *mut RLimit),
         SYSCALL_GETSOCKNAME => syscall_getsockname(a0, a1, a2),
@@ -404,7 +404,7 @@ pub fn syscall(
         SYSCALL_GETSOCKOPT => syscall_getsocketopt(a0, a1, a2, a3 as *mut u8, a4),
         SYSCALL_ADJTIMEX => sys_adjtimex(a0 as *mut KernelTimex),
         SYSCALL_CLOCKADJTIME => sys_clock_adjtime(a0 as i32, a1 as *mut KernelTimex),
-        SYSCALL_SOCKETPAIR => syscall_socketpair(a0, a1, a2, a3 as *mut usize),
+        SYSCALL_SOCKETPAIR => syscall_socketpair(a0, a1, a2, a3 as *mut i32),
         SYSCALL_SENDMSG => syscall_sendmsg(a0, a1, a2),
         SYSCALL_RECVMSG => syscall_recvmsg(a0, a1, a2),
         SYSCALL_FACCESSAT2 => sys_faccessat(a0 as usize, a1 as *const u8, a2 as i32, a3 as i32),

@@ -93,7 +93,6 @@ pub fn copy_from_user<'a, T: Copy>(from: *const T, to: *mut T, n: usize) -> Sysc
         let va = VirtAddr::from(from as usize + copied);
         let page_offset = va.page_offset();
         let bytes_to_copy = (total_bytes - copied).min(PAGE_SIZE - page_offset);
-        log::error!("bytes_to_copy is {:?}",bytes_to_copy);
         unsafe {
             core::ptr::copy_nonoverlapping(
                 va.0 as *const u8,

@@ -178,7 +178,7 @@ pub fn sys_readv(fd: usize, iov_ptr: *const IoVec, iovcnt: usize) -> SyscallRet 
             iovec.base,
             ker_buf.as_ptr()
         );
-        copy_to_user(iovec.base as *mut u8, ker_buf.as_ptr(), read).unwrap();
+        copy_to_user(iovec.base as *mut u8, ker_buf.as_ptr(), read)?;
         // 如果读取失败, 则返回已经读取的字节数, 或错误码
 
         if read == 0 {

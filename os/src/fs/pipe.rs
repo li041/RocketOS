@@ -519,6 +519,7 @@ impl FileOp for Pipe {
         self.inode.clone() as Arc<dyn InodeOp>
     }
     fn get_flags(&self) -> OpenFlags {
+        log::error!("[get_flags from pipe ] flags is {:?}",self.flags);
         OpenFlags::from_bits(self.flags.load(core::sync::atomic::Ordering::Relaxed)).unwrap()
     }
 }
