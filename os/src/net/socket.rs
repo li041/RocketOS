@@ -2,14 +2,14 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-03 16:40:04
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-07 22:25:11
+ * @LastEditTime: 2025-06-09 00:50:50
  * @FilePath: /RocketOS_netperfright/os/src/net/socket.rs
  * @Description: socket file
  * 
  * Copyright (c) 2025 by peterluck2021@163.com, All Rights Reserved. 
  */
 
-use core::{cell::RefCell, f64::consts::E, net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6}, ptr::copy_nonoverlapping, sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}};
+use core::{cell::RefCell, f64::consts::E, net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6}, ptr::copy_nonoverlapping, sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}};
 
 use alloc::{string::{String, ToString}, sync::Arc, task, vec::Vec};
 use alloc::vec;
@@ -17,6 +17,7 @@ use hashbrown::Equivalent;
 use num_enum::TryFromPrimitive;
 use smoltcp::{socket::tcp::{self, State}, wire::{IpAddress, Ipv4Address}};
 use spin::{Mutex, MutexGuard};
+use universal_hash::consts::B0;
 use crate::{arch::{config::SysResult, mm::copy_to_user}, fs::{fdtable::FdFlags, file::{File, OpenFlags}, namei::path_openat, pipe::Pipe, uapi::IoVec}, net::{alg::{encode_text, AlgType}, udp::get_ephemeral_port, unix::PasswdEntry, SOCKET_SET}, task::{current_task, yield_current_task}, timer::TimeSpec};
 
 use crate::{arch::{mm::copy_from_user}, fs::file::FileOp, mm::VirtPageNum, syscall::errno::{Errno, SyscallRet}};
@@ -39,7 +40,34 @@ pub enum Domain {
     AF_NETLINK=16,
     AF_UNSPEC=512,
     AF_ALG=38,
+    AF_PACKET=17,
 }
+#[derive(TryFromPrimitive, Clone, PartialEq, Eq, Debug)]
+#[repr(usize)]
+#[allow(non_camel_case_types)]
+pub enum Protocol{
+    IP            = 0,
+    /// ICMPv4
+    ICMP          = 1,
+    /// IGMP
+    IGMP          = 2,
+    ETH_P_ALL     = 3, 
+    /// TCP（SOCK_STREAM 的默认）
+    TCP           = 6,
+    /// EGP
+    EGP           = 8,
+    /// PUP
+    PUP           = 12,
+    /// UDP（SOCK_DGRAM 的默认）
+    UDP           = 17,
+    /// IDP
+    IDP           = 22,
+    /// IPv6 路由头
+    IPv6         = 41,
+    /// ICMPv6
+    ICMPv6       = 58,
+}
+
 #[derive(TryFromPrimitive, Clone, PartialEq, Eq, Debug,Copy)]
 #[repr(usize)]
 #[allow(non_camel_case_types)]
@@ -116,6 +144,8 @@ pub struct Socket{
     //unix发送的send内容，往往用于passwd,group的euid,
     //这里如果sendfd,recvdfd为none则只需要这里读取passwd或者group中内容
     pub socket_nscdrequest:Mutex<Option<NscdRequest>>,
+    //用于setsocket中对于packet_version的设置
+    pub packet_version:AtomicU32,
 
 }
 
@@ -189,6 +219,12 @@ impl Socket {
     fn set_congestion(&self,congestion:String) {
         *self.congestion.lock()=congestion;
     }
+    fn set_pachet_version(&self,version:u32) {
+        self.packet_version.store(version, core::sync::atomic::Ordering::Release);
+    }
+    fn get_packet_version(&self)->u32 {
+        self.packet_version.load(Ordering::Acquire)
+    }
     pub fn set_pend_send(&self, buf: &[u8]) {
         // 锁住 mutex，得到 &mut Option<Vec<u8>>
         let mut guard = self.pend_send.lock();
@@ -256,9 +292,31 @@ impl Socket {
     pub fn set_ciphertext(&self,ciphertext:&[u8]){
         *self.socket_af_ciphertext.lock()=Some(ciphertext.to_vec());
     }
-    pub fn new(domain:Domain,socket_type:SocketType)->Self {
-        let inner=match socket_type {
+    fn check_socket_type(socket_type:SocketType,protocol:Protocol)->bool {
+        match socket_type {
             SocketType::SOCK_STREAM | SocketType::SOCK_SEQPACKET| SocketType::SOCK_RAW => {
+                if protocol!=Protocol::TCP&&protocol!=Protocol::IP&&protocol!=Protocol::ETH_P_ALL{
+                    return false;
+                }
+            }
+            SocketType::SOCK_DGRAM => {
+                if protocol!=Protocol::UDP && protocol!=Protocol::IP{
+                    return false;
+                }
+            },
+            _ => {
+                log::error!("unimplemented SocketType: {:?}", socket_type);
+                return false;
+            }
+        }
+        true
+    }
+    pub fn new(domain:Domain,socket_type:SocketType,protocol:Protocol)->Result<Self,Errno> {
+        if !Socket::check_socket_type(socket_type, protocol) {
+            return Err(Errno::EPROTONOSUPPORT);
+        }
+        let inner=match socket_type {
+            SocketType::SOCK_STREAM | SocketType::SOCK_SEQPACKET| SocketType::SOCK_RAW=> {
                 SocketInner::Tcp(TcpSocket::new())
             }
             SocketType::SOCK_DGRAM => SocketInner::Udp(UdpSocket::new()),
@@ -267,7 +325,7 @@ impl Socket {
                 unimplemented!();
             }
         };
-        Socket { domain: domain,
+        Ok(Socket { domain: domain,
              socket_type:socket_type, 
              inner:inner, 
              dont_route:false,
@@ -289,7 +347,8 @@ impl Socket {
             socket_peer_file_unix:Mutex::new(None),
             socket_ucred:Mutex::new(None),
             socket_peer_ucred:Mutex::new(None),
-        }
+            packet_version:AtomicU32::new(0),
+        })
            
     }
     pub fn set_nonblocking(&self,block:bool) {
@@ -519,6 +578,7 @@ impl Socket {
                         socket_peer_file_unix:Mutex::new(None),
                         socket_ucred:Mutex::new(None),
                         socket_peer_ucred:Mutex::new(None),
+                        packet_version:AtomicU32::new(0),
                         
                     },from_ipendpoint_to_socketaddr(remote_addr)))
                 }
@@ -566,6 +626,7 @@ impl Socket {
             socket_peer_file_unix:Mutex::new(None),
             socket_ucred:Mutex::new(None),
             socket_peer_ucred:Mutex::new(None),
+            packet_version:AtomicU32::new(0),
             
         })
     }
@@ -644,6 +705,7 @@ impl Socket {
             //todo
             socket_ucred:Mutex::new(self.socket_ucred.lock().clone()),
             socket_peer_ucred:Mutex::new(self.socket_peer_ucred.lock().clone()),
+            packet_version:AtomicU32::new(0),
         })
     }
 
@@ -1025,7 +1087,7 @@ pub unsafe fn socket_address_from(addr: *const u8,len:usize, socket: &Socket) ->
     }
     match socket.domain {
             //i这里的unix,af_alg无用
-        Domain::AF_INET | Domain::AF_UNIX|Domain::AF_NETLINK|Domain::AF_UNSPEC |Domain::AF_ALG=> {
+        Domain::AF_INET | Domain::AF_UNIX|Domain::AF_NETLINK|Domain::AF_UNSPEC |Domain::AF_ALG|Domain::AF_PACKET=> {
             let port = u16::from_be_bytes([
                 kernel_addr_from_user[2],
                 kernel_addr_from_user[3],
@@ -1479,12 +1541,15 @@ impl FileOp for Socket {
 ///配置套接字选项
 #[derive(TryFromPrimitive,Debug)]
 #[repr(usize)]
+#[allow(non_camel_case_types)]
 pub enum SocketOptionLevel {
     IP=0,
     Socket=1,
     Tcp=6,
     IPv6=41,
     SOL_ALG=279,
+    SOL_PACKET=263,
+
 }
 
 ///为每个level建立一个配置enum
@@ -1516,9 +1581,11 @@ pub enum SocketOption {
     SO_SNDBUF = 7,
     SO_RCVBUF = 8,
     SO_KEEPALIVE = 9,
+    SO_OOBINLINE =10,
     SO_RCVTIMEO = 20,
     SO_SNDTIMEO = 21,
-    SO_PEERCRED=17
+    SO_PEERCRED=17,
+    SO_SNDBUFFORCE=32,
 }
 #[derive(TryFromPrimitive, PartialEq)]
 #[repr(usize)]
@@ -1596,92 +1663,105 @@ impl SocketOption {
     pub fn set(&self,socket: &Socket,opt:&[u8])->SyscallRet{
         match self {
             SocketOption::SO_REUSEADDR => {
-                        //设置是否重复使用地址
-                        if opt.len()<4 {
-                            panic!("[socketoption_set]:the opt len is not enough");
-                            //一个地址长度都不够
-                            // return None;
-                        }
-                        let addr=i32::from_ne_bytes(<[u8;4]>::try_from(&opt[0..4]).unwrap());
-                        log::error!("[set_reuse_addr] reuse addr is {:?}",addr);
-                        socket.set_reuse_addr(addr!=0);
-                        Ok(0)
-                    },
+                                        //设置是否重复使用地址
+                                        if opt.len()<4 {
+                                            panic!("[socketoption_set]:the opt len is not enough");
+                                            //一个地址长度都不够
+                                            // return None;
+                                        }
+                                        let addr=i32::from_ne_bytes(<[u8;4]>::try_from(&opt[0..4]).unwrap());
+                                        log::error!("[set_reuse_addr] reuse addr is {:?}",addr);
+                                        socket.set_reuse_addr(addr!=0);
+                                        Ok(0)
+                                    },
             SocketOption::SO_ERROR => {
-                        panic!("can't set SO_ERROR");
-                    },
+                                        panic!("can't set SO_ERROR");
+                                    },
             SocketOption::SO_DONTROUTE => {
-                        if opt.len()<4 {
-                            panic!("[socketoption_set]:the opt len is not enough");
-                        }
-                        let addr=i32::from_ne_bytes(<[u8;4]>::try_from(&opt[0..4]).unwrap());
-                        socket.set_reuse_addr(addr != 0);
-                        // socket.reuse_addr = opt_value != 0;
-                        Ok(0)
-                    },
+                                        if opt.len()<4 {
+                                            panic!("[socketoption_set]:the opt len is not enough");
+                                        }
+                                        let addr=i32::from_ne_bytes(<[u8;4]>::try_from(&opt[0..4]).unwrap());
+                                        socket.set_reuse_addr(addr != 0);
+                                        // socket.reuse_addr = opt_value != 0;
+                                        Ok(0)
+                                    },
             SocketOption::SO_SNDBUF =>{
-                        //设置最大发送报文大小
-                        if opt.len()<4 {
-                            panic!("[socketoption_set]:the opt len is not enough");
-                        }
-                        let len=i32::from_ne_bytes(<[u8; 4]>::try_from(&opt[0..4]).unwrap());
-                        socket.set_send_buf_size(len as u64);
-                        // socket.reuse_addr = opt_value != 0;
-                        Ok(0)
-                    },
+                                        //设置最大发送报文大小
+                                        if opt.len()<4 {
+                                            panic!("[socketoption_set]:the opt len is not enough");
+                                        }
+                                        let len=i32::from_ne_bytes(<[u8; 4]>::try_from(&opt[0..4]).unwrap());
+                                        socket.set_send_buf_size(len as u64);
+                                        // socket.reuse_addr = opt_value != 0;
+                                        Ok(0)
+                                    },
             SocketOption::SO_RCVBUF => {
-                        if opt.len()<4 {
-                            panic!("[socketoption_set]:the opt len is not enough");
-                        }
-                        let len=u32::from_ne_bytes(<[u8;4]>::try_from(&opt[0..4]).unwrap());
-                        socket.set_recv_buf_size(len as u64);
-                        // socket.reuse_addr = opt_value != 0;
-                        Ok(0)
-                    },
+                                        if opt.len()<4 {
+                                            panic!("[socketoption_set]:the opt len is not enough");
+                                        }
+                                        let len=u32::from_ne_bytes(<[u8;4]>::try_from(&opt[0..4]).unwrap());
+                                        socket.set_recv_buf_size(len as u64);
+                                        // socket.reuse_addr = opt_value != 0;
+                                        Ok(0)
+                                    },
             SocketOption::SO_KEEPALIVE => {
-                        if opt.len() < 4 {
-                            panic!("can't read a int from socket opt value");
-                        }
-                        let len=u32::from_ne_bytes(<[u8;4]>::try_from(&opt[0..4]).unwrap());
-                        let interval=if len!=0 {
-                            Some(smoltcp::time::Duration::from_secs(45))
-                        }else{
-                            None
-                        };
-                        match &socket.inner {
-                            SocketInner::Tcp(s) => s.with_socket_mut(|s| match s {
-                                Some(s) => s.set_keep_alive(interval),
-                                None => log::warn!(
-                                    "[setsockopt()] set keep-alive for tcp socket not created, ignored"
-                                ),
-                            }),
-                            SocketInner::Udp(udp_socket) => {
-                                panic!("current not support udp keepalive");
-                            },
-                        }
-                        socket.set_recv_buf_size(len as u64);
-                        Ok(0)
-                    },
+                                        if opt.len() < 4 {
+                                            panic!("can't read a int from socket opt value");
+                                        }
+                                        let len=u32::from_ne_bytes(<[u8;4]>::try_from(&opt[0..4]).unwrap());
+                                        let interval=if len!=0 {
+                                            Some(smoltcp::time::Duration::from_secs(45))
+                                        }else{
+                                            None
+                                        };
+                                        match &socket.inner {
+                                            SocketInner::Tcp(s) => s.with_socket_mut(|s| match s {
+                                                Some(s) => s.set_keep_alive(interval),
+                                                None => log::warn!(
+                                                    "[setsockopt()] set keep-alive for tcp socket not created, ignored"
+                                                ),
+                                            }),
+                                            SocketInner::Udp(udp_socket) => {
+                                                panic!("current not support udp keepalive");
+                                            },
+                                        }
+                                        socket.set_recv_buf_size(len as u64);
+                                        Ok(0)
+                                    },
             SocketOption::SO_RCVTIMEO => {
-                        if opt.len()!=size_of::<TimeSpec>(){
-                            panic!("can't read a timeval from socket opt value");
-                        }
-                        // println!("[setsocketoption]set socket option so recvtimeo");
-                        let timeout=unsafe { *(opt.as_ptr() as *const TimeSpec) };
-                        socket.set_recv_timeout(if timeout.nsec==0&&timeout.sec==0 {
-                            None
-                        }else {
-                            Some(timeout)
-                        });
+                                        if opt.len()!=size_of::<TimeSpec>(){
+                                            panic!("can't read a timeval from socket opt value");
+                                        }
+                                        // println!("[setsocketoption]set socket option so recvtimeo");
+                                        let timeout=unsafe { *(opt.as_ptr() as *const TimeSpec) };
+                                        socket.set_recv_timeout(if timeout.nsec==0&&timeout.sec==0 {
+                                            None
+                                        }else {
+                                            Some(timeout)
+                                        });
                 
-                        Ok(0)
+                                        Ok(0)
                 
-                    },
+                                    },
             SocketOption::SO_SNDTIMEO => {
-                        panic!("can't set SO_ERROR");
-                    },
+                                        panic!("can't set SO_ERROR");
+                                    },
             SocketOption::SO_PEERCRED => {
-                //todo,getsockopt里面没有设置这个
+                                //todo,getsockopt里面没有设置这个
+                                Ok(0)
+                            },
+            SocketOption::SO_OOBINLINE => {
+                        Ok(0)
+                    },
+            SocketOption::SO_SNDBUFFORCE =>{
+                let raw = u32::from_ne_bytes(opt[0..4].try_into().unwrap());
+                let val_i32 = if raw > i32::MAX as u32 {
+                    i32::MAX
+                } else {
+                    raw as i32
+                };
+                socket.set_send_buf_size(val_i32 as u64);
                 Ok(0)
             },
         }
@@ -1706,7 +1786,7 @@ impl SocketOption {
                             copy_to_user(opt_value, &value.to_ne_bytes() as *const u8 , 4);
                             *opt_len = 4;
                         }
-                    }
+                    },
             SocketOption::SO_DONTROUTE => {
                         if buf_len < 4 {
                             panic!("can't write a int to socket opt value");
@@ -1721,7 +1801,7 @@ impl SocketOption {
                             copy_to_user(opt_value, &size.to_ne_bytes() as *const u8 , 4);
                             *opt_len = 4;
                         }
-                    }
+                    },
             SocketOption::SO_SNDBUF => {
                         // if buf_len < 4 {
                         //     panic!("can't write a int to socket opt value");
@@ -1736,7 +1816,10 @@ impl SocketOption {
                             copy_nonoverlapping(&size.to_ne_bytes() as *const u8, opt_value, 4);
                             *opt_len = 4;
                         }
-                    }
+                    },
+            SocketOption::SO_SNDBUFFORCE=>{
+                
+            }
             SocketOption::SO_RCVBUF => {
                         // if buf_len < 4 {
                         //     panic!("can't write a int to socket opt value");
@@ -1751,7 +1834,7 @@ impl SocketOption {
                             copy_to_user(opt_value, &size.to_ne_bytes() as *const u8 , 4);
                             *opt_len = 4;
                         }
-                    }
+                    },
             SocketOption::SO_KEEPALIVE => {
                         if buf_len < 4 {
                             panic!("can't write a int to socket opt value");
@@ -1779,7 +1862,7 @@ impl SocketOption {
                             copy_to_user(opt_value, &keep_alive.to_ne_bytes() as *const u8 , 4);
                             *opt_len = 4;
                         }
-                    }
+                    },
             SocketOption::SO_RCVTIMEO => {
                         if buf_len < size_of::<TimeSpec>() {
                             panic!("can't write a timeval to socket opt value");
@@ -1807,12 +1890,12 @@ impl SocketOption {
 
                             *opt_len = size_of::<TimeSpec>() as u32;
                         }
-                    }
+                    },
             SocketOption::SO_ERROR => {
-                    }
+                    },
             SocketOption::SO_SNDTIMEO => {
                         panic!("unimplemented!")
-                    }
+                    },
             SocketOption::SO_PEERCRED => {
                 // 首先准备好 UCred 结构体的大小
                 let needed = core::mem::size_of::<UCred>(); // 12 字节 (i32 + u32 + u32)
@@ -1853,7 +1936,10 @@ impl SocketOption {
                     // 最后把写入的长度写回给用户
                     *opt_len = needed as u32;
                 }
-            }
+            },
+            SocketOption::SO_OOBINLINE=>{
+
+            },
         }
     }
 }
@@ -2000,4 +2086,87 @@ pub struct MessageHeaderRaw {
     pub control:   *mut u8,   // 控制消息 (cmsg) 缓冲区
     pub control_len: u32,     // control 缓冲区的大小
     pub flags:     i32,       // recvmsg/sendmsg 时的 flags
+}
+
+#[derive(TryFromPrimitive,Debug)]
+#[repr(usize)]
+#[allow(non_camel_case_types)]
+///不同 TPACKET（Packet mmap）接口版本。
+pub enum SOL_PACKET_Option {
+    PACKET_RX_RING=5,
+    PACKET_VERSION=10,
+    PACKET_RESERVE=12,
+    PACKET_VNET_HDR=15,
+    PACKET_FANOUT=18,
+    PACKET_FANOUT_ROLLOVER=3,
+    TPACKET_V3=2
+}
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct TpacketReq3 {
+    tp_block_size:      u32,
+    tp_block_nr:        u32,
+    tp_frame_size:      u32,
+    tp_frame_nr:        u32,
+    tp_retire_blk_tov:  u32,
+    tp_sizeof_priv:     u32,
+    tp_feature_req_word:u32,
+}
+
+impl SOL_PACKET_Option {
+
+    //用户的optval已经复制到内核opt
+    pub fn set(&self,socket:&Socket,opt:&[u8])->SyscallRet {
+        match self {
+            SOL_PACKET_Option::PACKET_RX_RING => {
+                // 1) 数据至少要能完整包含一个 tpacket_req3
+                let expect = core::mem::size_of::<TpacketReq3>();
+                if opt.len() < expect {
+                    return Err(Errno::EINVAL);
+                }
+
+                // 2) 直接按指针重解释（用户态已 copy_from_user 到内核缓冲区）
+                let req: &TpacketReq3 = unsafe {
+                    &*(opt.as_ptr() as *const TpacketReq3)
+                };
+
+                // 3) 核心检查：tp_sizeof_priv 必须严格小于 tp_block_size
+                if req.tp_sizeof_priv >= req.tp_block_size {
+                    return Err(Errno::EINVAL);
+                }
+
+                // 4) 通过的话，保存或后续创建 mmap 环形缓冲区即可
+                // socket.packet_ring_req3 = Some(*req);
+                Ok(0)
+            },
+            SOL_PACKET_Option::PACKET_VERSION => {
+                let version = i32::from_ne_bytes(opt.try_into().unwrap());
+                // 3) 只支持 V1、V2、V3
+                const TPACKET_V1: i32 = 0;
+                const TPACKET_V2: i32 = 1;
+                const TPACKET_V3: i32 = 2;
+                if version < TPACKET_V1 || version > TPACKET_V3 {
+                    return Err(Errno::EINVAL);
+                }
+                socket.set_pachet_version(version as u32);
+                Ok(0)
+            },
+            SOL_PACKET_Option::PACKET_RESERVE => {
+                Ok(0)
+            },
+            SOL_PACKET_Option::PACKET_VNET_HDR => {
+                Ok(0)
+            },
+            SOL_PACKET_Option::PACKET_FANOUT => {
+                Ok(0)
+            },
+            SOL_PACKET_Option::PACKET_FANOUT_ROLLOVER => {
+                Ok(0)
+            },
+            SOL_PACKET_Option::TPACKET_V3 => {
+                Ok(0)
+            },
+        }
+    }
+
 }

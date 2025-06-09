@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-03-30 16:26:05
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-03 17:02:17
+ * @LastEditTime: 2025-06-09 16:39:18
  * @FilePath: /RocketOS_netperfright/os/src/net/mod.rs
  * @Description: net mod for interface wrapper,socketset 
  * 
@@ -108,6 +108,7 @@ pub fn init(net_device:Option<VirtioNetDevice<32,HalImpl,MmioTransport>>) {
     //     // LOOPBACK_DEV.init_once(Mutex::new(local_device));
     // }
 }
+#[cfg(target_arch = "loongarch64")]
 pub fn init_la<T: Transport+'static>(net_device:Option<VirtioNetDevice<32,HalImpl,T>>) {
     //初始化网卡
     SOCKET_SET.init_once(SocketSetWrapper::new());

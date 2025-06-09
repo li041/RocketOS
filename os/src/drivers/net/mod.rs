@@ -110,7 +110,7 @@ pub fn init_net_device(dtb_addr: usize) {
     }
     log::error!("not find a net device");
     // crate::net::init(None);
-    // ///能到这里必然不是virtionetdevice
+    // ///能到这里必然不是virtio netdevice
     // return None;
 }
 #[cfg(target_arch = "loongarch64")]

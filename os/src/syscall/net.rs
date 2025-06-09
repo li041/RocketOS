@@ -2,21 +2,21 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-02 23:04:54
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-08 16:59:15
+ * @LastEditTime: 2025-06-09 00:15:52
  * @FilePath: /RocketOS_netperfright/os/src/syscall/net.rs
  * @Description: net syscall
  *
  * Copyright (c) 2025 by peterluck2021@163.com, All Rights Reserved.
  */
 
-use core::{fmt::Result, net::{IpAddr, Ipv4Addr, SocketAddr}, sync::atomic::{AtomicUsize, Ordering}};
+use core::{net::{IpAddr, Ipv4Addr, SocketAddr}, sync::atomic::{AtomicUsize, Ordering}};
 use alloc::{sync::Arc, task, vec::Vec};
 use alloc::vec;
 use bitflags::Flags;
 use hashbrown::Equivalent;
 use num_enum::TryFromPrimitive;
 use smoltcp::wire::IpEndpoint;
-use crate::{arch::mm::{copy_from_user, copy_to_user}, fs::{fdtable::FdFlags, file::{FileOp, OpenFlags}, namei::path_openat, pipe::{self, make_pipe}, uapi::IoVec}, net::{addr::{from_ipendpoint_to_socketaddr, LOOP_BACK_IP}, alg::encode, socket::{check_alg, socket_address_from, socket_address_from_af_alg, socket_address_from_unix, socket_address_to, socket_address_tounix, ALG_Option, Domain, IpOption, Ipv6Option, MessageHeaderRaw, Socket, SocketOption, SocketOptionLevel, SocketType, TcpSocketOption, SOCK_CLOEXEC, SOCK_NONBLOCK}}, syscall::task::{sys_getresgid, sys_nanosleep}, task::{current_task, yield_current_task}};
+use crate::{arch::mm::{copy_from_user, copy_to_user}, fs::{fdtable::FdFlags, file::{FileOp, OpenFlags}, namei::path_openat, pipe::{self, make_pipe}, uapi::IoVec}, net::{addr::{from_ipendpoint_to_socketaddr, LOOP_BACK_IP}, alg::encode, socket::{check_alg, socket_address_from, socket_address_from_af_alg, socket_address_from_unix, socket_address_to, socket_address_tounix, ALG_Option, Domain, IpOption, Ipv6Option, MessageHeaderRaw, Protocol, SOL_PACKET_Option, Socket, SocketOption, SocketOptionLevel, SocketType, TcpSocketOption, SOCK_CLOEXEC, SOCK_NONBLOCK}}, syscall::task::{sys_getresgid, sys_nanosleep}, task::{current_task, yield_current_task}};
 pub const SOCKET_TYPE_MASK: usize = 0xFF;
 use super::errno::{Errno, SyscallRet};
 bitflags::bitflags! {
@@ -52,18 +52,35 @@ bitflags::bitflags! {
  /// flag:usize sockettype
  /// protocol:协议
 pub fn syscall_socket(domain:usize,sockettype:usize,protocol:usize)->SyscallRet{
-    log::error!("[syscall_socket]:domain:{} sockettype:{}",domain,sockettype & 0xFF);
+    log::error!("[syscall_socket]:domain:{} sockettype:{},protocol {:?}",domain,sockettype & 0xFF,protocol);
     let domain=match Domain::try_from(domain) {
         Ok(res) => res,
-        Err(e) => return Err(Errno::EAFNOSUPPORT),
+        Err(_e) => return Err(Errno::EAFNOSUPPORT),
     };
     let s_type = match SocketType::try_from(sockettype & 0xFF) {
         Ok(res) => res,
-        Err(e) => {
+        Err(_e) => {
             return Err(Errno::EINVAL);
         }
     };
-    let  socket=Arc::new(Socket::new(domain, s_type));
+    let proto_field = if domain == Domain::AF_PACKET {
+        // protocol 是 u32/u16 宽度，由你 syscall 接口定义决定
+        // 这里假设它 fits in u16
+        u16::from_be(protocol as u16) as usize
+    } else {
+        protocol
+    };
+    let proto=match Protocol::try_from(proto_field) {
+        Ok(res) => res,
+        Err(_e) => {
+            return Err(Errno::EINVAL);
+        }
+    };
+    //socket raw must be root
+    if s_type==SocketType::SOCK_RAW && domain!=Domain::AF_PACKET {
+        return Err(Errno::EPROTONOSUPPORT);
+    }
+    let socket=Arc::new(Socket::new(domain, s_type,proto)?);
     //SOCK_NONBLOCK=0X800,按照flag设计
     socket.set_nonblocking((sockettype & SOCK_NONBLOCK) != 0);
     let task = current_task();
@@ -601,10 +618,13 @@ pub fn syscall_setsocketopt(
     log::error!("[syscall_setsocketopt]:begin set socket opt");
     log::error!("[syscall_setsocketopt]:fd:{},level:{},optname:{},optval :{:?},optlen:{}",fd,level,optname,optval,optlen);
     let Ok(level) = SocketOptionLevel::try_from(level) else {
-        log::error!("[setsockopt()] level {level} not supported");
-        unimplemented!();
+        log::error!("[setsockopt] level {level} not supported");
+        return Err(Errno::ENOPROTOOPT);
     };
 
+    if optval.is_null() {
+        return Err(Errno::EFAULT);
+    }
     let curr = current_task();
 
     let file = match curr.fd_table().get_file(fd) {
@@ -623,34 +643,49 @@ pub fn syscall_setsocketopt(
     }
     let mut kernel_opt: Vec<u8> = vec![0; optlen];
 
-    copy_from_user(optval, kernel_opt.as_mut_ptr(), optlen as usize);
+    copy_from_user(optval, kernel_opt.as_mut_ptr(), optlen as usize)?;
 
     match level {
-        //TODO setopt error
         SocketOptionLevel::IP => {
-            let option = IpOption::try_from(optname).unwrap();
-            option.set(socket, kernel_opt.as_slice())
-            // return Ok(0);
-        }
+                        let Ok(option) = IpOption::try_from(optname) else {
+                            return Err(Errno::ENOPROTOOPT);
+                };
+                option.set(socket, kernel_opt.as_slice())
+                // return Ok(0);
+            }
         SocketOptionLevel::Socket => {
-            let option = SocketOption::try_from(optname).unwrap();
-            option.set(socket, kernel_opt.as_slice())
-            // return Ok(0);
-        }
+                let Ok(option) = SocketOption::try_from(optname) else {
+                    return Err(Errno::ENOPROTOOPT);
+                };
+                option.set(socket, kernel_opt.as_slice())
+                // return Ok(0);
+            }
         SocketOptionLevel::Tcp => {
-            let option = TcpSocketOption::try_from(optname).unwrap();
-            option.set(socket, kernel_opt.as_slice())
-            // return Ok(0);
-        }
+                let Ok(option) = TcpSocketOption::try_from(optname) else {
+                    return Err(Errno::ENOPROTOOPT);
+                };
+                option.set(socket, kernel_opt.as_slice())
+                // return Ok(0);
+            }
         SocketOptionLevel::IPv6 => {
-            let option = Ipv6Option::try_from(optname).unwrap();
-            option.set(socket, kernel_opt.as_slice())
-            // return Ok(0);
-        },
+                let Ok(option) = Ipv6Option::try_from(optname) else {
+                    return Err(Errno::ENOPROTOOPT);
+                };
+                option.set(socket, kernel_opt.as_slice())
+                // return Ok(0);
+            },
         SocketOptionLevel::SOL_ALG=>{
-            let option=ALG_Option::try_from(optname).unwrap();
-            option.set(socket, kernel_opt.as_slice())
-        }
+                let Ok(option)=ALG_Option::try_from(optname) else {
+                    return Err(Errno::ENOPROTOOPT);
+                };
+                option.set(socket, kernel_opt.as_slice())
+            }
+        SocketOptionLevel::SOL_PACKET => {
+                let Ok(option)=SOL_PACKET_Option::try_from(optname) else {
+                    return Err(Errno::ENOPROTOOPT);
+                };
+                option.set(socket, kernel_opt.as_slice())
+        },
     }
 }
 
@@ -697,7 +732,9 @@ pub fn syscall_getsocketopt(fd:usize,level:usize,optname:usize,optval:*mut u8,op
             return Ok(0);
         }
         SocketOptionLevel::Socket => {
-            let option=SocketOption::try_from(optname).unwrap();
+            let Ok(option)=SocketOption::try_from(optname) else {
+                return Err(Errno::ENOPROTOOPT);
+            };
             #[cfg(target_arch = "riscv64")]
             option.get(socket, optval, optlen as *mut u32);
             #[cfg(target_arch = "loongarch64")]
@@ -705,7 +742,9 @@ pub fn syscall_getsocketopt(fd:usize,level:usize,optname:usize,optval:*mut u8,op
             return Ok(0);
         }
         SocketOptionLevel::Tcp => {
-            let option =TcpSocketOption::try_from(optname).map_err(|_err| Errno::ENOPROTOOPT)?;
+            let Ok(option) =TcpSocketOption::try_from(optname) else {
+                return Err(Errno::ENOPROTOOPT);
+            };
             #[cfg(target_arch = "riscv64")]
             option.get(socket, optval, optlen as *mut u32);
             #[cfg(target_arch = "loongarch64")]
@@ -718,7 +757,10 @@ pub fn syscall_getsocketopt(fd:usize,level:usize,optname:usize,optval:*mut u8,op
             return Ok(0);
         },
         SocketOptionLevel::SOL_ALG=>{
-            unimplemented!()
+            return Ok(0);
+        },
+        SocketOptionLevel::SOL_PACKET=>{
+            return Ok(0);
         }
     }
 }
@@ -795,7 +837,7 @@ pub fn syscall_getpeername(socketfd: usize, socketaddr: usize, socketlen: usize)
 
 //socketpair中fd在socketfds中用数组给出
 pub fn syscall_socketpair(domain:usize,sockettype:usize,protocol:usize,socketfds: *mut i32,)->SyscallRet {
-    log::error!("[syscall_socketpair]:begin socketpair,domain is {:?},sockettype is {:#x},socketfds is {:?}",domain,sockettype,socketfds);
+    log::error!("[syscall_socketpair]:begin socketpair,domain is {:?},sockettype is {:#x},protocol is {:?},socketfds is {:?}",domain,sockettype,protocol,socketfds);
     let domain = match Domain::try_from(domain) {
             Ok(d) => d,
             Err(_) => return Err(Errno::EAFNOSUPPORT),
@@ -806,86 +848,68 @@ pub fn syscall_socketpair(domain:usize,sockettype:usize,protocol:usize,socketfds
     if SocketType::try_from(sock_type).is_err() {
         return Err(Errno::EINVAL);
     }
-
-    // 拿到当前进程、权限信息
     let task = current_task();
+    // 5) PF_UNIX 只支持 DGRAM/STREAM，其他 domain 也可按需要自行扩展
+    // 到这里，只有 Domain::Unix 且 type 合法的情况会继续走下去
 
-        // 4) PF_INET 下按 protocol 分支返回
-    if domain == Domain::AF_INET {
-        match SocketType::try_from(sock_type).unwrap() {
-            SocketType::SOCK_RAW => {
-                return Err(Errno::EPROTONOSUPPORT);
-            }
-            SocketType::SOCK_DGRAM => {
-                // UDP (proto=17) 和 TCP-DGRAM (proto=6)
-                if protocol ==17 {
-                    return Err(Errno::EOPNOTSUPP);
-                } else {
-                    // 包括 proto==6 以及其他
-                    return Err(Errno::EPROTONOSUPPORT);
-                }
-            }
-            SocketType::SOCK_STREAM => {
-                // TCP-STREAM (proto=6) vs ICMP-STREAM (proto=1)
-                if protocol == 6 {
-                    return Err(Errno::EOPNOTSUPP);
-                } else {
-                    return Err(Errno::EPROTONOSUPPORT);
-                }
-            }
-            _ => {
-                // 其他 type，在 PF_INET 下都不支持
-                return Err(Errno::EPROTONOSUPPORT);
-            }
-        }
+    // 6) 解析 flags 和创建 socketpair
+    let mut flags = OpenFlags::empty();
+    if sockettype & SOCK_NONBLOCK != 0 {
+        flags |= OpenFlags::O_NONBLOCK;
     }
-
-        // 5) PF_UNIX 只支持 DGRAM/STREAM，其他 domain 也可按需要自行扩展
-        // 到这里，只有 Domain::Unix 且 type 合法的情况会继续走下去
-
-        // 6) 解析 flags 和创建 socketpair
-        let mut flags = OpenFlags::empty();
-        if sockettype & SOCK_NONBLOCK != 0 {
-            flags |= OpenFlags::O_NONBLOCK;
+    if sockettype & SOCK_CLOEXEC != 0 {
+        flags |= OpenFlags::O_CLOEXEC;
+    }
+    let proto=match Protocol::try_from(protocol) {
+        Ok(res) => res,
+        Err(e) => {
+            return Err(Errno::EINVAL);
         }
-        if sockettype & SOCK_CLOEXEC != 0 {
-            flags |= OpenFlags::O_CLOEXEC;
-        }
+    };
+    let (raw1, raw2) = make_socketpair(domain, sockettype, flags,proto)?;
+    raw1.set_flags(flags);
+    raw2.set_flags(flags);
+    let fd_table = task.fd_table();
+    let fd_flags = FdFlags::from(&flags);
+    log::error!("[syscall_socketpair] fd_flags is {:?}",flags);
+    let fd1 = fd_table.alloc_fd(raw1, fd_flags)?;
+    let fd2 = fd_table.alloc_fd(raw2, fd_flags)?;
 
-        let (raw1, raw2) = make_socketpair(domain, sockettype, flags);
-        raw1.set_flags(flags);
-        raw2.set_flags(flags);
-        let fd_table = task.fd_table();
-        let fd_flags = FdFlags::from(&flags);
-        log::error!("[syscall_socketpair] fd_flags is {:?}",flags);
-        let fd1 = fd_table.alloc_fd(raw1, fd_flags)?;
-        let fd2 = fd_table.alloc_fd(raw2, fd_flags)?;
+    // 7) 写回用户缓冲区
+    // 一次写入两个 usize
+    log::error!("[syscall_socketpair] alloc fd fd1 {:?},fd2 {:?}",fd1,fd2);
+    let user_fds: [i32; 2] = [fd1 as i32, fd2 as i32];
 
-        // 7) 写回用户缓冲区
-        // 一次写入两个 usize
-        log::error!("[syscall_socketpair] alloc fd fd1 {:?},fd2 {:?}",fd1,fd2);
-        let user_fds: [i32; 2] = [fd1 as i32, fd2 as i32];
+    // 3) 计算要拷贝的字节数：2 * sizeof(int)
+    let byte_count = core::mem::size_of::<i32>() * user_fds.len();
 
-        // 3) 计算要拷贝的字节数：2 * sizeof(int)
-        let byte_count = core::mem::size_of::<i32>() * user_fds.len();
+    // 注意：需要把指针都转换成 u8 指针
+    let dst = socketfds as *mut u8;
+    let src = user_fds.as_ptr() as *const u8;
 
-        // 注意：需要把指针都转换成 u8 指针
-        let dst = socketfds as *mut u8;
-        let src = user_fds.as_ptr() as *const u8;
-
-        copy_to_user(dst, src, byte_count)?;
+    copy_to_user(dst, src, byte_count)?;
 
     Ok(0)
 }
 
-pub fn make_socketpair(domain:Domain,sockettype:usize,pipe_flag:OpenFlags)->(Arc<Socket>,Arc<Socket>){
+pub fn make_socketpair(domain:Domain,sockettype:usize,pipe_flag:OpenFlags,protocol:Protocol)->Result<(Arc<Socket>,Arc<Socket>),Errno>{
     let s_type = SocketType::try_from(sockettype & SOCKET_TYPE_MASK).unwrap();
-    let mut fd1=Socket::new(domain.clone(), s_type);
-    let mut fd2=Socket::new(domain.clone(), s_type);
+    if s_type==SocketType::SOCK_RAW {
+        return Err(Errno::EPROTONOSUPPORT);
+    }
+    //这些正常的内容socket不能进入socketpair创建，必须在socket::new之前判断处理
+    if s_type==SocketType::SOCK_DGRAM&&protocol==Protocol::UDP {
+        return Err(Errno::EOPNOTSUPP);
+    }
+    if s_type==SocketType::SOCK_STREAM&&protocol==Protocol::TCP{
+        return Err(Errno::EOPNOTSUPP);
+    }
+    let mut fd1=Socket::new(domain.clone(), s_type,protocol.clone())?;
+    let mut fd2=Socket::new(domain.clone(), s_type,protocol.clone())?;
     let (pipe1, pipe2) = make_pipe(pipe_flag);
     fd1.buffer = Some(pipe1);
     fd2.buffer = Some(pipe2);
-    (Arc::new(fd1), Arc::new(fd2))
+    Ok((Arc::new(fd1), Arc::new(fd2)))
 }
 pub fn syscall_sendmsg(socketfd:usize,msg_ptr:usize,flag:usize)->SyscallRet {
     log::error!("[syscall_sendmsg]: begin sendmsg");
