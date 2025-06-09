@@ -148,7 +148,8 @@ pub fn handle_signal() {
                 let siginfo_sp = user_sp; // siginfo_sp：塞入siginfo后的用户栈位置
                 trap_cx.set_a1(siginfo_sp);
                 log::info!("[handle_signal] a1 = {:#x}", siginfo_sp);
-                let linux_siginfo = LinuxSigInfo::new(sig.raw(), sig_info.code);
+                let sender_pid = sig_info.fields.parse_pid().unwrap();
+                let linux_siginfo = LinuxSigInfo::new(sig.raw(), sig_info.code, sender_pid as i32);
 
                 // 创建ucontext
                 user_sp = user_sp - core::mem::size_of::<UContext>();

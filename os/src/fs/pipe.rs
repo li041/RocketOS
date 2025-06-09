@@ -441,7 +441,7 @@ impl FileOp for Pipe {
                     SigInfo::new(
                         Sig::SIGPIPE.raw(),
                         SigInfo::KERNEL,
-                        crate::signal::SiField::None,
+                        crate::signal::SiField::Kill { tid: current_task().tid() },
                     ),
                     false,
                 );

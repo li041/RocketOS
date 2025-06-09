@@ -13,7 +13,7 @@ use core::cmp;
 
 use super::{flags::*, queue::FUTEXQUEUES};
 use crate::{
-    arch::{config::PAGE_SIZE_BITS, mm::copy_from_user},
+    arch::{config::{PAGE_SIZE_BITS, USER_MAX}, mm::copy_from_user},
     futex::{
         self,
         queue::{display_futexqueues, futex_hash},
@@ -420,7 +420,7 @@ pub fn futex_cmp_requeue(
     val3: u32,
 ) -> SyscallRet {
     // 对应的是 val或val2 为-1的情况
-    if nr_waken == 4294967295 || nr_requeue == 4294967295 {
+    if nr_waken >= USER_MAX as u32 || nr_requeue == USER_MAX as u32 {
         return Err(Errno::EINVAL);
     }
 
@@ -433,6 +433,8 @@ pub fn futex_cmp_requeue(
     let mut requeued = 0;
     let key = get_futex_key(uaddr, flags)?;
     let req_key = get_futex_key(uaddr2, flags)?;
+    let hash_src = futex_hash(&key);
+    let hash_req = futex_hash(&req_key);
 
     if key == req_key {
         return futex_wake(uaddr, flags, nr_waken);
@@ -462,16 +464,35 @@ pub fn futex_cmp_requeue(
                 hash_bucket.push_back(futex_q);
             }
 
-            // 将桶中其余的futex_q重新排队到请求的桶中
-            let mut req_bucket = FUTEXQUEUES.buckets[futex_hash(&req_key)].lock();
-            while let Some(mut futex_q) = hash_bucket.pop_front() {
-                futex_q.key = req_key; // update the key to the new one
-                req_bucket.push_back(futex_q);
-                requeued += 1;
-                ret += 1;
-                if requeued == nr_requeue {
-                    break;
+            if hash_src == hash_req {
+                // 如果源桶和请求桶是同一个桶，直接返回
+                log::error!("[futex_requeue] source bucket and request bucket are the same, returning");
+                while let Some(mut futex_q) = hash_bucket.pop_front() {
+                    futex_q.key = req_key; // update the key to the new one
+                    log::error!("[futex_requeue] requeue task {:?} to key {:?}",
+                                futex_q.task.upgrade().unwrap().tid(), req_key);
+                    hash_bucket.push_back(futex_q);
+                    requeued += 1;
+                    ret += 1;
+                    if requeued == nr_requeue {
+                        break;
+                    }
                 }
+            } else {
+                // 将桶中其余的futex_q重新排队到请求的桶中
+                let mut req_bucket = FUTEXQUEUES.buckets[futex_hash(&req_key)].lock();
+                while let Some(mut futex_q) = hash_bucket.pop_front() {
+                    futex_q.key = req_key; // update the key to the new one
+                    log::error!("[futex_requeue] requeue task {:?} to key {:?}",
+                                futex_q.task.upgrade().unwrap().tid(), req_key);
+                    req_bucket.push_back(futex_q);
+                    requeued += 1;
+                    ret += 1;
+                    if requeued == nr_requeue {
+                        break;
+                    }
+                }
+                log::error!("[futex_requeue] target bucket len: {:?}", req_bucket.len());
             }
         }
     }

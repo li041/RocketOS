@@ -132,7 +132,7 @@ pub fn trap_handler(cx: &mut TrapContext) {
                         sepc::read()
                     );
                     task.receive_siginfo(
-                        SigInfo::new(sig.raw(), SigInfo::KERNEL, SiField::None),
+                        SigInfo::new(sig.raw(), SigInfo::KERNEL, SiField::Kill { tid: current_task().tid() }),
                         false,
                     );
                 }

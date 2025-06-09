@@ -835,9 +835,38 @@ impl Task {
         }
     }
 
-    // pub fn alloc_fd(&mut self, file: Arc<dyn FileOp + Send + Sync>) -> usize {
-    //     self.fd_table.alloc_fd(file)
-    // }
+    pub fn compare_permision(&self, task: &Arc<Task>) -> SyscallRet {
+        // 如果是root用户，直接返回
+        if self.euid() == 0 {
+            return Ok(0);
+        }
+
+        // 同一线程组，直接返回
+        if self.tgid() == task.tgid() {
+            return Ok(0);
+        }
+
+        // 非root用户，检查权限
+        let uid = self.uid();
+        let gid = self.gid();
+        if uid == task.uid()
+            && uid == task.euid()
+            && uid == task.suid()
+            && gid == task.gid()
+            && gid == task.egid()
+            && gid == task.sgid()
+        {
+            return Ok(0);
+        }
+
+        // 权限检查不通过
+        return Err(Errno::EPERM);
+    }
+
+    pub fn same_thread_group(&self, task: &Arc<Task>) -> bool {
+        self.tgid() == task.tgid()
+    }
+
     /*********************************** getter *************************************/
 
     pub fn kstack(&self) -> usize {
@@ -1482,7 +1511,7 @@ pub fn kernel_exit(task: Arc<Task>, exit_code: i32) {
                     SigInfo {
                         signo: Sig::SIGCHLD.raw(),
                         code: SigInfo::CLD_EXITED,
-                        fields: SiField::None,
+                        fields: SiField::Kill { tid: current_task().tid() },
                     },
                     false,
                 );

@@ -1,8 +1,5 @@
 use crate::{
-    arch::trap::context::dump_trap_context,
-    signal::{SiField, Sig, SigInfo},
-    task::{add_task, current_task, schedule, scheduler::dump_scheduler},
-    timer::{self, ITimerVal, TimeSpec},
+    arch::{config::SysResult, trap::context::dump_trap_context}, signal::{SiField, Sig, SigInfo}, syscall::errno::SyscallRet, task::{add_task, current_task, processor::current_tp, schedule, scheduler::dump_scheduler}, timer::{self, ITimerVal, TimeSpec}
 };
 use alloc::{
     boxed::Box,
@@ -52,8 +49,8 @@ pub fn get_task(tid: Tid) -> Option<Arc<Task>> {
     TASK_MANAGER.get(tid)
 }
 // 遍历所有任务
-pub fn for_each_task(f: impl Fn(&Arc<Task>)) {
-    TASK_MANAGER.for_each(f);
+pub fn for_each_task<T>(f: impl Fn(&Arc<Task>) -> T) -> Vec<T> {
+    TASK_MANAGER.for_each(f)
 }
 
 pub struct TaskManager(Mutex<HashMap<Tid, Weak<Task>>>);
@@ -82,10 +79,13 @@ impl TaskManager {
         }
     }
 
-    pub fn for_each(&self, f: impl Fn(&Arc<Task>)) {
+    pub fn for_each<T>(&self, f: impl Fn(&Arc<Task>) -> T) -> Vec<T> {
+        let mut results = Vec::new();
         for task in self.0.lock().values() {
-            f(&task.upgrade().unwrap())
+            let task = task.upgrade().unwrap();
+            results.push(f(&task));
         }
+        results
     }
 }
 
@@ -482,7 +482,7 @@ pub fn real_timer_callback(tid: Tid) {
             SigInfo {
                 signo: Sig::SIGALRM.raw(),
                 code: SigInfo::TIMER,
-                fields: SiField::None,
+                fields: SiField::Kill { tid: current_task().tid() },
             },
             true,
         );

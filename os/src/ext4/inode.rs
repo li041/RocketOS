@@ -1501,7 +1501,7 @@ impl Ext4Inode {
                 current_size,
                 new_size,
             );
-            self.extend_size(current_size, new_size, false)
+            self.extend_size(current_size, new_size, true)
         }
     }
     // todo: 权限检查

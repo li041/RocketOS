@@ -58,17 +58,26 @@ pub fn do_futex(
         }
         FUTEX_WAIT_BITSET => {
             let mut timeout_buf = TimeSpec::default();
-            let timeout: Option<TimeSpec> = if val2 != 0 {
+            let wait_time: Option<TimeSpec> = if val2 != 0 {
                 copy_from_user(
                     val2 as *const TimeSpec,
                     &mut timeout_buf as *mut TimeSpec,
                     1,
                 )?;
-                Some(timeout_buf)
+                if FLAGS_CLOCKRT & flags != 0 {
+                    Some(timeout_buf)    
+                } else {
+                    let now = TimeSpec::new_machine_time();
+                    if timeout_buf < now {
+                        Some(TimeSpec::default())
+                    } else {
+                        Some(timeout_buf - now)
+                    }
+                }
             } else {
                 None
             };
-            futex_wait(uaddr.into(), flags, val, timeout, val3)
+            futex_wait(uaddr.into(), flags, val, wait_time, val3)
         }
         FUTEX_WAKE => futex_wake(uaddr.into(), flags, val),
         FUTEX_WAKE_BITSET => futex_wake_bitset(uaddr.into(), flags, val, val3),

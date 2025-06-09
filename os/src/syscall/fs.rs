@@ -514,6 +514,7 @@ pub fn sys_getcwd(buf: *mut u8, buf_size: usize) -> SyscallRet {
     if cwd.is_empty() {
         cwd = "/".to_string();
     }
+    cwd.push('\0'); // 添加字符串结束符
     let copy_len = cwd.len();
     if copy_len > buf_size {
         log::error!("getcwd: buffer is too small");

@@ -531,7 +531,12 @@ pub fn sys_nanosleep(time_val_ptr: usize, rem: usize) -> SyscallRet {
     }
     let ret = wait_timeout(time_val, -1);
     if ret == -1 {
-        let remained_time = time_val - (TimeSpec::new_machine_time() - start_time);
+        let sleep_time = TimeSpec::new_machine_time() - start_time;
+        let remained_time = if sleep_time >= time_val {
+            TimeSpec::default() // 如果睡眠时间超过了请求的时间，则剩余时间为0
+        } else {
+            time_val - sleep_time
+        };
         log::error!(
             "[sys_nanosleep] task{} wakeup by signal, remained time: {:?}",
             current_task().tid(),
