@@ -12,7 +12,7 @@ static TEST_LIST: &[&str] = &[
     // "iperf_testcode.sh\0",
     "libcbench_testcode.sh\0",
     "libctest_testcode.sh\0",
-    //"lmbench_testcode.sh\0",
+    // "lmbench_testcode.sh\0",
     "lua_testcode.sh\0",
     // "netperf_testcode.sh\0",
     // "ltp_testcode.sh\0",
