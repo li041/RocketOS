@@ -3,7 +3,6 @@ use crate::{
     arch::switch,
     task::{
         dump_wait_queue, handle_timeout,
-        manager::dump_time_manager,
         processor::{current_tp, Processor},
     },
 };

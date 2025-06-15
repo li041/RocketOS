@@ -18,11 +18,10 @@ pub struct SocketPairBuffer {
 
 impl SocketPairBuffer {
     pub fn new() -> Self {
-        let buf = Self {
+        Self {
             a_to_b: Arc::new(Mutex::new(PipeRingBuffer::new())),
             b_to_a: Arc::new(Mutex::new(PipeRingBuffer::new())),
-        };
-        buf
+        }
     }
 }
 
@@ -32,13 +31,16 @@ pub struct BufferEnd {
     read_buf: Arc<Mutex<PipeRingBuffer>>,
     /// 用于写操作的缓冲区
     write_buf: Arc<Mutex<PipeRingBuffer>>,
+    //判断拥有的是写端还是读端
     flags: AtomicI32,
-    // 标记该端是读还是写
-    readable: bool,
+    /// 是否有读权限
+    pub readable: bool,
+    /// 是否有写权限
+    pub writable: bool,
 }
 
 impl BufferEnd {
-    pub fn new(
+    fn new(
         read_buf: Arc<Mutex<PipeRingBuffer>>,
         write_buf: Arc<Mutex<PipeRingBuffer>>,
         flags: OpenFlags,
@@ -47,21 +49,22 @@ impl BufferEnd {
             read_buf,
             write_buf,
             flags: AtomicI32::new(flags.bits()),
+            //全双工
             readable: true,
+            writable: true,
         }
     }
 
+    /// 根据 endpoint 0/1 生成对应的 BufferEnd
     pub fn from_pair(
         buf: &SocketPairBuffer,
         endpoint: usize,
         flags: OpenFlags,
     ) -> Self {
         if endpoint == 0 {
-            Self::new(buf.b_to_a.clone(), buf.a_to_b.clone(), flags)
+            BufferEnd::new(buf.b_to_a.clone(), buf.a_to_b.clone(), flags)
         } else {
-            let mut end = Self::new(buf.a_to_b.clone(), buf.b_to_a.clone(), flags);
-            end.readable = true;
-            end
+            BufferEnd::new(buf.a_to_b.clone(), buf.b_to_a.clone(), flags)
         }
     }
 }
@@ -71,9 +74,41 @@ impl FileOp for BufferEnd {
         self
     }
 
+    /// 判断是否有读权限
+    fn readable(&self) -> bool {
+        self.readable
+    }
+
+    /// 判断是否有写权限
+    fn writable(&self) -> bool {
+        self.writable
+    }
+
+    /// 判断是否有数据可读
+    fn r_ready(&self) -> bool {
+        if self.readable {
+            let ring = self.read_buf.lock();
+            ring.status != RingBufferStatus::EMPTY
+        }
+        else {
+            false
+        }
+    }
+
+    /// 判断是否有空间可写
+    fn w_ready(&self) -> bool {
+        if self.readable {
+            let ring = self.write_buf.lock();
+            ring.status != RingBufferStatus::FULL
+        }
+        else {
+            false
+        }
+    }
+
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> SyscallRet {
-        let nonblock =
-            self.flags.load(Ordering::Relaxed) & OpenFlags::O_NONBLOCK.bits() != 0;
+        debug_assert!(self.readable());
+        let nonblock = self.flags.load(Ordering::Relaxed) & OpenFlags::O_NONBLOCK.bits() != 0;
         loop {
             let mut ring = self.read_buf.lock();
             if ring.status == RingBufferStatus::EMPTY {
@@ -98,10 +133,22 @@ impl FileOp for BufferEnd {
     }
 
     fn write<'a>(&'a self, buf: &'a [u8]) -> SyscallRet {
-        let nonblock =
-            self.flags.load(Ordering::Relaxed) & OpenFlags::O_NONBLOCK.bits() != 0;
+        debug_assert!(self.writable());
+        let nonblock = self.flags.load(Ordering::Relaxed) & OpenFlags::O_NONBLOCK.bits() != 0;
         loop {
             let mut ring = self.write_buf.lock();
+            // 对端关闭检查，触发 SIGPIPE
+            if ring.all_read_ends_closed() {
+                current_task().receive_siginfo(
+                    crate::signal::SigInfo::new(
+                        crate::signal::Sig::SIGPIPE.raw(),
+                        crate::signal::SigInfo::KERNEL,
+                        crate::signal::SiField::Kill { tid: current_task().tid() },
+                    ),
+                    false,
+                );
+                return Err(Errno::EPIPE);
+            }
             if ring.status == RingBufferStatus::FULL {
                 if nonblock {
                     return Err(Errno::EAGAIN);
@@ -126,42 +173,30 @@ impl FileOp for BufferEnd {
     fn ioctl(&self, _: usize, _: usize) -> SyscallRet {
         Err(Errno::ENOTTY)
     }
+
     fn fsync(&self) -> SyscallRet {
         Err(Errno::EINVAL)
     }
-    fn readable(&self) -> bool {
-        let ring = self.read_buf.lock();
-        ring.status != RingBufferStatus::EMPTY
+    fn hang_up(&self) -> bool {
+        if self.readable {
+            //如果读权限，判断对端的写是否都被关闭了
+            self.read_buf.lock().all_write_ends_closed()
+        } else {
+            //如果写权限，判断对端的读是否都被关闭了
+            self.write_buf.lock().all_read_ends_closed()
+        }
     }
-    fn writable(&self) -> bool {
-        let ring = self.write_buf.lock();
-        ring.status != RingBufferStatus::FULL
+    fn add_wait_queue(&self, tid: Tid) {
+        // 读端等待写缓冲区可写，写端等待读缓冲区可读
+        let mut ring = if self.readable {
+            self.write_buf.lock()
+        } else {
+            self.read_buf.lock()
+        };
+        ring.add_waiter(tid);
     }
     fn seek(&self, _: isize, _: crate::fs::uapi::Whence) -> SyscallRet {
         Err(Errno::ESPIPE)
-    }
-    fn r_ready(&self) -> bool {
-        let ring = self.read_buf.lock();
-        ring.status != RingBufferStatus::EMPTY
-    }
-    fn w_ready(&self) -> bool {
-        let ring = self.write_buf.lock();
-        ring.status != RingBufferStatus::FULL
-    }
-    fn hang_up(&self) -> bool {
-        if self.readable {
-            let ring = self.read_buf.lock();
-            ring.all_write_ends_closed()
-        } else {
-            let ring = self.write_buf.lock();
-            ring.all_read_ends_closed()
-        }
-    }
-    fn get_flags(&self) -> OpenFlags {
-        OpenFlags::from_bits(self.flags.load(Ordering::Relaxed)).unwrap()
-    }
-    fn set_flags(&self, f: OpenFlags) {
-        self.flags.store(f.bits(), Ordering::Relaxed);
     }
 }
 
@@ -169,7 +204,18 @@ impl FileOp for BufferEnd {
 pub fn create_buffer_ends(flags: OpenFlags) -> (BufferEnd, BufferEnd) {
     let buf = SocketPairBuffer::new();
     (
-        BufferEnd::new(buf.b_to_a.clone(), buf.a_to_b.clone(), flags),
-        BufferEnd::new(buf.a_to_b.clone(), buf.b_to_a.clone(), flags),
+        BufferEnd::from_pair(&buf, 0, flags),
+        BufferEnd::from_pair(&buf, 1, flags),
     )
+}
+
+impl Drop for BufferEnd {
+    fn drop(&mut self) {
+        for tid in &self.read_buf.lock().waiter {
+            wakeup(*tid);
+        }
+        for tid in &self.write_buf.lock().waiter {
+            wakeup(*tid);
+        }
+    }
 }
