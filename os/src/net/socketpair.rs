@@ -1,253 +1,175 @@
-/*
- * @Author: Peter/peterluck2021@163.com
- * @Date: 2025-06-11 22:45:33
- * @LastEditTime: 2025-06-12 00:14:14
- * @FilePath: /RocketOS_netperfright/os/src/net/socketpair.rs
- * @Description: 全双工 SocketPairBuffer 及 BufferEnd FileOp 实现
- */
-
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicI32, Ordering};
 use spin::Mutex;
-use alloc::vec;
+
 use crate::syscall::errno::{Errno, SyscallRet};
 use crate::task::{current_task, wait, wakeup, Tid};
 use crate::fs::file::{FileOp, OpenFlags};
-use crate::fs::inode::InodeOp;
+use crate::fs::pipe::{PipeRingBuffer, RingBufferStatus};
 
-const RING_DEFAULT_BUFFER_SIZE: usize = 65536;
-
-struct RingBuf {
-    buf: Vec<u8>, head: usize, tail: usize, full: bool, size: usize,
-}
-
-impl RingBuf {
-    fn new() -> Self {
-        Self { buf: vec![0; RING_DEFAULT_BUFFER_SIZE], head: 0, tail: 0, full: false, size: RING_DEFAULT_BUFFER_SIZE }
-    }
-    fn used(&self) -> usize {
-        if self.full { self.size }
-        else if self.tail >= self.head { self.tail - self.head }
-        else { self.size + self.tail - self.head }
-    }
-    fn avail(&self) -> usize { self.size - self.used() }
-    fn read(&mut self, out: &mut [u8]) -> usize {
-        let n = out.len().min(self.used());
-        for i in 0..n { out[i] = self.buf[self.head]; self.head = (self.head + 1) % self.size; }
-        self.full = false;
-        n
-    }
-    fn write(&mut self, data: &[u8]) -> usize {
-        let n = data.len().min(self.avail());
-        for i in 0..n { self.buf[self.tail] = data[i]; self.tail = (self.tail + 1) % self.size; }
-        if n > 0 && self.tail == self.head { self.full = true; }
-        n
-    }
-}
-
+/// 全双工 SocketPairBuffer 使用两个 PipeRingBuffer
 pub struct SocketPairBuffer {
-    pub a_to_b: RingBuf,
-    pub b_to_a: RingBuf,
-    pub a_waiters: Vec<Tid>,
-    pub b_waiters: Vec<Tid>,
+    /// A -> B 方向缓冲区
+    pub a_to_b: Arc<Mutex<PipeRingBuffer>>,
+    /// B -> A 方向缓冲区
+    pub b_to_a: Arc<Mutex<PipeRingBuffer>>,
 }
 
 impl SocketPairBuffer {
     pub fn new() -> Self {
-        Self { a_to_b: RingBuf::new(), b_to_a: RingBuf::new(), a_waiters: Vec::new(), b_waiters: Vec::new() }
+        let buf = Self {
+            a_to_b: Arc::new(Mutex::new(PipeRingBuffer::new())),
+            b_to_a: Arc::new(Mutex::new(PipeRingBuffer::new())),
+        };
+        buf
     }
 }
 
+/// BufferEnd 代表 SocketPair 的一端
 pub struct BufferEnd {
-    buffer: Arc<Mutex<SocketPairBuffer>>,
-    endpoint: usize,
+    /// 用于读操作的缓冲区
+    read_buf: Arc<Mutex<PipeRingBuffer>>,
+    /// 用于写操作的缓冲区
+    write_buf: Arc<Mutex<PipeRingBuffer>>,
     flags: AtomicI32,
+    // 标记该端是读还是写
+    readable: bool,
 }
 
 impl BufferEnd {
-    pub fn new(buffer: Arc<Mutex<SocketPairBuffer>>, endpoint: usize, flags: OpenFlags) -> Self {
-        Self { buffer, endpoint, flags: AtomicI32::new(flags.bits()) }
+    pub fn new(
+        read_buf: Arc<Mutex<PipeRingBuffer>>,
+        write_buf: Arc<Mutex<PipeRingBuffer>>,
+        flags: OpenFlags,
+    ) -> Self {
+        Self {
+            read_buf,
+            write_buf,
+            flags: AtomicI32::new(flags.bits()),
+            readable: true,
+        }
+    }
+
+    pub fn from_pair(
+        buf: &SocketPairBuffer,
+        endpoint: usize,
+        flags: OpenFlags,
+    ) -> Self {
+        if endpoint == 0 {
+            Self::new(buf.b_to_a.clone(), buf.a_to_b.clone(), flags)
+        } else {
+            let mut end = Self::new(buf.a_to_b.clone(), buf.b_to_a.clone(), flags);
+            end.readable = true;
+            end
+        }
     }
 }
 
 impl FileOp for BufferEnd {
-    fn as_any(&self) -> &dyn core::any::Any { self }
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
 
     fn read<'a>(&'a self, buf: &'a mut [u8]) -> SyscallRet {
-        let nonblock = self.flags.load(Ordering::Relaxed) & OpenFlags::O_NONBLOCK.bits() != 0;
+        let nonblock =
+            self.flags.load(Ordering::Relaxed) & OpenFlags::O_NONBLOCK.bits() != 0;
         loop {
-            let mut guard = self.buffer.lock();
-            if self.endpoint == 0 {
-                // A端 reads from b_to_a
-                let used = guard.b_to_a.used();
-                if used == 0 {
-                    if nonblock 
-                    { 
-                        return Err(Errno::EAGAIN); 
-                    }
-                    guard.a_waiters.push(current_task().tid());
-                    drop(guard);
-                    if wait() == -1 
-                    { 
-                        return Err(Errno::ERESTARTSYS); 
-                    }
-                    continue;
+            let mut ring = self.read_buf.lock();
+            if ring.status == RingBufferStatus::EMPTY {
+                if nonblock {
+                    return Err(Errno::EAGAIN);
                 }
-                let tid = guard.a_waiters.pop().unwrap_or(0);
-                let n = guard.b_to_a.read(buf);
-                log::error!("[BufferEnd read A] read buf is {:?} len is {:?}",buf,buf.len());
-                drop(guard);
-                if tid != 0 
-                { 
-                    wakeup(tid); 
+                ring.add_waiter(current_task().tid());
+                drop(ring);
+                if wait() == -1 {
+                    return Err(Errno::ERESTARTSYS);
                 }
-                return Ok(n);
-            } else {
-                // B端 reads from a_to_b
-                let used = guard.a_to_b.used();
-                if used == 0 {
-                    if nonblock 
-                    { 
-                        return Err(Errno::EAGAIN); 
-                    }
-                    guard.b_waiters.push(current_task().tid());
-                    drop(guard);
-                    if wait() == -1 
-                    { 
-                        return Err(Errno::ERESTARTSYS); 
-                    }
-                    continue;
-                }
-                let tid = guard.b_waiters.pop().unwrap_or(0);
-                let n = guard.a_to_b.read(buf);
-                log::error!("[BufferEnd read B] read buf is {:?} len is {:?}",buf,buf.len());
-                drop(guard);
-                if tid != 0 
-                { 
-                    wakeup(tid); 
-                }
-                return Ok(n);
+                continue;
             }
+            let n = ring.buffer_read(buf);
+            let waiter = ring.get_one_waiter();
+            drop(ring);
+            if waiter != 0 {
+                wakeup(waiter);
+            }
+            return Ok(n);
         }
     }
 
     fn write<'a>(&'a self, buf: &'a [u8]) -> SyscallRet {
-        log::error!("[BufferEnd] write buffer is {:?}",buf);
-        let nonblock = self.flags.load(Ordering::Relaxed) & OpenFlags::O_NONBLOCK.bits() != 0;
+        let nonblock =
+            self.flags.load(Ordering::Relaxed) & OpenFlags::O_NONBLOCK.bits() != 0;
         loop {
-            let mut guard = self.buffer.lock();
-            if self.endpoint == 0 {
-                // A端 writes to a_to_b
-                let avail = guard.a_to_b.avail();
-                if avail == 0 {
-                    if nonblock 
-                    { 
-                        return Err(Errno::EAGAIN); 
-                    }
-                    guard.b_waiters.push(current_task().tid());
-                    drop(guard);
-                    if wait() == -1 
-                    { 
-                        return Err(Errno::ERESTARTSYS); 
-                    }
-                    continue;
+            let mut ring = self.write_buf.lock();
+            if ring.status == RingBufferStatus::FULL {
+                if nonblock {
+                    return Err(Errno::EAGAIN);
                 }
-                let tid = guard.b_waiters.pop().unwrap_or(0);
-                let n = guard.a_to_b.write(buf);
-                log::error!("[BufferEnd] write A buffer is {:?}",buf);
-                drop(guard);
-                if tid != 0 
-                { 
-                    wakeup(tid); 
+                ring.add_waiter(current_task().tid());
+                drop(ring);
+                if wait() == -1 {
+                    return Err(Errno::ERESTARTSYS);
                 }
-                return Ok(n);
-            } else {
-                // B端 writes to b_to_a
-                let avail = guard.b_to_a.avail();
-                if avail == 0 {
-                    if nonblock 
-                    { 
-                        return Err(Errno::EAGAIN); 
-                    }
-                    guard.a_waiters.push(current_task().tid());
-                    drop(guard);
-                    if wait() == -1 
-                    { 
-                        return Err(Errno::ERESTARTSYS); 
-                    }
-                    continue;
-                }
-                let tid = guard.a_waiters.pop().unwrap_or(0);
-                let n = guard.b_to_a.write(buf);
-                log::error!("[BufferEnd] write B buffer is {:?}",buf);
-                drop(guard);
-                if tid != 0 
-                { 
-                    wakeup(tid); 
-                }
-                return Ok(n);
+                continue;
             }
+            let n = ring.buffer_write(buf);
+            let waiter = ring.get_one_waiter();
+            drop(ring);
+            if waiter != 0 {
+                wakeup(waiter);
+            }
+            return Ok(n);
         }
     }
 
-    fn ioctl(&self, _: usize, _: usize) -> SyscallRet 
-    { 
-        Err(Errno::ENOTTY) 
+    fn ioctl(&self, _: usize, _: usize) -> SyscallRet {
+        Err(Errno::ENOTTY)
     }
-    fn fsync(&self) -> SyscallRet 
-    { 
-        Err(Errno::EINVAL) 
+    fn fsync(&self) -> SyscallRet {
+        Err(Errno::EINVAL)
     }
     fn readable(&self) -> bool {
-        let guard = self.buffer.lock();
-        if self.endpoint == 0 
-        { 
-            log::error!("[Bufferend_readable] endpoint=0 b_to_a {:?}",guard.b_to_a.used());
-            guard.b_to_a.used() > 0 
-        } else 
-        { 
-            log::error!("[Bufferend_readable] endpoint=0 b_to_a {:?}",guard.a_to_b.used());
-            guard.a_to_b.used() > 0 
-        }
+        let ring = self.read_buf.lock();
+        ring.status != RingBufferStatus::EMPTY
     }
     fn writable(&self) -> bool {
-        let guard = self.buffer.lock();
-        if self.endpoint == 0 
-        { 
-            guard.a_to_b.avail() > 0 
-        } else 
-        { 
-            guard.b_to_a.avail() > 0 
+        let ring = self.write_buf.lock();
+        ring.status != RingBufferStatus::FULL
+    }
+    fn seek(&self, _: isize, _: crate::fs::uapi::Whence) -> SyscallRet {
+        Err(Errno::ESPIPE)
+    }
+    fn r_ready(&self) -> bool {
+        let ring = self.read_buf.lock();
+        ring.status != RingBufferStatus::EMPTY
+    }
+    fn w_ready(&self) -> bool {
+        let ring = self.write_buf.lock();
+        ring.status != RingBufferStatus::FULL
+    }
+    fn hang_up(&self) -> bool {
+        if self.readable {
+            let ring = self.read_buf.lock();
+            ring.all_write_ends_closed()
+        } else {
+            let ring = self.write_buf.lock();
+            ring.all_read_ends_closed()
         }
     }
-    fn seek(&self, _: isize, _: crate::fs::uapi::Whence) -> SyscallRet 
-    {
-         Err(Errno::ESPIPE) 
+    fn get_flags(&self) -> OpenFlags {
+        OpenFlags::from_bits(self.flags.load(Ordering::Relaxed)).unwrap()
     }
-    fn r_ready(&self) -> bool 
-    { 
-        self.readable() 
-    }
-    fn w_ready(&self) -> bool 
-    { 
-        self.writable() 
-    }
-    fn hang_up(&self) -> bool 
-    { 
-        false 
-    }
-    fn get_flags(&self) -> OpenFlags 
-    { 
-        OpenFlags::from_bits(self.flags.load(Ordering::Relaxed)).unwrap() 
-    }
-    fn set_flags(&self, f: OpenFlags) 
-    { 
-        self.flags.store(f.bits(), Ordering::Relaxed); 
+    fn set_flags(&self, f: OpenFlags) {
+        self.flags.store(f.bits(), Ordering::Relaxed);
     }
 }
 
+/// 创建 SocketPair 的两个 BufferEnd
 pub fn create_buffer_ends(flags: OpenFlags) -> (BufferEnd, BufferEnd) {
-    let buf = Arc::new(Mutex::new(SocketPairBuffer::new()));
-    (BufferEnd::new(buf.clone(), 0, flags), BufferEnd::new(buf, 1, flags))
+    let buf = SocketPairBuffer::new();
+    (
+        BufferEnd::new(buf.b_to_a.clone(), buf.a_to_b.clone(), flags),
+        BufferEnd::new(buf.a_to_b.clone(), buf.b_to_a.clone(), flags),
+    )
 }

@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-03 16:40:04
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-12 17:21:54
+ * @LastEditTime: 2025-06-15 12:04:33
  * @FilePath: /RocketOS_netperfright/os/src/net/socket.rs
  * @Description: socket file
  *
@@ -519,7 +519,7 @@ impl Socket {
         //匹配对应的算法，绑定到对应的算法上，这里只要保证内核存在socket,后续通过fd加下面这个函数即可访问对应的加密算法
         Ok(0)
     }
-    pub fn listen(&self) {
+    pub fn listen(&self)->SyscallRet {
         //监听只对tcp有用，udp不需要建立连接
         if self.socket_type != SocketType::SOCK_STREAM
             && self.socket_type != SocketType::SOCK_SEQPACKET
@@ -668,7 +668,6 @@ impl Socket {
         let file = self.get_unix_file();
         let tmp: Vec<u8> = vec![0; 120];
         file.pwrite(tmp.as_slice(), 0)?;
-        println!("3");
         log::error!("[Socket_accept_unix] peer path is {:?}", peer_path);
         let peer_ucred = UCred::from_last_bytes(peer_path.as_slice())?;
         self.set_peer_ucred(peer_ucred.pid, peer_ucred.uid, peer_ucred.gid);
@@ -840,20 +839,23 @@ impl Socket {
                 if file.r_ready() {
                     let mut flag: Vec<u8> = vec![0; 1];
                     file.pread(flag.as_mut_slice(), 128)?;
-                    log::error!("[socket read] flag is {:?}", flag);
+                    log::error!("[socket recv_from] flag is {:?}", flag);
                     if flag[0] == 0 {
+                
                         yield_current_task();
                         continue;
                     }
                     //说明写入了
                     file.read(buf)?;
-                    log::error!("[socket read] unix buf is {:?}", buf);
+                    log::error!("[socket recv_from] unix buf is {:?}", buf);
                     let tmp: Vec<u8> = vec![0; 200];
                     file.pwrite(tmp.as_slice(), 0)?;
                     break;
                 } else {
                     // drop(file);
+                    // log::trace!("[recv_from]");
                     yield_current_task();
+                    // log::trace!("[recv_from]");
                 }
             }
             return Ok((
@@ -1340,7 +1342,9 @@ impl FileOp for Socket {
                 return Ok(0);
                 
             }
+            // log::trace!("[recv_from]");
             yield_current_task();
+            //  log::trace!("[recv_from]");
             let path = self.socket_path_unix.lock().clone().unwrap();
             let s_path = core::str::from_utf8(path.as_slice()).unwrap();
             if s_path.contains("/etc") || s_path.contains("/var/run/nscd/socket"){
@@ -1375,7 +1379,9 @@ impl FileOp for Socket {
                     file.pread(flag.as_mut_slice(), 128)?;
                     log::error!("[socket read] flag is {:?}", flag);
                     if flag[0] == 0 {
+                        // log::trace!("[socket_read]");
                         yield_current_task();
+                        // log::trace!("[socket_read]");
                         continue;
                     }
                     //说明写入了
@@ -1386,7 +1392,9 @@ impl FileOp for Socket {
                     break;
                 } else {
                     // drop(file);
+                    // log::trace!("[socket_read]");
                     yield_current_task();
+                    // log::trace!("[socket_read]");
                 }
             }
             return Ok(buf.len());
@@ -1426,11 +1434,11 @@ impl FileOp for Socket {
                             }
                             SocketInner::Udp(udp_socket) => match udp_socket.recv_from(buf) {
                                 Ok(res) => {
-                                    log::error!(
-                                        "[socket_read]udp recv len is {:?},addr is {:?}",
-                                        res.0,
-                                        res.1
-                                    );
+                                    // log::error!(
+                                    //     "[socket_read]udp recv len is {:?},addr is {:?}",
+                                    //     res.0,
+                                    //     res.1
+                                    // );
                                     return Ok(res.0);
                                 }
                                 Err(e) => {
@@ -1449,11 +1457,11 @@ impl FileOp for Socket {
             SocketInner::Tcp(tcp_socket) => tcp_socket.recv(buf),
             SocketInner::Udp(udp_socket) => match udp_socket.recv_from(buf) {
                 Ok(res) => {
-                    log::error!(
-                        "[socket_read]udp recv len is {:?},addr is {:?}",
-                        res.0,
-                        res.1
-                    );
+                    // log::error!(
+                    //     "[socket_read]udp recv len is {:?},addr is {:?}",
+                    //     res.0,
+                    //     res.1
+                    // );
                     Ok(res.0)
                 }
                 Err(e) => Err(e),
@@ -1511,7 +1519,9 @@ impl FileOp for Socket {
                             }
                         }
                     }
+                    // log::trace!("[socket write]");
                     yield_current_task();
+                    // log::trace!("[socket write]");
                 }
             } else {
                 return Err(Errno::EAGAIN);
@@ -1533,7 +1543,7 @@ impl FileOp for Socket {
         panic!("can not get inode socket");
     }
     fn r_ready(&self) -> bool {
-        // log::error!("[sokcet_readable]:poll readable");
+        log::error!("[sokcet_readable]:poll readable");
         if self.domain == Domain::AF_UNIX {
             //这里将寻找的文件中内容返回给进程
             if self.buffer.is_some() {
@@ -1584,7 +1594,8 @@ impl FileOp for Socket {
         true
     }
     fn hang_up(&self) -> bool {
-        true
+        //对于tcp判断对端是否connect,udp则是判断是否为open
+        self.is_connected()
     }
     fn get_flags(&self) -> OpenFlags {
         let mut flag = OpenFlags::empty();
