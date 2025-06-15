@@ -16,7 +16,6 @@ MODE ?= release
 # all: clean run
 all : 
 	@cd ./img && tar -xf disks.tar.xz -C ..
-	@cp ./img/disk.img ./disk.img && cp ./img/disk-la.img ./disk-la.img
 	@cd ./user && make build ARCH=riscv64 MODE=release
 	@cd ./os && make build ARCH=riscv64 MODE=release 
 	@cd ./user && make build ARCH=loongarch64 MODE=release
