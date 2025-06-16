@@ -25,7 +25,7 @@ use crate::{
     },
     net::{
         alg::{encode_text, AlgType},
-        socketpair::{BufferEnd, SocketPairBuffer},
+        socketpair::BufferEnd,
         udp::get_ephemeral_port,
         unix::PasswdEntry,
     },
@@ -525,7 +525,7 @@ impl Socket {
         //匹配对应的算法，绑定到对应的算法上，这里只要保证内核存在socket,后续通过fd加下面这个函数即可访问对应的加密算法
         Ok(0)
     }
-    pub fn listen(&self)->SyscallRet {
+    pub fn listen(&self) -> SyscallRet {
         //监听只对tcp有用，udp不需要建立连接
         if self.socket_type != SocketType::SOCK_STREAM
             && self.socket_type != SocketType::SOCK_SEQPACKET
@@ -847,7 +847,6 @@ impl Socket {
                     file.pread(flag.as_mut_slice(), 128)?;
                     log::error!("[socket recv_from] flag is {:?}", flag);
                     if flag[0] == 0 {
-                
                         yield_current_task();
                         continue;
                     }
@@ -1341,10 +1340,8 @@ impl FileOp for Socket {
         );
         if self.domain == Domain::AF_UNIX {
             if self.buffer.is_some() {
-                if self.buffer.as_ref().unwrap().r_ready() {
-                    return self.buffer.as_ref().unwrap().read(buf);
-                }
-                return Ok(0);
+                // Todo: 这里不对, 不应该使用r_ready()检查, 同时r_ready()返回false时也不应该返回Ok(0)
+                return self.buffer.as_ref().unwrap().read(buf);
             }
             // log::trace!("[recv_from]");
             yield_current_task();
@@ -1477,10 +1474,11 @@ impl FileOp for Socket {
         log::error!("[socket_write]:begin send socket");
         if self.domain == Domain::AF_UNIX {
             if self.buffer.is_some() {
-                if self.buffer.as_ref().unwrap().w_ready() {
+                // Todo: 这里不对, 不应该使用w_ready()检查, 同时w_ready()返回false时也不应该返回Ok(0)
+                // if self.buffer.as_ref().unwrap().w_ready() {
                     return self.buffer.as_ref().unwrap().write(buf);
-                }
-                return Ok(0);
+                // }
+                // return Ok(0);
             }
             log::error!("[socket_write] write buf is {:?}", buf);
             let path = self.socket_peer_path_unix.lock().clone().unwrap();
@@ -1586,6 +1584,17 @@ impl FileOp for Socket {
             SocketInner::Tcp(tcp_socket) => tcp_socket.poll(false).writeable,
             SocketInner::Udp(udp_socket) => udp_socket.poll().writeable,
         }
+    }
+
+    fn add_wait_queue(&self, tid: usize) {
+        log::error!("[socket_add_wait_queue]:tid is {:?}", tid);
+        if self.domain == Domain::AF_UNIX {
+            if self.buffer.is_some() {
+                self.buffer.as_ref().unwrap().add_wait_queue(tid);
+            }
+            return;
+        }
+        panic!("[socket_add_wait_queue]:can not add wait queue for socket");
     }
 
     fn readable(&self) -> bool {
