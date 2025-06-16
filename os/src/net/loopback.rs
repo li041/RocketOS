@@ -30,23 +30,23 @@ fn snoop_tcp_from_ip(buffer: &[u8], sockets: &mut SocketSet) -> Result<(), smolt
     use smoltcp::wire::{IpProtocol, Ipv4Packet, TcpPacket};
     // log::error!("[snoop_tcp_from_ip] begin snoop_from_ip");
     let ipv4_packet = Ipv4Packet::new_checked(buffer)?;
-    log::error!(
-        "[snoop_tcp_from_ip]:ipv4 packet header {:?}",
-        ipv4_packet.next_header()
-    );
+    // log::error!(
+    //     "[snoop_tcp_from_ip]:ipv4 packet header {:?}",
+    //     ipv4_packet.next_header()
+    // );
     if ipv4_packet.next_header() == IpProtocol::Tcp {
         let tcp_packet = TcpPacket::new_checked(ipv4_packet.payload())?;
         let src_addr = SocketAddr::new(ipv4_packet.src_addr().0.into(), tcp_packet.src_port());
         let dst_addr = SocketAddr::new(ipv4_packet.dst_addr().0.into(), tcp_packet.dst_port());
         let is_first = tcp_packet.syn() && !tcp_packet.ack();
-        log::error!("[snoop_tcp_from_ip] is first:{}", is_first);
+        // log::error!("[snoop_tcp_from_ip] is first:{}", is_first);
         if is_first {
             // create a socket for the first incoming TCP packet, as the later accept() returns.
-            log::error!(
-                "[snoop_tcp_from_ip]:src_addr :{:?},dst_addr:{:?}",
-                src_addr,
-                dst_addr
-            );
+            // log::error!(
+            //     "[snoop_tcp_from_ip]:src_addr :{:?},dst_addr:{:?}",
+            //     src_addr,
+            //     dst_addr
+            // );
             LISTEN_TABLE.push_incoming_packet(
                 from_sockaddr_to_ipendpoint(dst_addr),
                 from_sockaddr_to_ipendpoint(src_addr),

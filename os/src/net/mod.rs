@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-03-30 16:26:05
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-15 16:38:19
+ * @LastEditTime: 2025-06-16 15:29:27
  * @FilePath: /RocketOS_netperfright/os/src/net/mod.rs
  * @Description: net mod for interface wrapper,socketset
  *
@@ -129,17 +129,15 @@ pub fn init(net_device: Option<VirtioNetDevice<32, HalImpl, MmioTransport>>) {
     //     // LOOPBACK_DEV.init_once(Mutex::new(local_device));
     // }
 }
+#[cfg(target_arch="loongarch64")]
 pub fn init_la<T: Transport + 'static>(net_device: Option<VirtioNetDevice<32, HalImpl, T>>) {
     //初始化网卡
     //需要添加这个trace 否则会panic在uninit lazyinit
     log::trace!("[init_la]");
-    log::trace!("[init_la]");
-    log::trace!("[init_la]");
-    log::trace!("[init_la]");
     SOCKET_SET.init_once(SocketSetWrapper::new());
     log::trace!("[init_la]");
     if let Some(dev) = net_device {
-        log::error!("[init_net]:begin init virtionetdevice");
+        println!("[init_net]:begin init virtionetdevice");
         let ether_addr = dev.mac_address();
         let eth0 = InterfaceWrapper::new(
             "eth0",
@@ -170,6 +168,7 @@ pub fn init_la<T: Transport + 'static>(net_device: Option<VirtioNetDevice<32, Ha
                 .push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8))
                 .unwrap();
         });
+        log::trace!("[init_la]");
         LOOPBACK.init_once(Mutex::new(iface));
         LOOPBACK_DEV.init_once(Mutex::new(device));
     }
@@ -276,13 +275,11 @@ impl<'a> SocketSetWrapper<'a> {
         // if LISTEN_TABLE.isipv4_ipv6(5555);
         // if LISTEN_TABLE.is_local(5555) {
         // yield_current_task();s
-
         let b = LOOPBACK.lock().poll(
             SmolInstant::from_micros_const((get_time() / 1000) as i64),
             LOOPBACK_DEV.lock().deref_mut(),
             &mut self.0.lock(),
         );
-        // log::error!("[poll_interfaces]:LoopbackDev may readiness {}",b);
     }
 
     pub fn bind_check(&self, addr: IpAddress, port: u16) -> Result<usize, Errno> {

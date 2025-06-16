@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-02 23:04:54
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-15 11:44:46
+ * @LastEditTime: 2025-06-16 16:13:48
  * @FilePath: /RocketOS_netperfright/os/src/syscall/net.rs
  * @Description: net syscall
  *
@@ -626,11 +626,7 @@ pub fn syscall_recvfrom(
     let mut kernel_buf = vec![0u8; len];
     match socket.recv_from(&mut kernel_buf) {
         Ok((size, _addr)) => {
-            if size == 0 {
-                return Err(Errno::EINTR);
-            }
             copy_to_user(buf, kernel_buf.as_ptr(), len)?;
-            log::error!("[syscall_recvfrom]:recv buf len {}", size);
             return Ok(size);
         }
         Err(e) => Err(e),

@@ -4,7 +4,7 @@ use core::{ops::{Deref, DerefMut}, pin};
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-03-31 22:34:08
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-15 12:01:31
+ * @LastEditTime: 2025-06-16 16:18:11
  * @FilePath: /RocketOS_netperfright/os/src/net/listentable.rs
  * @Description: listentable file
  * 
@@ -115,7 +115,7 @@ impl ListenTable {
             if current_task().tid()==entry.clone().unwrap().task_id||current_task().exe_path().contains("netserver") ||current_task().exe_path().contains("netperf"){
                 return Ok(0);
             }
-            println!("[listen_table_listen] Err(Errno::EADDRINUSE) task path is {:?}",current_task().exe_path());
+            // println!("[listen_table_listen] Err(Errno::EADDRINUSE) task path is {:?}",current_task().exe_path());
             // #[cfg(target_arch="riscv64")]
             return Err(Errno::EADDRINUSE);
         }
@@ -158,9 +158,9 @@ impl ListenTable {
     //这个函数根据输入的参数port查看对应的entry的handle vec,由底层smoltcp完成数据链路层和物理层的连接，并改变状态，如果状态合理，需要
     //得到对应的local_addr,remote_addr
     pub fn accept(&self, port: u16) -> Result<(SocketHandle, (IpEndpoint, IpEndpoint)),Errno> {
-        log::error!("[ListenTable_accept]:accept port is {:?}",port);
+        // log::error!("[ListenTable_accept]:accept port is {:?}",port);
         if let Some(entry) = self.table[port as usize].lock().deref_mut() {
-            log::error!("[ListenTable_accept]:entry listenendpoint {:?}",entry.listen_endpoint);
+            // log::error!("[ListenTable_accept]:entry listenendpoint {:?}",entry.listen_endpoint);
             let syn_queue: &mut VecDeque<SocketHandle> = &mut entry.syn_queue;
             let idx = syn_queue
                 .iter()
@@ -191,6 +191,7 @@ impl ListenTable {
     /// sockets:SOCKET_SET
     pub fn push_incoming_packet(&self,dst:IpEndpoint,src:IpEndpoint,sockets:&mut SocketSet) {
         log::error!("[push_incoming_packet]dst addr:{:?},src_packet{:?}",dst,src);
+        
         if let Some(entry) = self.table[dst.port as usize].lock().deref_mut() {
             if !entry.can_accept(dst.addr) {
                 // not listening on this address
@@ -224,6 +225,7 @@ impl ListenTable {
                 entry.syn_queue.push_back(handle);
             }
         }
+
     }
 }
 fn is_connected(handle: SocketHandle) -> bool {

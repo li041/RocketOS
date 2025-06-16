@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-02 12:09:33
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-15 11:04:45
+ * @LastEditTime: 2025-06-16 14:13:19
  * @FilePath: /RocketOS_netperfright/os/src/net/udp.rs
  * @Description: udp socket
  * 
@@ -175,7 +175,6 @@ use super::SOCKET_SET;
         log::error!("[udp_recv_from]begin recv");
         let mut binding = vec![0;1528];
         let kernel_buf=binding.as_mut_slice();
-
         self.recv_impl(|socket| match socket.recv_slice(kernel_buf) {
             Ok((len, meta)) => {
                 // log::error!("[udp_recv_from]recv buf {:?}",buf);

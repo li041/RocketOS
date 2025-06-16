@@ -1164,9 +1164,9 @@ pub fn sys_pselect6(
     drop(task);
     let mut set=0;
     loop {
-        log::trace!("[sys_pselect6]:loop");
-        //这里必须要yield否则会死机           
-        yield_current_task();
+        // log::trace!("[sys_pselect6]:loop");
+        // //这里必须要yield否则会死机           
+        // yield_current_task();
         set= 0;
         if readfditer.fdset.valid() {
             for fd in 0..readfditer.fds.len() {
@@ -1244,6 +1244,7 @@ pub fn sys_pselect6(
         drop(task);
         log::trace!("[loop]");
         yield_current_task();
+        log::trace!("[sys_pselect6]:loop");
     }
     if set>0 {
         return Ok(set);

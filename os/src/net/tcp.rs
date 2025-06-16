@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-03-30 16:26:09
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-15 16:34:18
+ * @LastEditTime: 2025-06-16 16:14:37
  * @FilePath: /RocketOS_netperfright/os/src/net/tcp.rs
  * @Description: tcp file 
  * 
@@ -160,6 +160,7 @@ impl TcpSocket {
     //listening应该readable,writealbe均是false
     fn poll_listening(&self)->PollState {
         // poll_interfaces();
+        log::trace!("[poll_listening]");
         let port=unsafe { self.loacl_addr.get().read().port };
         let mut readable=LISTEN_TABLE.can_accept(port);
         log::error!("[poll_listening]:readable is {:?}",readable);
@@ -171,6 +172,7 @@ impl TcpSocket {
     fn block_on<F,T>(&self,mut f:F)->Result<T,Errno>
     where F:FnMut()->Result<T,Errno>
     {
+        
         if self.is_block() {
             //如果不是阻塞，则立刻返回
             f()
@@ -178,22 +180,18 @@ impl TcpSocket {
         else {
             loop {
                 // yield_current_task();
+                // log::trace!("[block_on]");
                 poll_interfaces();
+                //log::trace!("[block_on]");
                 // println!("----");
                 match f() {
                     //如果返回err呢，阻塞应该循环直到返回ok,这里应该执行其他线程
                     Ok(res)=>return Ok(res),
-                    // 不应该阻塞所有err，todo创建error分类？
-                    //todo,后续改进，这里暂时先这样
                     Err(res)=>{
                         if res==Errno::EAGAIN {
-                            // let task=current_task();
-                            // let tid=task.tid();
-                            // log::error!("[block_on] the current task is {:?}",tid);
-                            // drop(task);
-                            // log::trace!("[tcp_block_on]");
+                            log::trace!("[block_on]");
                             yield_current_task();
-                            // log::trace!("[tcp_block_on]");
+                            log::trace!("[block_on]");
                         }
                         else {
                             return Err(res);
@@ -276,6 +274,7 @@ impl TcpSocket {
             });
             let bound_endpoint=self.bound_endpoint();
             let remote_ipendpoint=from_sockaddr_to_ipendpoint(remote_addr);
+            // log::trace!("[tcpconnect]");
             log::error!("[TcpSocket:connect]:connect from {:?} to {:?}",bound_endpoint,remote_ipendpoint);
             if bound_endpoint.port==remote_ipendpoint.port {
                 return Err(Errno::ECONNREFUSED);
@@ -300,7 +299,7 @@ impl TcpSocket {
             //     //如果没有错误这里remote_addr应该是remote_endpoint,local_addr:bound_endpoint
             //     Ok::<(IpEndpoint, IpEndpoint), Errno>((socket.local_endpoint().unwrap(),socket.remote_endpoint().unwrap()))
             // }).unwrap();
-            log::trace!("[tcp_connect]");
+            // log::trace!("[tcp_connect]");
             let (local_endpoint, remote_endpoint) =
                 SOCKET_SET.with_socket_mut::<_, tcp::Socket, Result<(IpEndpoint, IpEndpoint), Errno>>(handle, |socket| {
                     socket
@@ -321,16 +320,19 @@ impl TcpSocket {
             Ok(())
         })?;
         //等待server返回synack
+        // log::trace!("[tcp_connect]");
         yield_current_task();
+        // log::trace!("[tcp_connect]");
         if false {
             //非阻塞等待
             Err(Errno::EAGAIN)
         }
         else {
             self.block_on(||{
+                // log::trace!("[tcp_connect]");
                 //这里阻塞的轮询访问对于socket的i砸smoltcp中的状态，除了synsend之外均是说明connected,如果是synackrecived或者
                 //connected则说明连接建立，可以传输数据了
-                log::error!("[Tcpsocket_connect]:still in block on connect");
+                // log::error!("[Tcpsocket_connect]:still in block on connect");
                 let PollState{readable,writeable}=self.poll_connect();
                 if !writeable {
                     // let _ = self.connect(remote_addr);
@@ -499,17 +501,17 @@ impl TcpSocket {
     }
 
     pub fn close(&self) {
+        log::error!("[Tcp_close] tcp close");
         let handle=match unsafe { self.handle.get().read() }{
             Some(h) => h,
             None => return,
         };
         log::error!("[Tcp_close] close socket local_addr is {:?},remote addr is {:?}",self.local_addr().unwrap(),self.remote_addr().unwrap());
-        SOCKET_SET.poll_interfaces();
         SOCKET_SET.with_socket_mut::<_,tcp::Socket,_>(handle, |socket|{
             socket.close();
             log::error!("[Tcp_close] state is {:?}",socket.state());
         });
-        // SOCKET_SET.poll_interfaces();
+        SOCKET_SET.poll_interfaces();
     }
 
 
@@ -524,9 +526,10 @@ impl TcpSocket {
         let handle=unsafe { self.handle.get().read().unwrap() };
         let mut times=0;
         self.block_on(||{
-
+            log::trace!("[tcp_recv]");
             // log::error!("[]")
             SOCKET_SET.with_socket_mut::<_,tcp::Socket,_>(handle,|socket|{
+                // log::trace!("[tcp_recv]");
                 log::error!("[Tcp recv] recv queue len is{:?}",socket.recv_queue());
                 log::error!("[Tcp recv] socket state is {:?}",socket.state());
                 if times>10 {
@@ -535,6 +538,7 @@ impl TcpSocket {
                 }
                 times+=1;
                 if socket.recv_queue()>0 {
+                    // log::trace!("[tcp_recv]");
                     let len=socket.recv_slice(buf).map_err(|e|{
                         match e {
                             RecvError::Finished=>{
@@ -558,9 +562,9 @@ impl TcpSocket {
                     socket.close();
                     Ok(0)
                 }
-                else if socket.recv_queue()==0{
-                    Ok(0)
-                }
+                // else if socket.recv_queue()==0{
+                //     Ok(0)
+                // }
                 else{
                     Err(Errno::EAGAIN)
                 }
@@ -611,6 +615,7 @@ impl TcpSocket {
 
     pub fn send(&self,buf:&[u8])->Result<usize,Errno> {
         log::error!("[Tcp_socket]:begin send");
+        log::trace!("[send]");
         if self.is_connecting() {
             return Err(Errno::EAGAIN);
         }
@@ -620,6 +625,7 @@ impl TcpSocket {
         }
         let handle=unsafe { self.handle.get().read().unwrap() };
         self.block_on(||{
+            log::trace!("[send]");
             SOCKET_SET.with_socket_mut::<_,tcp::Socket,_>(handle, |socket|{
                 if !socket.is_active() || !socket.may_send() {
                     // closed by remote
@@ -651,7 +657,9 @@ impl TcpSocket {
         // log::error!("[Tcp_socket]:poll state is {:?}",self.get_state());
         // log::error!("[Tcp_socket]:poll socket addr is {:?}",self.local_addr().unwrap());
         match self.get_state() {
-            STATE_LISTENING=>self.poll_listening(),
+            STATE_LISTENING=>{
+                self.poll_listening()
+            },
             STATE_CONNECTING=>self.poll_connect(),
             STATE_CONNECTED=>self.poll_stream(isread),
             _=>{
