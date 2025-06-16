@@ -51,6 +51,8 @@ all:
 	mount disk-la.img mnt
 	cp -r ./custom-la/* mnt
 	umount mnt
+pack: 
+	tar -cJvf disks.tar.xz disk.img disk-la.img
 
 pre2024:
 	$(MAKE) init_img_2024 IMG=pre2024 ARCH=$(ARCH)
