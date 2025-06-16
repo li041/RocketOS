@@ -97,7 +97,7 @@ impl<'a> Ext4DirContentRO<'a> {
                 &self.content[rec_len_total..rec_len_total + rec_len as usize],
             )
             .unwrap();
-            let dentry_name = String::from_utf8(dentry.name[..].to_vec()).unwrap();
+            let dentry_name = String::from_utf8_lossy(&dentry.name[..dentry.name_len as usize]);
             if dentry_name == name {
                 return Some(dentry);
             }
