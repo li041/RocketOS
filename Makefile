@@ -18,9 +18,7 @@ all :
 	@cd ./img && tar -xf disks.tar.xz -C ..
 	@cd ./user && make build ARCH=riscv64 MODE=release
 	@cd ./os && make build ARCH=riscv64 MODE=release 
-	@cd ./user && make build ARCH=loongarch64 MODE=release
-	@cd ./os && make build ARCH=loongarch64 MODE=release
-	@cp ./os/target/riscv64gc-unknown-none-elf/release/os.bin ./kernel-rv && cp ./os/target/loongarch64-unknown-none/release/os ./kernel-la
+	@cp ./os/target/riscv64gc-unknown-none-elf/release/os.bin ./kernel-rv 
 	
 run-riscv:
 	qemu-system-riscv64 \
