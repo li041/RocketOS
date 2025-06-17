@@ -16,10 +16,10 @@ impl TimeSpec {
     pub fn new_machine_time() -> Self {
         log::trace!("new machine time");
         // new a time spec with machine time
-        let current_time = get_time_ms();
+        let current_time = get_time_us();
         Self {
-            sec: current_time / 1000,
-            nsec: (current_time % 1000) * 1000000,
+            sec: current_time / 1000000,
+            nsec: (current_time % 1000000) * 1000,
         }
     }
     pub fn new_wall_time() -> Self {

@@ -52,8 +52,7 @@ all:
 	cp -r ./custom-la/* mnt
 	umount mnt
 pack: 
-	mv disk.img disk-rv.img
-	tar -cJvf disks.tar.xz disk-rv.img disk-la.img
+	tar -cJvf disks.tar.xz disk.img disk-la.img
 unpack:
 	tar -xf disks.tar.xz -C ..
 pre2024:
