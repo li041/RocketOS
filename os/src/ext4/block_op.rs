@@ -326,14 +326,14 @@ impl<'a> Ext4DirContentWE<'a> {
                 &self.content[rec_len_total..rec_len_total + rec_len as usize],
             )
             .expect("DirEntry::try_from failed");
-            log::error!(
-                "[Ext4DirContentWE::delete_entry] check dentry at offset {}: {:?}",
-                rec_len_total,
-                dentry
-            );
+            // log::error!(
+            //     "[Ext4DirContentWE::delete_entry] check dentry at offset {}: {:?}",
+            //     rec_len_total,
+            //     dentry
+            // );
             let dentry_name = String::from_utf8(dentry.name[..].to_vec()).unwrap();
             if dentry_name == name {
-                assert!(
+                debug_assert!(
                     dentry.inode_num == inode_num,
                     "[Ext4DirContentWE::delete_entry] name match, but inode_num mismatch: expected {}, found {}",
                     inode_num,

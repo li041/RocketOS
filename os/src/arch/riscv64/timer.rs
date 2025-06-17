@@ -76,6 +76,14 @@ pub fn get_time_ms() -> usize {
     get_time() / (CLOCK_FREQ / MSEC_PER_SEC)
 }
 
+pub fn get_time_us() -> usize {
+    get_time() / (CLOCK_FREQ / 1_000_000)
+}
+
+pub fn get_time_ns() -> usize {
+    get_time() * (1_000_000_000 / CLOCK_FREQ)
+}
+
 pub fn set_next_trigger() {
     set_timer(get_time() + CLOCK_FREQ / TICKS_PER_SEC);
 }

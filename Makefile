@@ -18,7 +18,9 @@ all :
 	@cd ./img && tar -xf disks.tar.xz -C ..
 	@cd ./user && make build ARCH=riscv64 MODE=release
 	@cd ./os && make build ARCH=riscv64 MODE=release 
-	@cp ./os/target/riscv64gc-unknown-none-elf/release/os.bin ./kernel-rv 
+	@cd ./user && make build ARCH=loongarch64 MODE=release
+	@cd ./os && make build ARCH=loongarch64 MODE=release
+	@cp ./os/target/riscv64gc-unknown-none-elf/release/os.bin ./kernel-rv && cp ./os/target/loongarch64-unknown-none/release/os ./kernel-la
 	
 run-riscv:
 	qemu-system-riscv64 \
@@ -31,7 +33,7 @@ run-riscv:
 		-drive file=./img/sdcard.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 		-device virtio-net-device,netdev=net -netdev user,id=net,hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555 \
-		-drive file=disk.img,if=none,format=raw,id=x1 \
+		-drive file=disk-rv.img,if=none,format=raw,id=x1 \
 		-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
 
 run-loongarch:

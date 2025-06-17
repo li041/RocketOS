@@ -525,7 +525,7 @@ impl Socket {
         //匹配对应的算法，绑定到对应的算法上，这里只要保证内核存在socket,后续通过fd加下面这个函数即可访问对应的加密算法
         Ok(0)
     }
-    pub fn listen(&self)->SyscallRet {
+    pub fn listen(&self) -> SyscallRet {
         //监听只对tcp有用，udp不需要建立连接
         if self.socket_type != SocketType::SOCK_STREAM
             && self.socket_type != SocketType::SOCK_SEQPACKET
@@ -847,7 +847,6 @@ impl Socket {
                     file.pread(flag.as_mut_slice(), 128)?;
                     log::error!("[socket recv_from] flag is {:?}", flag);
                     if flag[0] == 0 {
-                
                         yield_current_task();
                         continue;
                     }
@@ -1353,9 +1352,9 @@ impl FileOp for Socket {
             let s_path = core::str::from_utf8(path.as_slice()).unwrap();
             if s_path.contains("/etc") || s_path.contains("/var/run/nscd/socket") {
                 let passwd_blob = PasswdEntry::passwd_lookup(self, buf.len())?;
-                log::error!("[socket_read]: passwd blob len is {:?}", passwd_blob.len());
+                // log::error!("[socket_read]: passwd blob len is {:?}", passwd_blob.len());
                 if buf.len() < passwd_blob.len() {
-                    log::error!("[socket_read]: buf is too small,buf len is {:?}", buf.len());
+                    // log::error!("[socket_read]: buf is too small,buf len is {:?}", buf.len());
                     return Err(Errno::ENOMEM);
                 }
                 // 2) 把 blob 里的字节一次性 copy 进用户给的 buf
