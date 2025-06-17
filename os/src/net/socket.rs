@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-03 16:40:04
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-15 12:04:33
+ * @LastEditTime: 2025-06-17 23:21:05
  * @FilePath: /RocketOS_netperfright/os/src/net/socket.rs
  * @Description: socket file
  *
@@ -29,7 +29,7 @@ use crate::{
         udp::get_ephemeral_port,
         unix::PasswdEntry,
     },
-    task::{current_task, yield_current_task},
+    task::{current_task, wakeup, yield_current_task, Tid},
     timer::TimeSpec,
 };
 use alloc::{string::String, sync::Arc, vec::Vec};
@@ -154,6 +154,7 @@ pub struct Socket {
     //unix发送的send内容，往往用于passwd,group的euid,
     //这里如果sendfd,recvdfd为none则只需要这里读取passwd或者group中内容
     pub socket_nscdrequest: Mutex<Option<NscdRequest>>,
+    // waiter:Mutex<Vec<Tid>>,
 }
 
 unsafe impl Send for Socket {}
@@ -236,6 +237,16 @@ impl Socket {
     fn set_congestion(&self, congestion: String) {
         *self.congestion.lock() = congestion;
     }
+    // fn add_waiter(&self,waiter: Tid) {
+    //     log::error!("[socket_add_write_waiter] add tid {:?} to write",waiter);
+    //     let mut wait: MutexGuard<'_, Vec<usize>>=self.waiter.lock();
+    //     wait.push(waiter);
+    // }
+    // fn get_waiter(&self)->Tid {
+    //     let mut wait=self.waiter.lock();
+    //     wait.pop().unwrap_or(0)
+    // }
+    
     pub fn set_pend_send(&self, buf: &[u8]) {
         // 锁住 mutex，得到 &mut Option<Vec<u8>>
         let mut guard = self.pend_send.lock();
@@ -337,6 +348,7 @@ impl Socket {
             socket_peer_file_unix: Mutex::new(None),
             socket_ucred: Mutex::new(None),
             socket_peer_ucred: Mutex::new(None),
+            // waiter:Mutex::new(Vec::new()),
         }
     }
     pub fn set_nonblocking(&self, block: bool) {
@@ -585,6 +597,9 @@ impl Socket {
                             socket_peer_file_unix: Mutex::new(None),
                             socket_ucred: Mutex::new(None),
                             socket_peer_ucred: Mutex::new(None),
+                            //todo,是复制还是新建立
+                            // waiter:Mutex::new(Vec::new()),
+
                         },
                         from_ipendpoint_to_socketaddr(remote_addr),
                     ))
@@ -633,6 +648,8 @@ impl Socket {
             socket_peer_file_unix: Mutex::new(None),
             socket_ucred: Mutex::new(None),
             socket_peer_ucred: Mutex::new(None),
+            //todo是复制还是新建立
+            // waiter:Mutex::new(Vec::new()),
         })
     }
     pub fn accept_unix(&self) -> Result<Self, Errno> {
@@ -708,6 +725,8 @@ impl Socket {
             //todo
             socket_ucred: Mutex::new(self.socket_ucred.lock().clone()),
             socket_peer_ucred: Mutex::new(self.socket_peer_ucred.lock().clone()),
+            //todo
+            // waiter:Mutex::new(Vec::new()),
         })
     }
 
@@ -750,6 +769,11 @@ impl Socket {
     }
 
     pub fn send(&self, buf: &[u8], addr: SocketAddr) -> Result<usize, Errno> {
+        // let write_waiter=self.get_waiter();
+        // if write_waiter!=0 {
+        //     log::error!("[socket_send]wake up {:?}",write_waiter);
+        //     wakeup(write_waiter);
+        // }
         match &self.inner {
             SocketInner::Tcp(tcp_socket) => {
                 if tcp_socket.is_closed() {
@@ -770,6 +794,10 @@ impl Socket {
     }
     pub fn unix_send(&self, buf: &[u8]) -> Result<usize, Errno> {
         //构建内核nscd请求
+        // let write_waiter=self.get_waiter();
+        // if write_waiter!=0 {
+        //     wakeup(write_waiter);
+        // }
         let mut tmp4 = [0u8; 4];
         tmp4.copy_from_slice(&buf[0..4]);
         let raw_req = u32::from_le_bytes(tmp4);
@@ -806,6 +834,10 @@ impl Socket {
         Ok(buf.len())
     }
     pub fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr), Errno> {
+        // let read_waiter=self.get_waiter();
+        // if read_waiter!=0 {
+        //     wakeup(read_waiter);
+        // }
         //这里暂时保留unix本地回环网络的接受，需要pipe?
         if self.domain == Domain::AF_UNIX {
             if self.buffer.is_some() {
@@ -1338,6 +1370,10 @@ impl FileOp for Socket {
             self.domain,
             self.socket_type
         );
+        // let read_waiter=self.get_waiter();
+        // if read_waiter!=0 {
+        //     wakeup(read_waiter);
+        // }
         if self.domain == Domain::AF_UNIX {
             if self.buffer.is_some() {
                 // Todo: 这里不对, 不应该使用r_ready()检查, 同时r_ready()返回false时也不应该返回Ok(0)
@@ -1472,6 +1508,10 @@ impl FileOp for Socket {
 
     fn write<'a>(&'a self, buf: &'a [u8]) -> SyscallRet {
         log::error!("[socket_write]:begin send socket");
+        // let write_waiter=self.get_waiter();
+        // if write_waiter!=0 {
+        //     wakeup(write_waiter);
+        // }
         if self.domain == Domain::AF_UNIX {
             if self.buffer.is_some() {
                 // Todo: 这里不对, 不应该使用w_ready()检查, 同时w_ready()返回false时也不应该返回Ok(0)
@@ -2147,3 +2187,12 @@ pub struct MessageHeaderRaw {
     pub control_len: u32, // control 缓冲区的大小
     pub flags: i32,       // recvmsg/sendmsg 时的 flags
 }
+// impl Drop for Socket{
+//     fn drop(&mut self) {
+//         let mut waiter=self.waiter.lock();
+//         for i in 0..waiter.len(){
+//             let wait=waiter.pop().unwrap_or(0);
+//             wakeup(wait);
+//         }
+//     }
+// }

@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-03-30 16:26:05
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-15 16:38:19
+ * @LastEditTime: 2025-06-17 18:19:34
  * @FilePath: /RocketOS_netperfright/os/src/net/mod.rs
  * @Description: net mod for interface wrapper,socketset
  *
@@ -235,8 +235,8 @@ impl<'a> SocketSetWrapper<'a> {
             let tcp_send_buffer = SocketBuffer::new(vec![0; TCP_TX_BUF_LEN_IPERF]);
             smoltcp::socket::tcp::Socket::new(tcp_recv_buffer, tcp_send_buffer)
         } else if task.exe_path().contains("netperf") {
-            let tcp_recv_buffer = SocketBuffer::new(vec![0; 4 * 1024]);
-            let tcp_send_buffer = SocketBuffer::new(vec![0; 4 * 1024]);
+            let tcp_recv_buffer = SocketBuffer::new(vec![0; 2 * 1024]);
+            let tcp_send_buffer = SocketBuffer::new(vec![0; 2 * 1024]);
             smoltcp::socket::tcp::Socket::new(tcp_recv_buffer, tcp_send_buffer)
         } else {
             let tcp_recv_buffer = SocketBuffer::new(vec![0; TCP_RX_BUF_LEN_IPERF]);
@@ -265,11 +265,9 @@ impl<'a> SocketSetWrapper<'a> {
         log::error!("[socketsetwrapper_add]:socket handle is {:?}",handle);
         handle
     }
-    // pub fn bind_check() {
-
-    // }
     pub fn remove(&self, handle: SocketHandle) {
-        self.0.lock().remove(handle);
+        let socket=self.0.lock().remove(handle);
+        drop(socket);
     }
     //todo 判断到底是哪个网卡poll
     pub fn poll_interfaces(&self) {
