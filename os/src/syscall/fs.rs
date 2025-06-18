@@ -2205,11 +2205,25 @@ pub fn sys_msync(addr: usize, len: usize, flags: i32) -> SyscallRet {
                     log::error!("[sys_msync] Memory area is locked, cannot sync");
                     return Err(Errno::EBUSY);
                 }
-                area.pages
-                    .range_mut(overlap_range.get_start()..overlap_range.get_end())
-                    .for_each(|(_vpn, page)| {
-                        page.sync();
-                    });
+                if flags & MS_INVALIDATE != 0 {
+                    // 如果是MS_INVALIDATE, 则需要清除页面内容
+                    log::info!("[sys_msync] Invalidating memory area: {:?}", area);
+                    // 如果完全覆盖了, 则直接清除页面内容
+                    if sync_range.is_contain(&area.vpn_range) {
+                        log::info!("[sys_msync] Invalidating entire memory area: {:?}", area);
+                        // 清除整个内存区域的页面内容
+                        area.pages.clear();
+                    } else {
+                        // 只清除覆盖范围内的页面内容(后半部分)
+                        area.pages.retain(|vpn, _page| vpn < &start_vpn);
+                    }
+                } else {
+                    area.pages
+                        .range_mut(overlap_range.get_start()..overlap_range.get_end())
+                        .for_each(|(_vpn, page)| {
+                            page.sync();
+                        });
+                }
                 covered_vpn = overlap_range.get_start();
             } else {
                 // 如果内存区域与同步范围没有交集, 则可以退出

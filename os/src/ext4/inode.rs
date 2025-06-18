@@ -887,7 +887,7 @@ impl Ext4Inode {
                 self.address_space.new_inline_page_cache(
                     page_index,
                     self.self_weak.clone(),
-                    &self.inner.write().inode_on_disk.block[offset..offset + copy_len],
+                    &self.inner.write().inode_on_disk.block[..],
                 );
                 // 复制inline data到buf中
                 buf[..copy_len].copy_from_slice(
@@ -993,7 +993,7 @@ impl Ext4Inode {
                 let page = self.address_space.new_inline_page_cache(
                     page_index,
                     self.self_weak.clone(),
-                    &self.inner.write().inode_on_disk.block[..inline_data_len],
+                    &self.inner.write().inode_on_disk.block[..],
                 );
                 return Some(page);
             }

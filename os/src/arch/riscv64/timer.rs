@@ -1,6 +1,6 @@
 use crate::{
     arch::{boards::qemu::CLOCK_FREQ, sbi::set_timer},
-    timer::{StatxTimeStamp, TimeSpec, TimeVal, MSEC_PER_SEC, TICKS_PER_SEC},
+    timer::{StatxTimeStamp, TimeSpec, TimeVal, MSEC_PER_SEC, TICKS_PER_SEC, USEC_PER_SEC},
 };
 use riscv::register::time;
 
@@ -9,6 +9,7 @@ use super::config::KERNEL_BASE;
 impl TimeSpec {
     pub fn new_machine_time() -> Self {
         // new a time spec with machine time
+        let current_time = get_time_us();
         let current_time = get_time_us();
         Self {
             sec: current_time / 1000000,

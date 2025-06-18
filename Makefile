@@ -66,6 +66,10 @@ run:
 	@cd ./user && make build ARCH=$(ARCH) MODE=$(MODE)
 	@cd ./os && make run ARCH=$(ARCH) MODE=$(MODE)
 
+bench: 
+	@cd ./user && make build ARCH=$(ARCH) MODE=$(MODE)
+	@cd ./os && make bench ARCH=$(ARCH) MODE=$(MODE)
+
 gdbserver: 
 	@cd ./user && make build
 	@cd ./os && make gdbserver
