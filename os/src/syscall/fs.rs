@@ -2212,6 +2212,7 @@ pub fn sys_msync(addr: usize, len: usize, flags: i32) -> SyscallRet {
                     if sync_range.is_contain(&area.vpn_range) {
                         log::info!("[sys_msync] Invalidating entire memory area: {:?}", area);
                         // 清除整个内存区域的页面内容
+                        // Todo: 还应该清除backend_file的页缓存
                         area.pages.clear();
                     } else {
                         // 只清除覆盖范围内的页面内容(后半部分)

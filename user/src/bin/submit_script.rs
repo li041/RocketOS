@@ -18,10 +18,10 @@ static TEST_LIST: &[&str] = &[
     // "ltp_testcode.sh\0",
 ];
 
-// static OTHER_TEST_LIST: &[&str] = &[
-//     "lmbench_testcode.sh\0",
-//     // "ltp_testcode.sh\0",
-// ];
+static OTHER_TEST_LIST: &[&str] = &[
+    "lmbench_testcode.sh\0",
+    //     // "ltp_testcode.sh\0",
+];
 
 mod shell;
 use user_lib::{chdir, execve, fork, shutdown, waitpid};
@@ -50,27 +50,27 @@ pub fn main() -> i32 {
             let _wait_pid = waitpid(pid, &mut exit_code);
         }
     }
-    // chdir("/musl\0");
-    // for app_name in OTHER_TEST_LIST {
-    //     let pid = fork();
-    //     if pid == 0 {
-    //         execve(&app_name, &[&app_name, "\0"], &["\0"]);
-    //         panic!("unreachable!");
-    //     } else {
-    //         let mut exit_code = 0;
-    //         let _wait_pid = waitpid(pid, &mut exit_code);
-    //     }
-    // }
-    // chdir("/glibc\0");
-    // for app_name in OTHER_TEST_LIST {
-    //     let pid = fork();
-    //     if pid == 0 {
-    //         execve(&app_name, &[&app_name, "\0"], &["\0"]);
-    //         panic!("unreachable!");
-    //     } else {
-    //         let mut exit_code = 0;
-    //         let _wait_pid = waitpid(pid, &mut exit_code);
-    //     }
-    // }
+    chdir("/musl\0");
+    for app_name in OTHER_TEST_LIST {
+        let pid = fork();
+        if pid == 0 {
+            execve(&app_name, &[&app_name, "\0"], &["\0"]);
+            panic!("unreachable!");
+        } else {
+            let mut exit_code = 0;
+            let _wait_pid = waitpid(pid, &mut exit_code);
+        }
+    }
+    chdir("/glibc\0");
+    for app_name in OTHER_TEST_LIST {
+        let pid = fork();
+        if pid == 0 {
+            execve(&app_name, &[&app_name, "\0"], &["\0"]);
+            panic!("unreachable!");
+        } else {
+            let mut exit_code = 0;
+            let _wait_pid = waitpid(pid, &mut exit_code);
+        }
+    }
     shutdown();
 }

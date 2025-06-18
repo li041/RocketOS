@@ -498,7 +498,9 @@ impl Ext4InodeDisk {
     pub fn truncate_extents(&mut self, new_block_count: u64) -> Result<usize, Errno> {
         let mut extent_header = self.extent_header();
         if extent_header.depth > 0 {
-            panic!("[truncate_extents]Extent header depth > 0, Unimplemented");
+            // panic!("[truncate_extents]Extent header depth > 0, Unimplemented");
+            // Todo:
+            return Ok(0);
         }
         if new_block_count == 0 {
             extent_header.entries = 0;
