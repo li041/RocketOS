@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-03 16:40:04
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-17 23:21:05
+ * @LastEditTime: 2025-06-19 20:55:08
  * @FilePath: /RocketOS_netperfright/os/src/net/socket.rs
  * @Description: socket file
  *
@@ -1386,9 +1386,9 @@ impl FileOp for Socket {
             let s_path = core::str::from_utf8(path.as_slice()).unwrap();
             if s_path.contains("/etc") || s_path.contains("/var/run/nscd/socket") {
                 let passwd_blob = PasswdEntry::passwd_lookup(self, buf.len())?;
-                log::error!("[socket_read]: passwd blob len is {:?}", passwd_blob.len());
+                // log::error!("[socket_read]: passwd blob len is {:?}", passwd_blob.len());
                 if buf.len() < passwd_blob.len() {
-                    log::error!("[socket_read]: buf is too small,buf len is {:?}", buf.len());
+                    // log::error!("[socket_read]: buf is too small,buf len is {:?}", buf.len());
                     return Err(Errno::ENOMEM);
                 }
                 // 2) 把 blob 里的字节一次性 copy 进用户给的 buf

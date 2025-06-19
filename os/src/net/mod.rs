@@ -235,8 +235,8 @@ impl<'a> SocketSetWrapper<'a> {
             let tcp_send_buffer = SocketBuffer::new(vec![0; TCP_TX_BUF_LEN_IPERF]);
             smoltcp::socket::tcp::Socket::new(tcp_recv_buffer, tcp_send_buffer)
         } else if task.exe_path().contains("netperf") {
-            let tcp_recv_buffer = SocketBuffer::new(vec![0; 2 * 1024]);
-            let tcp_send_buffer = SocketBuffer::new(vec![0; 2 * 1024]);
+            let tcp_recv_buffer = SocketBuffer::new(vec![0; 4 * 1024]);
+            let tcp_send_buffer = SocketBuffer::new(vec![0; 4 * 1024]);
             smoltcp::socket::tcp::Socket::new(tcp_recv_buffer, tcp_send_buffer)
         } else {
             let tcp_recv_buffer = SocketBuffer::new(vec![0; TCP_RX_BUF_LEN_IPERF]);

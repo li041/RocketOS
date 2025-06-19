@@ -32,7 +32,7 @@ impl FdSet {
         }
         log::error!("[Fd_set::from_user] len is {:?}",len);
         let mut kernel_len = core::cmp::min(len, 100);
-        if current_task().exe_path().contains("netperf") ||current_task().exe_path().contains("netserver") {
+        if current_task().exe_path().contains("netperf") {
             kernel_len = core::cmp::min(len, 15);
         }
         // 创建内核缓冲区并拷贝数据

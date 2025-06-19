@@ -1125,6 +1125,7 @@ pub fn sys_pselect6(
 ) -> SyscallRet {
     // log::error!("[sys_pselecct6] nfds: {}, readfds: {:?}, writefds: {:?}, exceptfds: {:?}, timeout: {:?}, mask: {}",nfds,readfds,writefds,exceptfds,timeout,mask);
     log::error!("[sys_pselect6]:begin pselect6,nfds {:?},readfds {:?},writefds {:?},exceptfds {:?},timeout {:?},sigmask {:?}",nfds,readfds,writefds,exceptfds,timeout,sigmask);
+    let starttime= get_time_ms();
     let timeout = if timeout.is_null() {
         //timeout为空则是阻塞
         -1
@@ -1140,7 +1141,7 @@ pub fn sys_pselect6(
         if sec_signed < 0 {
             return Err(Errno::EINVAL);
         }
-        (tmo.sec * 1000 + tmo.nsec / 1000) as isize
+        (tmo.sec * 1000 + tmo.nsec / 1000000) as isize
     };
     log::error!("[sys_pselect6] timeout is {:?}",timeout);
     let mut readfditer = match init_fdset(readfds, nfds) {
@@ -1164,6 +1165,7 @@ pub fn sys_pselect6(
     }
     drop(task);
     let mut set = 0;
+    
     loop {
         log::trace!("[sys_pselect6]:loop");
         //这里必须要yield否则会死机
@@ -1197,9 +1199,10 @@ pub fn sys_pselect6(
             log::trace!("[sys_pselect] timeout is 0");
             break;
         } else if timeout > 0 {
-            if get_time_ms()> timeout as usize {
+            if get_time_ms()-starttime> timeout as usize {
                 // 超时了, 返回
                 // println!("[sys_pselect] get_time_ms {:?},timeout {:?}",get_time_ms(),timeout);
+                log::error!("[sys_pselect6]:timeout");
                 log::trace!("[sys_pselect]:timeout");
                 break;
             }

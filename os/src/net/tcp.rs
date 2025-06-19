@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-03-30 16:26:09
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-19 11:11:16
+ * @LastEditTime: 2025-06-19 17:45:14
  * @FilePath: /RocketOS_netperfright/os/src/net/tcp.rs
  * @Description: tcp file 
  * 
@@ -448,11 +448,11 @@ impl TcpSocket {
                 }
                 Err(e) => {
                     if e == (Errno::ECONNRESET){
-                        // self.shutdown();
+                        self.shutdown();
                         Err(Errno::ECONNRESET)
                     }
                     else if e == (Errno::ECONNREFUSED){
-                        // self.shutdown();
+                        self.shutdown();
                         Err(Errno::ECONNREFUSED)
                     }
                     else {
