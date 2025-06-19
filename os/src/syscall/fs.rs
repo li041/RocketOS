@@ -6,7 +6,7 @@ use alloc::string::{String, ToString};
 use virtio_drivers::PAGE_SIZE;
 
 use crate::arch::config::USER_MAX_VA;
-use crate::arch::timer::get_time_ms;
+use crate::arch::timer::{get_time_ms, get_time_us};
 use crate::ext4::dentry;
 use crate::ext4::inode::{S_IFREG, S_ISGID};
 use crate::fs::dentry::{chown, dentry_check_access, LinuxDirent64, F_OK, R_OK, W_OK, X_OK};
@@ -1125,7 +1125,8 @@ pub fn sys_pselect6(
 ) -> SyscallRet {
     // log::error!("[sys_pselecct6] nfds: {}, readfds: {:?}, writefds: {:?}, exceptfds: {:?}, timeout: {:?}, mask: {}",nfds,readfds,writefds,exceptfds,timeout,mask);
     log::error!("[sys_pselect6]:begin pselect6,nfds {:?},readfds {:?},writefds {:?},exceptfds {:?},timeout {:?},sigmask {:?}",nfds,readfds,writefds,exceptfds,timeout,sigmask);
-    let timeout = if timeout.is_null() {
+    let start_time = get_time_us();
+    let timeout_us = if timeout.is_null() {
         // timeout为负数对于poll来说是无限等待
         -1
     } else {
@@ -1140,7 +1141,7 @@ pub fn sys_pselect6(
         if sec_signed < 0 {
             return Err(Errno::EINVAL);
         }
-        (tmo.sec * 1000 + tmo.nsec / 1000000) as isize
+        (tmo.sec * 1000000 + tmo.nsec / 1000) as isize
     };
     let mut readfditer = match init_fdset(readfds, nfds) {
         Ok(rfditer) => rfditer,
@@ -1225,12 +1226,12 @@ pub fn sys_pselect6(
             }
             break;
         }
-        if timeout == 0 {
+        if timeout_us == 0 {
             // timeout为0表示立即返回, 即使没有fd准备好
             log::trace!("[sys_pselect] timeout is 0");
             break;
-        } else if timeout > 0 {
-            if get_time_ms() / 1000000 > timeout as usize {
+        } else if timeout_us > 0 {
+            if get_time_us() - start_time > timeout_us as usize {
                 // 超时了, 返回
                 // println!("[sys_pselect] get_time_ms {:?},timeout {:?}",get_time_ms(),timeout);
                 log::trace!("[sys_pselect]:timeout");
