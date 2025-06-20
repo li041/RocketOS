@@ -331,7 +331,7 @@ impl<'a> Ext4DirContentWE<'a> {
             //     rec_len_total,
             //     dentry
             // );
-            let dentry_name = String::from_utf8(dentry.name[..].to_vec()).unwrap();
+            let dentry_name = String::from_utf8_lossy(&dentry.name[..dentry.name_len as usize]);
             if dentry_name == name {
                 debug_assert!(
                     dentry.inode_num == inode_num,
@@ -385,7 +385,7 @@ impl<'a> Ext4DirContentWE<'a> {
             )
             .map_err(|_| "DirEntry::try_from failed")?;
 
-            let dentry_name = String::from_utf8(dentry.name[..].to_vec()).unwrap();
+            let dentry_name = String::from_utf8_lossy(&dentry.name[..dentry.name_len as usize]);
             if dentry_name == old_name {
                 dentry.inode_num = new_inode_num;
                 dentry.file_type = new_file_type;
