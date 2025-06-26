@@ -1,15 +1,15 @@
 #import "../components/prelude.typ": *
 
 = 网络系统
-#h(2em)RocketOS的网络系统是一个基于_smoltcp_协议栈的网络实现，旨在提供高效灵活的网络通信能力。它支持AF_INET，AF_INET6，AF_UNIX和AF_ALG等多种地址族的套接字，能够处理IPv4和IPv6两类IP地址，同时支持TCP和UDP两种传输协议并通过了iperf，netperf，ltp相关测试。RocketOS通过统一的接口管理所有网络设备和套接字，并支持riscv64和loongarch64下的glibc和musl共计4种架构。
+ RocketOS的网络系统是一个基于_smoltcp_协议栈的网络实现，旨在提供高效灵活的网络通信能力。它支持AF_INET，AF_INET6，AF_UNIX和AF_ALG等多种地址族的套接字，能够处理IPv4和IPv6两类IP地址，同时支持TCP和UDP两种传输协议并通过了iperf，netperf，ltp相关测试。RocketOS通过统一的接口管理所有网络设备和套接字，并支持riscv64和loongarch64下的glibc和musl共计4种架构。
 
 == 网络系统概述
-#h(2em)RocketOS的网络工作模式如下:
+ RocketOS的网络工作模式如下:
 #figure(
   align(center,   image("../image/net/net.png",   width: 100%)),  
   caption: [net工作模式],  
 )
-#h(2em)RocketOS的网络系统包括以下几个主要组件:
+ RocketOS的网络系统包括以下几个主要组件:
 - *NetDevice*: 网络设备接口，定义了网络设备的基本操作和特性.根据抽象`NetDevice`接口可以实现不同网络设备，包括虚拟本地设备`VirtioNetDevice`和虚拟本地回环设备`LoopbackDev`。
 
 - *InterfaceWrapper*: RocketOS的网卡抽象，系统使用`InterfaceWrapper`来封装_smoltcp_的`Interface`接口和`NetDeviceWrapper`，提供对网卡设备的统一管理和操作。可以支持创建多个硬件网卡在os中的映射。 在RocketOS中，同linux类似分别管理着_lo_回环设备和_eth33_虚拟网卡设备。其中_eth33_虚拟网卡设备通过`qemu`的`10.0.2.15`映射为主机的`10.0.2.2`接口。
@@ -20,7 +20,7 @@
 
 == 网络Device设备--物理层
 === Loongarch64与riscv64适配
-#h(2em)RocketOS的网络系统支持loongarch64和riscv64两种架构，通过分析设备树来映射到内核空间。在riscv64中，网络设备通过MMIO映射到设备地址空间，而在loongarch64中，网络设备通过PCI总线进行挂载。因此，在RocketOS中，选择根据不同架构*条件编译*分析设备树。
+ RocketOS的网络系统支持loongarch64和riscv64两种架构，通过分析设备树来映射到内核空间。在riscv64中，网络设备通过MMIO映射到设备地址空间，而在loongarch64中，网络设备通过PCI总线进行挂载。因此，在RocketOS中，选择根据不同架构*条件编译*分析设备树。
 ```make
 #riscv qemu网络配置
 -device virtio-net-device,  netdev=net -netdev user,  id=net,  hostfwd=tcp::5555-:5555,  hostfwd=udp::5555-:5555\
@@ -124,7 +124,7 @@
     )
 
 === NetDevice封装
-#h(2em)RocketOS的网络设备封装了`smoltcp`的`Device`接口，并通过`NetDeviceWrapper`实现了对底层设备的抽象。这使得RocketOS能够支持多种类型的网络设备，包括虚拟网卡和回环设备。
+ RocketOS的网络设备封装了`smoltcp`的`Device`接口，并通过`NetDeviceWrapper`实现了对底层设备的抽象。这使得RocketOS能够支持多种类型的网络设备，包括虚拟网卡和回环设备。
 #code-figure(
     ```rs
     // 网络设备管理,  实现sync和send特性,  以便在多线程环境中安全使用
@@ -157,7 +157,7 @@
     label-name: "NetDevice trait",  
 )
 
-#h(2em)同时为了使`NetDevice`定义符合`smoltcp`的`Device`接口需求，定义了`NetDeviceWrapper`结构体，通过`RefCell`包装 `Box<dyn NetDevice>`，允许内部的可变访问，以便在实现smoltcp中的`Device` trait时提供对底层设备的操作。
+ 同时为了使`NetDevice`定义符合`smoltcp`的`Device`接口需求，定义了`NetDeviceWrapper`结构体，通过`RefCell`包装 `Box<dyn NetDevice>`，允许内部的可变访问，以便在实现smoltcp中的`Device` trait时提供对底层设备的操作。
 
 #code-figure(
     ```rs
@@ -170,7 +170,7 @@
 )
 
 
-#h(2em)RocketOS的网络设备还支持在有限的空间中动态对Device发送接收的报文空间进行分配和回收，系统通过定义`NetBufPool`统一管理Device的报文空间并实现`alloc`和`dealloc`方法。Device在`recycle_recv_buffer`和`recycle_send_buffer`便可通过调用`alloc`和`dealloc`方法来分配和回收报文空间，从而提高网络通信的效率并降低内存碎片化。
+ RocketOS的网络设备还支持在有限的空间中动态对Device发送接收的报文空间进行分配和回收，系统通过定义`NetBufPool`统一管理Device的报文空间并实现`alloc`和`dealloc`方法。Device在`recycle_recv_buffer`和`recycle_send_buffer`便可通过调用`alloc`和`dealloc`方法来分配和回收报文空间，从而提高网络通信的效率并降低内存碎片化。
 #code-figure(
     ```rs
     /// A pool of [`NetBuf`]s to speed up buffer allocation.
@@ -218,9 +218,9 @@
 )
 
 
-#h(2em)系统还为具体的网络设备实现了_smoltcp_的`Device` trait，以便在使用_smoltcp_的`poll`轮询机制来嗅探网络事件时，通过使用`Device` trait方法调用`NetDeviceWrapper`的相关方法来处理网络数据包的发送和接收。
+ 系统还为具体的网络设备实现了_smoltcp_的`Device` trait，以便在使用_smoltcp_的`poll`轮询机制来嗅探网络事件时，通过使用`Device` trait方法调用`NetDeviceWrapper`的相关方法来处理网络数据包的发送和接收。
 
-#h(2em)如下代码所示，_smoltcp_通过*环形令牌网络实现对网络设备的轮询*，这里实现的`Device trait`便是在轮询中对令牌进行分配和管理，并在`NetDeviceWrapper`获得令牌时，通过`NetDevice`接口来处理网络数据包的发送和接收。
+ 如下代码所示，_smoltcp_通过*环形令牌网络实现对网络设备的轮询*，这里实现的`Device trait`便是在轮询中对令牌进行分配和管理，并在`NetDeviceWrapper`获得令牌时，通过`NetDevice`接口来处理网络数据包的发送和接收。
 #algorithm-figure(
   pseudocode(
     no-number,  
@@ -278,9 +278,9 @@
 )
 
 == Interface设备--数据链路层
-#h(2em)RocketOS的网络接口设备通过`InterfaceWrapper`封装了_smoltcp_的`Interface`和`NetDeviceWrapper`,  提供对网卡设备的统一管理和操作。
+ RocketOS的网络接口设备通过`InterfaceWrapper`封装了_smoltcp_的`Interface`和`NetDeviceWrapper`,  提供对网卡设备的统一管理和操作。
 
-#h(2em)通过封装_smoltcp_的`Interface`设备，系统可以通过_smoltcp_的poll轮询机制来嗅探网络事件;通过封装`NetDeviceWrapper`设备，系统可以在出现网络事件时，通过`NetDevice`接口来处理网络数据包的发送和接收。
+ 通过封装_smoltcp_的`Interface`设备，系统可以通过_smoltcp_的poll轮询机制来嗅探网络事件;通过封装`NetDeviceWrapper`设备，系统可以在出现网络事件时，通过`NetDevice`接口来处理网络数据包的发送和接收。
 #code-figure(
     ```rs
     pub struct InterfaceWrapper {
@@ -297,7 +297,7 @@
     label-name: "InterfaceWrapper",  
 )
 
-#h(2em)系统通过`poll_interfaces`方法实现多个网卡设备的轮询，并在轮询过程中借由实现的`Device trait`对存在网络事件的设备进行数据收发。
+ 系统通过`poll_interfaces`方法实现多个网卡设备的轮询，并在轮询过程中借由实现的`Device trait`对存在网络事件的设备进行数据收发。
 #code-figure(
     ```rs
     pub fn poll_interfaces(&self) {
@@ -316,7 +316,7 @@
 )
 == ListenTable监听表--网络层
 
-#h(2em)RocketOS实现通过一个全局的`LISTENTABLE`管理所有正在监听的端口和连接的socket。监听表维护一个端口到对应连接套接字的映射，通过访问`ListenTable`中连接套接字的状态判断是否允许连接。
+ RocketOS实现通过一个全局的`LISTENTABLE`管理所有正在监听的端口和连接的socket。监听表维护一个端口到对应连接套接字的映射，通过访问`ListenTable`中连接套接字的状态判断是否允许连接。
 #code-figure(
     ```rs
     static LISTEN_TABLE: LazyInit<ListenTable> = LazyInit::new();
@@ -339,12 +339,12 @@
 )
 == Socket封装--传输层
 
-#h(2em)RocketOS对于socket实现了3层封装，实现了对AF_UNIX，AF_INET，AF_ALG，AF_INET6套接字的管理，支持tcp，udp协议。实现`FileOp`接口，允许通过文件描述符进行访问和操作。如下图所示为系统socket结构。
+ RocketOS对于socket实现了3层封装，实现了对AF_UNIX，AF_INET，AF_ALG，AF_INET6套接字的管理，支持tcp，udp协议。实现`FileOp`接口，允许通过文件描述符进行访问和操作。如下图所示为系统socket结构。
 #figure(
   align(center,   image("../image/net/socket.png",   width: 45%)),  
   caption: [socket结构图],  
 )
-#h(2em)内核socket定义如下，`Socket`结构体封装了协议类`socketinner`，套接字类型，以及具体的套接字实现。它还包含了一些状态信息，发送和接收缓冲区大小等。其中所有内容均通过原子操作或者Mutex进行保护，以确保在多线程环境下的安全性和一致性。而`socketinner`进一步封装了套接字的具体实现，包括tcp，  udp，unix和alg等类型的套接字。
+ 内核socket定义如下，`Socket`结构体封装了协议类`socketinner`，套接字类型，以及具体的套接字实现。它还包含了一些状态信息，发送和接收缓冲区大小等。其中所有内容均通过原子操作或者Mutex进行保护，以确保在多线程环境下的安全性和一致性。而`socketinner`进一步封装了套接字的具体实现，包括tcp，  udp，unix和alg等类型的套接字。
 #code-figure(
     ```rs
     pub struct Socket {
@@ -370,9 +370,9 @@
     label-name: "InterfaceWrapper",  
 )
 
-#h(2em)套接字通常作为文件描述符使用，因此RocketOS的套接字还实现了`FileOp`接口，允许通过文件描述符进行访问和操作。这使得套接字可以像文件一样进行读写操作，并支持文件描述符的相关系统调用。
+ 套接字通常作为文件描述符使用，因此RocketOS的套接字还实现了`FileOp`接口，允许通过文件描述符进行访问和操作。这使得套接字可以像文件一样进行读写操作，并支持文件描述符的相关系统调用。
 
-#h(2em)RocketOS对于`Socket`的管理遵循*RAII*思想，为`Socket`实现drop trait，当socket shutdown时会通过drop释放对应的资源并从全局的`SocketSetWrapper`中移除对应句柄。
+ RocketOS对于`Socket`的管理遵循*RAII*思想，为`Socket`实现drop trait，当socket shutdown时会通过drop释放对应的资源并从全局的`SocketSetWrapper`中移除对应句柄。
 #code-figure(
     ```rs
     pub fn remove(&self,   handle: SocketHandle) {
@@ -384,4 +384,4 @@
     label-name: "Socket-remove",  
 )
 
-#h(2em)通过上述设计，RocketOS可以做到统一封装多种物理与虚拟网卡（如 Virtio、回环），支持 IPv4/IPv6、TCP/UDP、AF\_UNIX、AF\_ALG 等多种地址族与协议，在 RISC-V64 与 LoongArch64 上高效灵活地管理网卡轮询、端口监听与 Socket 文件操作。
+ 通过上述设计，RocketOS可以做到统一封装多种物理与虚拟网卡（如 Virtio、回环），支持 IPv4/IPv6、TCP/UDP、AF\_UNIX、AF\_ALG 等多种地址族与协议，在 RISC-V64 与 LoongArch64 上高效灵活地管理网卡轮询、端口监听与 Socket 文件操作。
