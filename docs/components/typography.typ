@@ -1,4 +1,4 @@
-/* 
+/*
  * 定义字号, 字体映射表
  * 提供标题排版宏和编号风格宏
  */
@@ -27,7 +27,7 @@
 #let 字体 = (
   宋体: ("Times New Roman", "SimSun"),
   楷体: ("Times New Roman", "KaiTi"),
-  黑体: ("Times New Roman", "Adobe Heiti Std", "SimHei"),
+  黑体: ("Times New Roman", "Microsoft YaHei", "SimHei"),
   代码: ("Consolas", "Courier New", "KaiTi"),
 )
 
