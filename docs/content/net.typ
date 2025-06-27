@@ -6,7 +6,7 @@
 == 网络系统概述
  RocketOS的网络工作模式如下:
 #figure(
-  align(center,   image("../image/net/net.png",   width: 100%)),  
+  align(center,   image("./img/net.png",   width: 100%)),  
   caption: [net工作模式],  
 )
  RocketOS的网络系统包括以下几个主要组件:
@@ -220,7 +220,11 @@
 
  系统还为具体的网络设备实现了_smoltcp_的`Device` trait，以便在使用_smoltcp_的`poll`轮询机制来嗅探网络事件时，通过使用`Device` trait方法调用`NetDeviceWrapper`的相关方法来处理网络数据包的发送和接收。
 
- 如下代码所示，_smoltcp_通过*环形令牌网络实现对网络设备的轮询*，这里实现的`Device trait`便是在轮询中对令牌进行分配和管理，并在`NetDeviceWrapper`获得令牌时，通过`NetDevice`接口来处理网络数据包的发送和接收。
+ 如下代码和图所示，_smoltcp_通过*环形令牌网络实现对网络设备的轮询*，这里实现的`Device trait`便是在轮询中对令牌进行分配和管理，并在`NetDeviceWrapper`获得令牌时，通过`NetDevice`接口来处理网络数据包的发送和接收。
+ #figure(
+  align(center,   image("./img/TokenRing.png",   width: 60%)),  
+  caption: [环形令牌网络],  
+)
 #algorithm-figure(
   pseudocode(
     no-number,  
@@ -339,11 +343,7 @@
 )
 == Socket封装--传输层
 
- RocketOS对于socket实现了3层封装，实现了对AF_UNIX，AF_INET，AF_ALG，AF_INET6套接字的管理，支持tcp，udp协议。实现`FileOp`接口，允许通过文件描述符进行访问和操作。如下图所示为系统socket结构。
-#figure(
-  align(center,   image("../image/net/socket.png",   width: 45%)),  
-  caption: [socket结构图],  
-)
+ RocketOS对于socket实现了3层封装，实现了对AF_UNIX，AF_INET，AF_ALG，AF_INET6套接字的管理，支持tcp，udp协议。实现`FileOp`接口，允许通过文件描述符进行访问和操作。
  内核socket定义如下，`Socket`结构体封装了协议类`socketinner`，套接字类型，以及具体的套接字实现。它还包含了一些状态信息，发送和接收缓冲区大小等。其中所有内容均通过原子操作或者Mutex进行保护，以确保在多线程环境下的安全性和一致性。而`socketinner`进一步封装了套接字的具体实现，包括tcp，  udp，unix和alg等类型的套接字。
 #code-figure(
     ```rs
