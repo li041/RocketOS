@@ -2,7 +2,7 @@
  * @Author: Peter/peterluck2021@163.com
  * @Date: 2025-04-02 23:04:54
  * @LastEditors: Peter/peterluck2021@163.com
- * @LastEditTime: 2025-06-26 15:55:16
+ * @LastEditTime: 2025-06-26 22:56:42
  * @FilePath: /RocketOS_netperfright/os/src/syscall/net.rs
  * @Description: net syscall
  *
@@ -140,7 +140,8 @@ pub fn syscall_bind(socketfd: usize, socketaddr: usize, socketlen: usize) -> Sys
     )?;
     let family_bytes = [kernel_addr_from_user[0], kernel_addr_from_user[1]];
     log::error!("[syscall_bind] family bytes is {:?}", family_bytes);
-    let family = Domain::try_from(u16::from_ne_bytes(family_bytes) as usize).unwrap();
+    let family = Domain::try_from(u16::from_ne_bytes(family_bytes) as usize)
+    .map_err(|_| Errno::EAFNOSUPPORT)?;
     log::error!("[syscall_bind] parsed sa_family = {:?}", family);
     if socket.domain != family && socket.domain != Domain::AF_RDS {
         return Err(Errno::EAFNOSUPPORT);
