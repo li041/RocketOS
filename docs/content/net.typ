@@ -6,7 +6,7 @@
 == 网络系统概述
  RocketOS的网络工作模式如下:
 #figure(
-  align(center,   image("./img/net.png",   width: 100%)),  
+  align(center,   image("./img/net.png",   width: 80%)),  
   caption: [net工作模式],  
 )
  RocketOS的网络系统包括以下几个主要组件:
@@ -124,7 +124,11 @@
     )
 
 === NetDevice封装
- RocketOS的网络设备封装了`smoltcp`的`Device`接口，并通过`NetDeviceWrapper`实现了对底层设备的抽象。这使得RocketOS能够支持多种类型的网络设备，包括虚拟网卡和回环设备。
+ RocketOS的网络设备封装了`smoltcp`的`Device`接口，并通过`NetDeviceWrapper`实现了对底层设备的抽象。这使得RocketOS能够支持多种类型的网络设备，包括虚拟网卡和回环设备,逻辑如下
+#figure(
+  align(center,   image("./img/netdevice.png",   width: 100%)),  
+  caption: [Netdeivce],  
+)
 #code-figure(
     ```rs
     // 网络设备管理,  实现sync和send特性,  以便在多线程环境中安全使用
@@ -319,8 +323,12 @@
     label-name: "poll_interfaces函数",  
 )
 == ListenTable监听表--网络层
-
  RocketOS实现通过一个全局的`LISTENTABLE`管理所有正在监听的端口和连接的socket。监听表维护一个端口到对应连接套接字的映射，通过访问`ListenTable`中连接套接字的状态判断是否允许连接。
+ 全局`LISTENTABLE`逻辑如下：
+ #figure(
+  align(center,   image("./img/listentable.png",   width: 100%)),  
+  caption: [listentable],  
+)
 #code-figure(
     ```rs
     static LISTEN_TABLE: LazyInit<ListenTable> = LazyInit::new();
