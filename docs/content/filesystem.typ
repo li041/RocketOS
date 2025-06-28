@@ -59,7 +59,7 @@
   supplement: [图],
 )
 
- 如上图所示，RocketOS 的 VFS 层以 Inode、Dentry、File 为核心抽象，通过 MountTree 管理挂载关系，形成统一的文件命名空间。该设计借鉴了 Linux VFS 架构，同时引入 Rust 类型系统以强化安全性与并发管理，支持多个后端文件系统的透明接入。
+#h(2em)如上图所示，RocketOS 的 VFS 层以 Inode、Dentry、File 为核心抽象，通过 MountTree 管理挂载关系，形成统一的文件命名空间。该设计借鉴了 Linux VFS 架构，同时引入 Rust 类型系统以强化安全性与并发管理，支持多个后端文件系统的透明接入。
 
 
 == Inode与页缓存
@@ -139,7 +139,7 @@
   label-name: "Ext4Inode",
 )
 
- RocketOS 中的 `Inode` 抽象设计充分借鉴了 Linux 虚拟文件系统（VFS）架构，同时结合 Rust 的语言特性与现代内核设计理念，形成了清晰、模块化、并具备良好扩展性的实现框架。通过 `InodeOp` trait 明确定义 inode 的操作语义，使具体文件系统（如 Ext4）可以在不侵入 VFS 核心的前提下实现定制逻辑，从而支持多种后端并存。通过 `address_space` 与 `block_device` 字段，`Inode` 成为连接缓存管理层与块存储层的重要桥梁，便于实现回写策略、直接 IO、预读优化等机制。
+ #h(2em)RocketOS 中的 `Inode` 抽象设计充分借鉴了 Linux 虚拟文件系统（VFS）架构，同时结合 Rust 的语言特性与现代内核设计理念，形成了清晰、模块化、并具备良好扩展性的实现框架。通过 `InodeOp` trait 明确定义 inode 的操作语义，使具体文件系统（如 Ext4）可以在不侵入 VFS 核心的前提下实现定制逻辑，从而支持多种后端并存。通过 `address_space` 与 `block_device` 字段，`Inode` 成为连接缓存管理层与块存储层的重要桥梁，便于实现回写策略、直接 IO、预读优化等机制。
 
 == Dentry与目录树
  Dentry（目录项）是文件系统中用于表示目录结构的核心数据结构。它将文件名与对应的 Inode 关联起来，形成一个树形结构。Dentry 的主要作用是加速文件路径解析和目录项查找。
@@ -162,7 +162,7 @@
   label-name: "Dentry",
 )
 
- 在路径解析过程中，文件系统需要将用户输入的路径字符串（如 /usr/bin/bash）逐级解析为实际的 inode 对象。这一解析过程中的每一级目录组件（如 usr、bin）都会对应一个 Dentry 实例，从而构成路径节点链表（Dentry chain）。该链条从根目录向下逐级查找，通过每级 Dentry 提供的父子关联关系，结合 children 完成快速定位。
+ #(2em)在路径解析过程中，文件系统需要将用户输入的路径字符串（如 /usr/bin/bash）逐级解析为实际的 inode 对象。这一解析过程中的每一级目录组件（如 usr、bin）都会对应一个 Dentry 实例，从而构成路径节点链表（Dentry chain）。该链条从根目录向下逐级查找，通过每级 Dentry 提供的父子关联关系，结合 children 完成快速定位。
 
  为提高路径查找的性能，RocketOS 在 VFS 层引入 DentryCache。该缓存以路径字符串为键，存储解析过的 Dentry 对象，并通过引用计数与负目录项机制（用于标识不存在的路径），标识路径查找失败的目录项，用于避免重复错误查找，提升路径解析性能。在绝大多数文件访问场景中，路径查找都可在 DENTRY_CACHE 命中，大幅减少 inode 查找开销。
 
@@ -174,7 +174,7 @@
     - chown：实现 POSIX 要求的 chown 逻辑，支持 root 修改权限与 setuid/setgid 位逻辑处理。
 ]
 
- RocketOS 的 Dentry 模块是其 VFS 层的关键组成，旨在高效管理路径命名空间、提升路径查找性能并实现访问控制。其设计充分借鉴了 Linux VFS 架构，在保持功能通用性的同时融合 Rust 的类型安全与并发管理优势，达到了良好的系统可维护性、扩展性与运行效率。通过引入 DentryCache、负目录项、引用计数与类型标志机制，RocketOS 的路径解析框架具备现代操作系统所需的高性能路径解析能力。
+ #h(2em)RocketOS 的 Dentry 模块是其 VFS 层的关键组成，旨在高效管理路径命名空间、提升路径查找性能并实现访问控制。其设计充分借鉴了 Linux VFS 架构，在保持功能通用性的同时融合 Rust 的类型安全与并发管理优势，达到了良好的系统可维护性、扩展性与运行效率。通过引入 DentryCache、负目录项、引用计数与类型标志机制，RocketOS 的路径解析框架具备现代操作系统所需的高性能路径解析能力。
 
 == FileOp与文件
 
