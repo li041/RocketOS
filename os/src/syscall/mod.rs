@@ -55,13 +55,7 @@ use crate::{
     fs::{
         kstat::{Stat, Statx},
         uapi::{IoVec, OpenHow, PollFd, RLimit, StatFs},
-    },
-    futex::robust_list::{sys_get_robust_list, sys_set_robust_list},
-    mm::shm::ShmId,
-    signal::{SigInfo, SigSet},
-    task::rusage::RUsage,
-    time::KernelTimex,
-    timer::{ITimerVal, TimeSpec},
+    }, futex::robust_list::{sys_get_robust_list, sys_set_robust_list}, mm::shm::ShmId, signal::{SigInfo, SigSet}, syscall::task::{sys_capget, sys_capset, sys_execveat}, task::rusage::RUsage, time::KernelTimex, timer::{ITimerVal, TimeSpec}
 };
 pub use fs::FcntlOp;
 pub use fs::{AT_SYMLINK_NOFOLLOW, NAME_MAX};
@@ -126,6 +120,8 @@ const SYSCALL_FSYNC: usize = 82;
 const SYSCALL_SYNC_FILE_RANGE: usize = 84;
 const SYSCALL_UTIMENSAT: usize = 88;
 const SYSCALL_ACCT: usize = 89;
+const SYSCALL_CAPGET: usize = 90;
+const SYSCALL_CAPSET: usize = 91;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GROUP: usize = 94;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
@@ -220,6 +216,7 @@ const SYSCALL_WAIT4: usize = 260;
 const SYSCALL_PRLIMIT: usize = 261;
 const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_GETRANDOM: usize = 278;
+const SYSCALL_EXECVEAT: usize = 281;
 const SYSCALL_MEMBARRIER: usize = 283;
 const SYSCALL_COPY_FILE_RANGE: usize = 285;
 const SYSCALL_STATX: usize = 291;
@@ -324,6 +321,8 @@ pub fn syscall(
             sys_utimensat(a0 as i32, a1 as *const u8, a2 as *const TimeSpec, a3 as i32)
         }
         SYSCALL_ACCT => sys_acct(a0 as *const u8),
+        SYSCALL_CAPGET => sys_capget(a0, a1),
+        SYSCALL_CAPSET => sys_capset(a0, a1),
         SYSCALL_EXIT => sys_exit(a0 as i32),
         SYSCALL_EXIT_GROUP => sys_exit_group(a0 as i32),
         SYSCALL_SET_TID_ADDRESS => sys_set_tid_address(a0),
@@ -376,7 +375,6 @@ pub fn syscall(
         SYSCALL_GITPID => sys_getpid(),
         SYSCALL_GETPPID => sys_getppid(),
         SYSCALL_GETUID => sys_getuid(),
-
         SYSCALL_GETEUID => sys_geteuid(),
         SYSCALL_GETGID => sys_getgid(),
         SYSCALL_GETEGID => sys_getegid(),
@@ -417,6 +415,7 @@ pub fn syscall(
             a4 as i32,
         ),
         SYSCALL_GETRANDOM => Ok(0),
+        SYSCALL_EXECVEAT => sys_execveat(a0 as i32, a1 as *mut u8, a2 as *const usize, a3 as *const usize, a4 as i32),
         SYSCALL_MEMBARRIER => sys_membarrier(a0 as i32, a1 as i32, a2 as u32),
         SYSCALL_COPY_FILE_RANGE => sys_copy_file_range(a0, a1, a2, a3, a4, a5 as i32),
         SYSCALL_STATX => sys_statx(

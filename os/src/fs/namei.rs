@@ -39,7 +39,7 @@ use crate::{
         proc::{
             cpuinfo::CPUINFO,
             fd::{record_fd, FD_FILE},
-            pid::{record_target_pid, TARGERT_PID},
+            pid::{record_target_pid, SELF_STAT, TARGERT_PID},
             pid_max::PIDMAX,
             smaps::SMAPS,
             tainted::TAINTED,
@@ -544,6 +544,11 @@ fn create_file_from_dentry(
             let status: Arc<dyn FileOp> = STATUS.get().unwrap().clone();
             status.seek(0, super::uapi::Whence::SeekSet).unwrap();
             return Ok(status);
+        }
+        if dentry.absolute_path == "/proc/self/stat" {
+            let stat: Arc<dyn FileOp> = SELF_STAT.get().unwrap().clone();
+            stat.seek(0, super::uapi::Whence::SeekSet).unwrap();
+            return Ok(stat);
         }
         if dentry.absolute_path == "/proc/pid/stat" {
             let pid_stat: Arc<dyn FileOp> = PID_STAT.get().unwrap().clone();

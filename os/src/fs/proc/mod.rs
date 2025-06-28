@@ -406,6 +406,32 @@ pub fn init_procfs(root_path: Arc<Path>) {
             panic!("create {} failed: {:?}", status_path, e);
         }
     }
+    // /proc/self/stat
+    let stat_path = "/proc/self/stat";
+    let stat_mode = S_IFREG as u16 | 0o444;
+    nd = Nameidata {
+        path_segments: parse_path_uncheck(stat_path),
+        dentry: root_path.dentry.clone(),
+        mnt: root_path.mnt.clone(),
+        depth: 0,
+    };
+    match filename_create(&mut nd, 0) {
+        Ok(dentry) => {
+            let parent_inode = nd.dentry.get_inode();
+            parent_inode.create(dentry.clone(), stat_mode);
+            // 现在dentry的inode指向/proc/self/stat
+            let stat_file = pid::SelfStatFile::new(
+                Path::new(root_path.mnt.clone(), dentry.clone()),
+                dentry.get_inode().clone(),
+                OpenFlags::empty(),
+            );
+            pid::SELF_STAT.call_once(|| stat_file.clone());
+            insert_core_dentry(dentry.clone());
+        }
+        Err(e) => {
+            panic!("create {} failed: {:?}", stat_path, e);
+        }
+    }
 
     // /proc/pid
     let pid_path = "/proc/pid";
