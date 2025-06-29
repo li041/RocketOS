@@ -51,7 +51,11 @@
 
 #pagebreak()
 
-== VFS模块设计
+== VFS模块设计 <arch_vfs>
+
+ RocketOS 的 VFS 模块设计借鉴了 Linux VFS 架构，采用 Rust 的类型系统与 trait 机制实现了高效、安全的文件系统抽象。VFS 层的核心组件包括 Inode、Dentry、File、MountTree 等，它们通过 trait 定义了统一的操作接口，支持多种后端文件系统的透明接入。
+
+ VFS 层的设计目标是提供一个统一的文件命名空间，支持跨文件系统的路径解析、权限控制与文件访问，同时确保高性能与安全性。RocketOS 的 VFS 设计充分利用 Rust 的所有权与生命周期管理特性，避免了传统 C/C++ 文件系统实现中的许多常见错误，如内存泄漏、数据竞争等。
 
 #figure(
   image("img/VFS.png", width: 60%),

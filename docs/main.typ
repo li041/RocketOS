@@ -20,6 +20,7 @@
 #show: main
 
 #include "content/general.typ"
+#include "content/arch.typ"
 #include "content/memory.typ"
 #include "content/thread.typ"
 #include "content/filesystem.typ"
