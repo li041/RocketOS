@@ -1,6 +1,6 @@
 #import "../components/prelude.typ": *
 
-= 网络系统
+= 网络系统模块
  网络系统基于 smoltcp 协议栈实现，旨在构建高效灵活的网络通信能力。本系统支持 AF_INET、AF_INET6、AF_UNIX 及 AF_ALG 等多种地址族的套接字操作，具备 IPv4 与 IPv6 双协议栈处理能力，并完整实现了 TCP 与 UDP 传输协议。其功能性已通过 iperf、netperf 及 LTP 相关测试验证。网络系统通过统一的抽象接口管理所有网络设备与套接字资源。
 
 == 网络系统概述
@@ -176,9 +176,6 @@ label-name: "网络配置",
  #h(2em)系统通过 `NetBufPool` 实现网络缓冲区的统一管理，采用预分配策略优化动态内存分配效率。设备在 `recycle_recv_buffer` 与 `recycle_send_buffer` 操作中调用 `alloc` 与 `dealloc` 方法，显著提升网络通信效率并降低内存碎片化概率。
 #code-figure(
     ```rs
-    /// A pool of [`NetBuf`]s to speed up buffer allocation.
-    ///
-    /// It divides a large memory into several equal parts for each buffer.
     pub struct NetBufPool {
         //可以存储的netbuf个数
         capacity: usize,  

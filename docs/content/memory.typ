@@ -58,14 +58,10 @@ label-name: "页帧分配器结构",
 #code-figure(
   ```rs
   pub struct MemorySet {
-      /// 堆顶
-      pub brk: usize,
-      /// 堆底
-      pub heap_bottom: usize,
-      /// mmap的起始地址, 用于用户态mmap
-      pub mmap_start: usize,
-      /// 页表
-      pub page_table: PageTable,
+      pub brk: usize,      /// 堆顶
+      pub heap_bottom: usize,      /// 堆底
+      pub mmap_start: usize,      /// mmap的起始地址, 用于用户态mmap
+      pub page_table: PageTable,      /// 页表
       /// Elf, Stack, Heap, 匿名私有映射, 匿名共享映射, 文件私有/共享映射
       /// BTreeMap key是vpn_range起始虚拟地址
       pub areas: BTreeMap<VirtPageNum, MapArea>,
